@@ -1,0 +1,120 @@
+import 'dotenv/config';
+
+import { z } from 'zod';
+
+const envSchema = z.object({
+  DATABASE_URL: z.string().url(),
+  REDIS_URL: z.string(),
+  JWT_SECRET: z.string().min(10).optional(),
+  JWT_ACCESS_SECRET: z.string().min(10).optional(),
+  JWT_EXPIRES_IN: z.string().default('7d'),
+  PORT: z.coerce.number().default(3000),
+  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  USE_LIVE_DATA: z.coerce.boolean().default(false),
+  PUBLIC_STREAMING_ENABLED: z.coerce.boolean().default(true),
+  PRIVATE_STREAMING_ENABLED: z.coerce.boolean().default(true),
+  USD_KRW_FALLBACK: z.coerce.number().default(1350),
+  FX_BASE_URL: z.string().url().default('https://api.exchangerate.host'),
+  FX_STALE_THRESHOLD_MS: z.coerce.number().default(300000),
+  EXCHANGE_RATE_API_KEY: z.string().optional(),
+  EXCHANGE_CREDENTIAL_ENCRYPTION_KEY: z.string().optional(),
+  EXCHANGE_CONNECTION_ENCRYPTION_KEY: z.string().optional(),
+  UPBIT_REST_BASE_URL: z.string().url().optional(),
+  UPBIT_PUBLIC_WS_URL: z.string().url().optional(),
+  UPBIT_PRIVATE_WS_URL: z.string().url().optional(),
+  BITHUMB_REST_BASE_URL: z.string().url().optional(),
+  BITHUMB_PUBLIC_WS_URL: z.string().url().optional(),
+  BITHUMB_PRIVATE_WS_URL: z.string().url().optional(),
+  COINONE_REST_BASE_URL: z.string().url().optional(),
+  COINONE_PUBLIC_WS_URL: z.string().url().optional(),
+  COINONE_PRIVATE_WS_URL: z.string().url().optional(),
+  KORBIT_REST_BASE_URL: z.string().url().optional(),
+  KORBIT_PUBLIC_WS_URL: z.string().url().optional(),
+  KORBIT_PRIVATE_WS_URL: z.string().url().optional(),
+  BINANCE_REST_BASE_URL: z.string().url().optional(),
+  BINANCE_PUBLIC_WS_URL: z.string().url().optional(),
+  BINANCE_PRIVATE_WS_URL: z.string().url().optional(),
+});
+
+export interface Env {
+  DATABASE_URL: string;
+  REDIS_URL: string;
+  JWT_SECRET: string;
+  JWT_EXPIRES_IN: string;
+  PORT: number;
+  NODE_ENV: 'development' | 'production' | 'test';
+  USE_LIVE_DATA: boolean;
+  PUBLIC_STREAMING_ENABLED: boolean;
+  PRIVATE_STREAMING_ENABLED: boolean;
+  USD_KRW_FALLBACK: number;
+  FX_BASE_URL: string;
+  FX_STALE_THRESHOLD_MS: number;
+  EXCHANGE_RATE_API_KEY?: string;
+  EXCHANGE_CREDENTIAL_ENCRYPTION_KEY?: string;
+  EXCHANGE_CONNECTION_ENCRYPTION_KEY?: string;
+  UPBIT_REST_BASE_URL?: string;
+  UPBIT_PUBLIC_WS_URL?: string;
+  UPBIT_PRIVATE_WS_URL?: string;
+  BITHUMB_REST_BASE_URL?: string;
+  BITHUMB_PUBLIC_WS_URL?: string;
+  BITHUMB_PRIVATE_WS_URL?: string;
+  COINONE_REST_BASE_URL?: string;
+  COINONE_PUBLIC_WS_URL?: string;
+  COINONE_PRIVATE_WS_URL?: string;
+  KORBIT_REST_BASE_URL?: string;
+  KORBIT_PUBLIC_WS_URL?: string;
+  KORBIT_PRIVATE_WS_URL?: string;
+  BINANCE_REST_BASE_URL?: string;
+  BINANCE_PUBLIC_WS_URL?: string;
+  BINANCE_PRIVATE_WS_URL?: string;
+}
+
+function loadEnv(): Env {
+  const parsed = envSchema.safeParse(process.env);
+  if (!parsed.success) {
+    console.error('Invalid environment variables:', parsed.error.flatten().fieldErrors);
+    process.exit(1);
+  }
+
+  const jwtSecret = parsed.data.JWT_SECRET ?? parsed.data.JWT_ACCESS_SECRET;
+  if (!jwtSecret) {
+    console.error('Invalid environment variables: JWT_SECRET or JWT_ACCESS_SECRET is required');
+    process.exit(1);
+  }
+
+  return {
+    DATABASE_URL: parsed.data.DATABASE_URL,
+    REDIS_URL: parsed.data.REDIS_URL,
+    JWT_SECRET: jwtSecret,
+    JWT_EXPIRES_IN: parsed.data.JWT_EXPIRES_IN,
+    PORT: parsed.data.PORT,
+    NODE_ENV: parsed.data.NODE_ENV,
+    USE_LIVE_DATA: parsed.data.USE_LIVE_DATA,
+    PUBLIC_STREAMING_ENABLED: parsed.data.PUBLIC_STREAMING_ENABLED,
+    PRIVATE_STREAMING_ENABLED: parsed.data.PRIVATE_STREAMING_ENABLED,
+    USD_KRW_FALLBACK: parsed.data.USD_KRW_FALLBACK,
+    FX_BASE_URL: parsed.data.FX_BASE_URL,
+    FX_STALE_THRESHOLD_MS: parsed.data.FX_STALE_THRESHOLD_MS,
+    EXCHANGE_RATE_API_KEY: parsed.data.EXCHANGE_RATE_API_KEY,
+    EXCHANGE_CREDENTIAL_ENCRYPTION_KEY:
+      parsed.data.EXCHANGE_CREDENTIAL_ENCRYPTION_KEY ?? parsed.data.EXCHANGE_CONNECTION_ENCRYPTION_KEY,
+    EXCHANGE_CONNECTION_ENCRYPTION_KEY: parsed.data.EXCHANGE_CONNECTION_ENCRYPTION_KEY,
+    UPBIT_REST_BASE_URL: parsed.data.UPBIT_REST_BASE_URL,
+    UPBIT_PUBLIC_WS_URL: parsed.data.UPBIT_PUBLIC_WS_URL,
+    UPBIT_PRIVATE_WS_URL: parsed.data.UPBIT_PRIVATE_WS_URL,
+    BITHUMB_REST_BASE_URL: parsed.data.BITHUMB_REST_BASE_URL,
+    BITHUMB_PUBLIC_WS_URL: parsed.data.BITHUMB_PUBLIC_WS_URL,
+    BITHUMB_PRIVATE_WS_URL: parsed.data.BITHUMB_PRIVATE_WS_URL,
+    COINONE_REST_BASE_URL: parsed.data.COINONE_REST_BASE_URL,
+    COINONE_PUBLIC_WS_URL: parsed.data.COINONE_PUBLIC_WS_URL,
+    COINONE_PRIVATE_WS_URL: parsed.data.COINONE_PRIVATE_WS_URL,
+    KORBIT_REST_BASE_URL: parsed.data.KORBIT_REST_BASE_URL,
+    KORBIT_PUBLIC_WS_URL: parsed.data.KORBIT_PUBLIC_WS_URL,
+    KORBIT_PRIVATE_WS_URL: parsed.data.KORBIT_PRIVATE_WS_URL,
+    BINANCE_REST_BASE_URL: parsed.data.BINANCE_REST_BASE_URL,
+    BINANCE_PUBLIC_WS_URL: parsed.data.BINANCE_PUBLIC_WS_URL,
+    BINANCE_PRIVATE_WS_URL: parsed.data.BINANCE_PRIVATE_WS_URL,
+  };
+}
+
+export const env = loadEnv();

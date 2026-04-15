@@ -1,0 +1,89 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                  String               @id @default(uuid())
+  email               String               @unique
+  passwordHash        String
+  nickname            String
+  cash                Float                @default(15000000)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  holdings            Holding[]
+  orders              Order[]
+  favorites           Favorite[]
+  exchangeConnections ExchangeConnection[]
+}
+
+model Coin {
+  id        String  @id
+  symbol    String  @unique
+  nameKo    String
+  nameEn    String
+  basePrice Float
+  isActive  Boolean @default(true)
+}
+
+model Holding {
+  id       String @id @default(uuid())
+  userId   String
+  user     User   @relation(fields: [userId], references: [id])
+  coinId   String
+  quantity Float
+  avgPrice Float
+
+  @@unique([userId, coinId])
+}
+
+model Order {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  coinId    String
+  exchange  String
+  side      String
+  type      String
+  price     Float
+  quantity  Float
+  total     Float
+  status    String   @default("filled")
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model Favorite {
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+  coinId String
+
+  @@unique([userId, coinId])
+}
+
+model ExchangeConnection {
+  id                  String    @id @default(uuid())
+  userId              String
+  user                User      @relation(fields: [userId], references: [id])
+  exchange            String
+  label               String?
+  apiKeyEncrypted     String
+  secretKeyEncrypted  String
+  passphraseEncrypted String?
+  validationStatus    String    @default("placeholder")
+  validationMode      String    @default("placeholder")
+  validationMessage   String?
+  canUsePrivateApi    Boolean   @default(false)
+  lastValidatedAt     DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@unique([userId, exchange])
+  @@index([userId, exchange])
+}
