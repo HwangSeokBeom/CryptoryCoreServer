@@ -41,6 +41,7 @@ export interface JwtHmacSignerParams {
   secretKey: string;
   query?: Record<string, unknown>;
   body?: Record<string, unknown>;
+  includeTimestamp?: boolean;
 }
 
 export class JwtHmacSigner {
@@ -50,6 +51,9 @@ export class JwtHmacSigner {
       access_key: params.accessKey,
       nonce: randomUUID(),
     };
+    if (params.includeTimestamp) {
+      payload.timestamp = Date.now();
+    }
 
     if (queryString) {
       payload.query_hash = createHash('sha512').update(queryString, 'utf8').digest('hex');

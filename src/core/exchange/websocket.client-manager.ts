@@ -5,7 +5,11 @@ import { delay } from './retry-policy';
 export interface WebSocketClientDefinition {
   name: string;
   url: string;
+  headers?: Record<string, string>;
   heartbeatIntervalMs?: number;
+  buildConnectionRequest?:
+    | (() => Promise<{ url?: string; headers?: Record<string, string> } | void>)
+    | (() => { url?: string; headers?: Record<string, string> } | void);
   onOpen: (ctx: WebSocketClientManager) => Promise<void> | void;
   onMessage: (raw: WebSocket.RawData, ctx: WebSocketClientManager) => Promise<void> | void;
   onReconnect?: (ctx: WebSocketClientManager) => Promise<void> | void;
@@ -17,8 +21,12 @@ export class WebSocketClientManager {
   private stopped = true;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private hasOpened = false;
+  private activeUrl: string;
 
-  constructor(private readonly definition: WebSocketClientDefinition) {}
+  constructor(private readonly definition: WebSocketClientDefinition) {
+    this.activeUrl = definition.url;
+  }
 
   async start() {
     if (!this.stopped) return;
@@ -47,32 +55,70 @@ export class WebSocketClientManager {
   }
 
   private async connect() {
-    logger.info({ domain: 'exchange-ws', client: this.definition.name, url: this.definition.url }, 'Connecting websocket client');
-    this.socket = new WebSocket(this.definition.url);
+    try {
+      const request = await this.definition.buildConnectionRequest?.();
+      const url = request?.url ?? this.definition.url;
+      const headers = request?.headers ?? this.definition.headers;
+      this.activeUrl = url;
 
-    this.socket.on('open', async () => {
-      this.reconnectAttempts = 0;
-      if (this.definition.heartbeatIntervalMs) {
-        this.startHeartbeat(this.definition.heartbeatIntervalMs);
-      }
+      logger.info({ domain: 'exchange-ws', client: this.definition.name, url }, 'Connecting websocket client');
+      this.socket = new WebSocket(url, { headers });
+      const isReconnect = this.hasOpened;
+
+      this.socket.on('open', () => {
+        void this.handleOpen(isReconnect);
+      });
+
+      this.socket.on('message', (raw) => {
+        void Promise.resolve(this.definition.onMessage(raw, this)).catch((error: unknown) => {
+          logger.warn({ domain: 'exchange-ws', client: this.definition.name, err: error }, 'Websocket message handler failed');
+        });
+      });
+
+      this.socket.on('close', () => {
+        if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+        this.heartbeatTimer = null;
+        this.socket = null;
+        void this.scheduleReconnect();
+      });
+
+      this.socket.on('error', (err) => {
+        logger.warn({ domain: 'exchange-ws', client: this.definition.name, err }, 'Websocket client error');
+      });
+
+      this.socket.on('ping', (data) => {
+        this.socket?.pong(data);
+      });
+    } catch (error) {
+      logger.warn({ domain: 'exchange-ws', client: this.definition.name, url: this.activeUrl, err: error }, 'Websocket connect failed');
+      this.socket = null;
+      await this.scheduleReconnect();
+    }
+  }
+
+  private async handleOpen(isReconnect: boolean) {
+    this.reconnectAttempts = 0;
+    this.hasOpened = true;
+
+    if (this.definition.heartbeatIntervalMs) {
+      this.startHeartbeat(this.definition.heartbeatIntervalMs);
+    }
+
+    try {
       await this.definition.onOpen(this);
-    });
+    } catch (error) {
+      logger.warn({ domain: 'exchange-ws', client: this.definition.name, err: error }, 'Websocket open handler failed');
+      this.socket?.terminate();
+      return;
+    }
 
-    this.socket.on('message', (raw) => {
-      void this.definition.onMessage(raw, this);
-    });
-
-    this.socket.on('close', () => {
-      void this.scheduleReconnect();
-    });
-
-    this.socket.on('error', (err) => {
-      logger.warn({ domain: 'exchange-ws', client: this.definition.name, err }, 'Websocket client error');
-    });
-
-    this.socket.on('ping', (data) => {
-      this.socket?.pong(data);
-    });
+    if (isReconnect && this.definition.onReconnect) {
+      try {
+        await this.definition.onReconnect(this);
+      } catch (error) {
+        logger.warn({ domain: 'exchange-ws', client: this.definition.name, err: error }, 'Websocket reconnect handler failed');
+      }
+    }
   }
 
   private startHeartbeat(intervalMs: number) {
@@ -94,19 +140,17 @@ export class WebSocketClientManager {
       void this.connect();
     }, reconnectDelayMs);
 
-    if (this.definition.onReconnect) {
-      await delay(Math.min(reconnectDelayMs, 1_000));
-      await this.definition.onReconnect(this);
-    }
-
     logger.warn(
       {
         domain: 'exchange-ws',
         client: this.definition.name,
         reconnectAttempts: this.reconnectAttempts,
         reconnectDelayMs,
+        url: this.activeUrl,
       },
       'Scheduling websocket reconnect',
     );
+
+    await delay(Math.min(reconnectDelayMs, 25));
   }
 }

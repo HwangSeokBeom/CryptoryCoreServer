@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { createErrorResponse, createSuccessResponse } from '../../utils/errors';
+import { AppError, createErrorResponse, createSuccessResponse } from '../../utils/errors';
 import { getCandles, getOrderbook, getTickers, getTrades, listMarkets } from './market-data.service';
 import type { ExchangeId } from '../../core/exchange/exchange.types';
 
@@ -17,7 +17,14 @@ export async function marketRoutes(app: FastifyInstance) {
       return reply.status(400).send(createErrorResponse('unsupported exchange'));
     }
 
-    return createSuccessResponse(await listMarkets(parseExchange(exchange) ?? undefined));
+    try {
+      return createSuccessResponse(await listMarkets(parseExchange(exchange) ?? undefined));
+    } catch (error) {
+      if (error instanceof AppError) {
+        return reply.status(error.statusCode).send(createErrorResponse(error.message));
+      }
+      throw error;
+    }
   });
 
   app.get('/tickers', async (request, reply) => {
@@ -26,7 +33,14 @@ export async function marketRoutes(app: FastifyInstance) {
       return reply.status(400).send(createErrorResponse('unsupported exchange'));
     }
 
-    return createSuccessResponse(await getTickers({ exchange: parseExchange(exchange) ?? undefined, symbol }));
+    try {
+      return createSuccessResponse(await getTickers({ exchange: parseExchange(exchange) ?? undefined, symbol }));
+    } catch (error) {
+      if (error instanceof AppError) {
+        return reply.status(error.statusCode).send(createErrorResponse(error.message));
+      }
+      throw error;
+    }
   });
 
   app.get('/orderbook', async (request, reply) => {
@@ -39,7 +53,14 @@ export async function marketRoutes(app: FastifyInstance) {
       return reply.status(400).send(createErrorResponse('unsupported exchange'));
     }
 
-    return createSuccessResponse(await getOrderbook(parsedExchange, symbol));
+    try {
+      return createSuccessResponse(await getOrderbook(parsedExchange, symbol));
+    } catch (error) {
+      if (error instanceof AppError) {
+        return reply.status(error.statusCode).send(createErrorResponse(error.message));
+      }
+      throw error;
+    }
   });
 
   app.get('/trades', async (request, reply) => {
@@ -52,7 +73,14 @@ export async function marketRoutes(app: FastifyInstance) {
       return reply.status(400).send(createErrorResponse('unsupported exchange'));
     }
 
-    return createSuccessResponse(await getTrades(parsedExchange, symbol, limit ? parseInt(limit, 10) : 50));
+    try {
+      return createSuccessResponse(await getTrades(parsedExchange, symbol, limit ? parseInt(limit, 10) : 50));
+    } catch (error) {
+      if (error instanceof AppError) {
+        return reply.status(error.statusCode).send(createErrorResponse(error.message));
+      }
+      throw error;
+    }
   });
 
   app.get('/candles', async (request, reply) => {
@@ -70,8 +98,15 @@ export async function marketRoutes(app: FastifyInstance) {
       return reply.status(400).send(createErrorResponse('unsupported exchange'));
     }
 
-    return createSuccessResponse(
-      await getCandles(parsedExchange, symbol, interval ?? '1h', limit ? parseInt(limit, 10) : 60),
-    );
+    try {
+      return createSuccessResponse(
+        await getCandles(parsedExchange, symbol, interval ?? '1h', limit ? parseInt(limit, 10) : 60),
+      );
+    } catch (error) {
+      if (error instanceof AppError) {
+        return reply.status(error.statusCode).send(createErrorResponse(error.message));
+      }
+      throw error;
+    }
   });
 }

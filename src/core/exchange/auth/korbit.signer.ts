@@ -1,39 +1,35 @@
 import { createHmac } from 'crypto';
 
-function buildSignaturePayload(
-  method: string,
-  path: string,
-  timestamp: number,
-  payload?: Record<string, unknown>,
-) {
-  const query = new URLSearchParams();
-  if (payload) {
-    for (const [key, value] of Object.entries(payload)) {
-      if (value === undefined || value === null) continue;
-      query.set(key, String(value));
-    }
-  }
-
-  return `${timestamp}${method.toUpperCase()}${path}${query.toString() ? `?${query.toString()}` : ''}`;
-}
-
 export class KorbitHmacSigner {
-  createHeaders(params: {
+  createSignedRequest(params: {
     apiKey: string;
     secretKey: string;
-    method: string;
-    path: string;
     payload?: Record<string, unknown>;
   }) {
     const timestamp = Date.now();
-    const message = buildSignaturePayload(params.method, params.path, timestamp, params.payload);
+    const signedPayload = new URLSearchParams();
+    for (const [key, value] of Object.entries(params.payload ?? {})) {
+      if (value === undefined || value === null) continue;
+      signedPayload.append(key, String(value));
+    }
+    signedPayload.append('timestamp', String(timestamp));
+    const message = signedPayload.toString();
     const signature = createHmac('sha256', params.secretKey).update(message).digest('hex');
 
     return {
-      'content-type': 'application/json',
-      'X-KAPI-KEY': params.apiKey,
-      'X-KAPI-TIMESTAMP': String(timestamp),
-      'X-KAPI-SIGNATURE': signature,
+      payload: Object.fromEntries(signedPayload.entries()),
+      headers: {
+        'X-KAPI-KEY': params.apiKey,
+      },
+      signature,
     };
+  }
+
+  createHeaders(params: {
+    apiKey: string;
+    secretKey: string;
+    payload?: Record<string, unknown>;
+  }) {
+    return this.createSignedRequest(params).headers;
   }
 }

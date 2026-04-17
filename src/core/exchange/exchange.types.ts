@@ -245,15 +245,30 @@ export interface KimchiPremiumQuote {
   priceKrw: number;
   premiumPercent: number;
   timestamp: number;
+  sourceExchange: ExchangeId;
+  sourceTimestamp: number;
+  stale: boolean;
+  staleAgeMs: number;
+  krwConvertedReference: number;
 }
 
 export interface KimchiPremiumEntry {
   symbol: string;
   nameKo: string;
   nameEn: string;
+  referenceExchange: ExchangeId;
+  referenceMarket: string;
+  referenceTimestamp: number;
+  referenceStale: boolean;
+  referenceStaleAgeMs: number;
   binanceUsdtPrice: number;
   usdKrwRate: number;
   binanceKrwPrice: number;
+  krwConvertedReference: number;
+  fxProvider: string;
+  fxTimestamp: number;
+  fxStale: boolean;
+  fxStaleAgeMs: number;
   domestic: KimchiPremiumQuote[];
   stale: boolean;
   timestampSkewMs: number;

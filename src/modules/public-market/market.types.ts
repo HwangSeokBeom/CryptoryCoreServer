@@ -44,6 +44,21 @@ export interface PublicMarketCollectorStatus {
   lastConnectedAt: number | null;
   lastMessageAt: number | null;
   lastError: string | null;
+  mode?: 'streaming' | 'polling';
+  stale?: boolean;
+  failureCount?: number;
+  lastFailureAt?: number | null;
+  lastFailureReason?: string | null;
+  capabilities?: Partial<Record<'stream' | 'ticker' | 'orderbook' | 'trades', PublicMarketCapabilityState>>;
+}
+
+export interface PublicMarketCapabilityState {
+  state: 'active' | 'retryable' | 'blocked' | 'unsupported' | 'malformed' | 'cancelled';
+  failureCount: number;
+  lastSuccessAt: number | null;
+  lastFailureAt: number | null;
+  lastFailureReason: string | null;
+  suppressedUntil: number | null;
 }
 
 export interface MarketCatalogEntry {

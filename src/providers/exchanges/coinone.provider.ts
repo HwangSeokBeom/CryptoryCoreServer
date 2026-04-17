@@ -1,30 +1,43 @@
 import { COINS } from '../../config/constants';
 import { getExchangeConfig } from '../../config/exchange.config';
+import { CoinoneSigner } from '../../core/exchange/auth/coinone.signer';
+import { ExchangeAuthError } from '../../core/exchange/errors';
 import type {
+  AssetHistoryRecord,
+  Balance,
+  CancelOrderRequest,
   CanonicalCandle,
+  CanonicalFill,
+  CanonicalOrder,
   CanonicalOrderbookSnapshot,
   CanonicalTickerSnapshot,
   CanonicalTrade,
+  CreateOrderRequest,
+  PortfolioSnapshot,
   StreamSubscription,
 } from '../../core/exchange/exchange.types';
 import type {
   ExchangeMarketDataProvider,
+  ExchangePortfolioProvider,
   ExchangeStreamingProvider,
+  ExchangeTradingProvider,
   MarketStreamSink,
+  ProviderContext,
 } from '../../core/exchange/provider.interfaces';
 import { toCanonicalMarket, toCanonicalSymbol } from '../../core/exchange/symbol.mapper';
 import { WebSocketClientManager } from '../../core/exchange/websocket.client-manager';
 import { CoinoneAdapter } from '../../exchanges/CoinoneAdapter';
 import { BaseExchangeProvider } from './base-exchange.provider';
-import { safeNumber, sortAsks, sortBids } from './provider-utils';
+import { buildPortfolioSnapshot, normalizeOrderStatus, normalizeOrderType, safeNumber, safeString, sortAsks, sortBids } from './provider-utils';
 
 const DEFAULT_SYMBOLS = COINS.map((coin) => coin.symbol);
 
 export class CoinoneProvider
   extends BaseExchangeProvider
-  implements ExchangeMarketDataProvider, ExchangeStreamingProvider
+  implements ExchangeMarketDataProvider, ExchangeStreamingProvider, ExchangeTradingProvider, ExchangePortfolioProvider
 {
   private readonly adapter = new CoinoneAdapter();
+  private readonly signer = new CoinoneSigner();
   private streamManager: WebSocketClientManager | null = null;
   private activeSubscriptions: StreamSubscription[] = [];
 
@@ -221,6 +234,126 @@ export class CoinoneProvider
     this.streamManager = null;
   }
 
+  async createOrder(request: CreateOrderRequest, context: ProviderContext): Promise<CanonicalOrder> {
+    const market = this.toMarketPayload(request.symbol);
+    const type = request.type.toUpperCase();
+    const payload: Record<string, unknown> = {
+      ...market,
+      side: request.side.toUpperCase(),
+      type,
+    };
+
+    if (type === 'LIMIT') {
+      payload.price = String(request.price ?? 0);
+      payload.qty = String(request.quantity);
+    } else if (type === 'MARKET' && request.side === 'buy') {
+      payload.amount = String(await this.resolveMarketBuyAmount(request));
+    } else if (type === 'MARKET') {
+      payload.qty = String(request.quantity);
+    } else {
+      payload.price = String(request.price ?? 0);
+      payload.qty = String(request.quantity);
+    }
+
+    if (request.clientOrderId) {
+      payload.user_order_id = request.clientOrderId;
+    }
+
+    const response = await this.requestPrivate<{ order_id: string }>('/v2.1/order', context, payload);
+    return this.getOrder(response.order_id, request.symbol, context);
+  }
+
+  async cancelOrder(request: CancelOrderRequest, context: ProviderContext): Promise<CanonicalOrder> {
+    const market = this.toMarketPayload(request.symbol);
+    const response = await this.requestPrivate<any>('/v2.1/order/cancel', context, {
+      ...market,
+      order_id: request.orderId,
+    });
+    return this.mapOrder(response, request.symbol);
+  }
+
+  async getOrder(orderId: string, symbol: string | undefined, context: ProviderContext): Promise<CanonicalOrder> {
+    const market = this.toMarketPayload(symbol);
+    const response = await this.requestPrivate<any>('/v2.1/order/detail', context, {
+      ...market,
+      order_id: orderId,
+    });
+    return this.mapOrder(response.order ?? response, symbol);
+  }
+
+  async listOpenOrders(symbol: string | undefined, context: ProviderContext): Promise<CanonicalOrder[]> {
+    const path = symbol ? '/v2.1/order/active_orders' : '/v2.1/order/active_orders/all';
+    const response = await this.requestPrivate<{ active_orders?: any[]; activeOrders?: any[] }>(path, context, {
+      ...(symbol ? this.toMarketPayload(symbol) : {}),
+    });
+    const orders = response.active_orders ?? response.activeOrders ?? [];
+    return orders.map((order) => this.mapOrder(order, symbol));
+  }
+
+  async listFills(symbol: string | undefined, limit: number | undefined, context: ProviderContext): Promise<CanonicalFill[]> {
+    const now = Date.now();
+    const path = symbol ? '/v2.1/order/completed_orders' : '/v2.1/order/completed_orders/all';
+    const response = await this.requestPrivate<{ completed_orders?: any[]; completedOrders?: any[] }>(path, context, {
+      ...(symbol ? this.toMarketPayload(symbol) : {}),
+      size: Math.min(limit ?? 50, 100),
+      from_ts: now - 30 * 24 * 60 * 60 * 1000,
+      to_ts: now,
+    });
+    const fills = response.completed_orders ?? response.completedOrders ?? [];
+
+    return fills.map((fill) => {
+      const market = toCanonicalMarket(this.exchange, symbol ?? safeString(fill.target_currency));
+      return {
+        exchange: this.exchange,
+        fillId: safeString(fill.trade_id ?? fill.tradeId),
+        orderId: safeString(fill.order_id ?? fill.orderId),
+        symbol: market.symbol,
+        market: market.market,
+        side: fill.is_ask === true ? 'sell' : 'buy',
+        price: safeNumber(fill.price),
+        quantity: safeNumber(fill.qty),
+        fee: safeNumber(fill.fee),
+        feeCurrency: safeString(fill.fee_currency || market.quoteCurrency),
+        timestamp: safeNumber(fill.timestamp),
+      };
+    });
+  }
+
+  async getPortfolioSnapshot(context: ProviderContext): Promise<PortfolioSnapshot> {
+    const response = await this.requestPrivate<{ balances?: any[] }>('/v2.1/account/balance/all', context);
+    const balances: Balance[] = (response.balances ?? []).map((balance) => ({
+      asset: safeString(balance.currency).toUpperCase(),
+      free: safeNumber(balance.available),
+      locked: safeNumber(balance.limit),
+      averageBuyPrice: safeNumber(balance.average_price),
+    }));
+
+    return buildPortfolioSnapshot({
+      exchange: this.exchange,
+      balances,
+      resolvePrices: async (symbols) => {
+        const tickers = symbols.length > 0 ? await this.getTickerSnapshot(symbols) : [];
+        return new Map(tickers.map((ticker) => [ticker.symbol, ticker.price]));
+      },
+    });
+  }
+
+  async getAssetHistory(
+    symbol: string | undefined,
+    limit: number | undefined,
+    context: ProviderContext,
+  ): Promise<AssetHistoryRecord[]> {
+    const fills = await this.listFills(symbol, limit, context);
+    return fills.map((fill) => ({
+      exchange: this.exchange,
+      symbol: fill.symbol,
+      type: 'trade',
+      amount: fill.side === 'buy' ? fill.quantity : -fill.quantity,
+      timestamp: fill.timestamp,
+      description: `${fill.side.toUpperCase()} ${fill.quantity} @ ${fill.price}`,
+    }));
+  }
+
   private async resyncSnapshots(sink: MarketStreamSink, symbols: string[]) {
     if (sink.onReconnect) {
       for (const subscription of this.activeSubscriptions.filter((item) => item.exchange === this.exchange)) {
@@ -242,5 +375,89 @@ export class CoinoneProvider
         for (const trade of trades.reverse()) await sink.onTrade(trade);
       }
     }
+  }
+
+  private async requestPrivate<T>(path: string, context: ProviderContext, payload: Record<string, unknown> = {}) {
+    const credentials = this.requireCredentials(context);
+    const signed = this.signer.createSignedRequest({
+      accessToken: credentials.apiKey,
+      secretKey: credentials.secretKey,
+      payload,
+    });
+    const response = await this.restClient.request<T & {
+      result?: string;
+      error_code?: string;
+      errorCode?: string;
+      error_msg?: string;
+      errorMsg?: string;
+    }>(path, {
+      method: 'POST',
+      headers: signed.headers,
+      json: signed.payload,
+    });
+    const result = safeString((response as any).result).toLowerCase();
+    if (result && result !== 'success') {
+      const message = safeString((response as any).error_msg ?? (response as any).errorMsg ?? (response as any).error_code ?? (response as any).errorCode) || 'Coinone request failed';
+      throw new ExchangeAuthError(this.exchange, message);
+    }
+    return response;
+  }
+
+  private requireCredentials(context: ProviderContext) {
+    if (!context.credentials) {
+      throw new ExchangeAuthError(this.exchange, 'Coinone credentials are required');
+    }
+
+    return context.credentials;
+  }
+
+  private toMarketPayload(symbol?: string) {
+    return {
+      quote_currency: 'KRW',
+      ...(symbol ? { target_currency: toCanonicalSymbol(symbol) } : {}),
+    };
+  }
+
+  private async resolveMarketBuyAmount(request: CreateOrderRequest) {
+    if (request.price && request.price > 0) {
+      return request.price;
+    }
+
+    const [ticker] = await this.getTickerSnapshot([request.symbol]);
+    return Math.max((ticker?.price ?? 0) * request.quantity, 0);
+  }
+
+  private mapOrder(order: any, symbol?: string): CanonicalOrder {
+    const market = toCanonicalMarket(this.exchange, symbol ?? safeString(order.target_currency));
+    const quantity = safeNumber(order.original_qty ?? order.qty);
+    const filledQuantity = safeNumber(order.executed_qty ?? order.traded_qty ?? 0);
+    const remainingQuantity = safeNumber(order.remain_qty ?? Math.max(quantity - filledQuantity, 0));
+    const status = normalizeOrderStatus({
+      state: order.status,
+      quantity,
+      filledQuantity,
+      remainingQuantity,
+      openStates: ['live', 'not_triggered', 'triggered'],
+      cancelledStates: ['canceled', 'partially_canceled', 'not_triggered_canceled', 'not_triggered_partially_canceled'],
+      filledStates: ['filled'],
+      rejectedStates: ['canceled_no_order', 'canceled_limit_price_exceed', 'canceled_under_product_unit'],
+    });
+
+    return {
+      exchange: this.exchange,
+      orderId: safeString(order.order_id ?? order.orderId),
+      symbol: market.symbol,
+      market: market.market,
+      side: safeString(order.side).toLowerCase() === 'sell' ? 'sell' : 'buy',
+      type: normalizeOrderType(order.type),
+      status,
+      price: safeNumber(order.price ?? order.average_executed_price),
+      quantity: quantity || safeNumber(order.original_amount),
+      filledQuantity,
+      remainingQuantity,
+      averageFillPrice: safeNumber(order.average_executed_price ?? order.avg_price),
+      createdAt: safeNumber(order.ordered_at),
+      updatedAt: safeNumber(order.updated_at ?? order.canceled_at ?? order.ordered_at),
+    };
   }
 }

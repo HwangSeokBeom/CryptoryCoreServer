@@ -11,6 +11,13 @@ export const exchangeConnectionValidationDtoSchema = z.object({
   checkedAt: z.string().datetime(),
 });
 
+export const exchangeConnectionOperationalDtoSchema = z.object({
+  connectionStatus: z.enum(['pending', 'active', 'degraded', 'invalid']),
+  lastSyncAt: z.string().datetime().nullable(),
+  failureReason: z.string().nullable(),
+  isTestConnectionResult: z.boolean(),
+});
+
 export const exchangeConnectionDtoSchema = z.object({
   id: z.string(),
   exchange: exchangeIdSchema,
@@ -20,6 +27,7 @@ export const exchangeConnectionDtoSchema = z.object({
   hasSecretKey: z.boolean(),
   hasPassphrase: z.boolean(),
   validation: exchangeConnectionValidationDtoSchema,
+  operational: exchangeConnectionOperationalDtoSchema,
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 });
@@ -75,11 +83,21 @@ export function serializeExchangeConnectionDto(connection: {
     message: string;
     checkedAt: string;
   };
+  operational: {
+    connectionStatus: 'pending' | 'active' | 'degraded' | 'invalid';
+    lastSyncAt: string | null;
+    failureReason: string | null;
+    isTestConnectionResult: boolean;
+  };
   createdAt: Date;
   updatedAt: Date;
 }) {
   return exchangeConnectionDtoSchema.parse({
     ...connection,
+    operational: {
+      ...connection.operational,
+      lastSyncAt: connection.operational.lastSyncAt,
+    },
     createdAt: connection.createdAt.toISOString(),
     updatedAt: connection.updatedAt.toISOString(),
   });

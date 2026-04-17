@@ -36,8 +36,8 @@ export const EXCHANGE_METADATA: Record<ExchangeId, ExchangeMetadata> = {
     quoteCurrency: 'KRW',
     domestic: true,
     restBaseUrl: 'https://api.bithumb.com',
-    publicWebSocketUrl: 'wss://pubwss.bithumb.com/pub/ws',
-    privateWebSocketUrl: 'wss://pubwss.bithumb.com/pub/ws',
+    publicWebSocketUrl: 'wss://ws-api.bithumb.com/websocket/v1',
+    privateWebSocketUrl: 'wss://ws-api.bithumb.com/websocket/v1/private',
     capabilities: [
       'market:list',
       'market:ticker',
@@ -56,6 +56,8 @@ export const EXCHANGE_METADATA: Record<ExchangeId, ExchangeMetadata> = {
       'stream:private:orders',
       'portfolio:balances',
       'portfolio:positions',
+      'portfolio:history',
+      'stream:private:assets',
     ],
   },
   coinone: {
@@ -65,7 +67,7 @@ export const EXCHANGE_METADATA: Record<ExchangeId, ExchangeMetadata> = {
     domestic: true,
     restBaseUrl: 'https://api.coinone.co.kr',
     publicWebSocketUrl: 'wss://stream.coinone.co.kr',
-    privateWebSocketUrl: 'wss://stream.coinone.co.kr',
+    privateWebSocketUrl: 'wss://stream.coinone.co.kr/v1/private',
     capabilities: [
       'market:list',
       'market:ticker',
@@ -83,6 +85,8 @@ export const EXCHANGE_METADATA: Record<ExchangeId, ExchangeMetadata> = {
       'stream:private:orders',
       'portfolio:balances',
       'portfolio:positions',
+      'portfolio:history',
+      'stream:private:assets',
     ],
   },
   korbit: {
@@ -91,8 +95,8 @@ export const EXCHANGE_METADATA: Record<ExchangeId, ExchangeMetadata> = {
     quoteCurrency: 'KRW',
     domestic: true,
     restBaseUrl: 'https://api.korbit.co.kr',
-    publicWebSocketUrl: 'wss://ws.korbit.co.kr/v1/user/push',
-    privateWebSocketUrl: 'wss://ws.korbit.co.kr/v1/user/push',
+    publicWebSocketUrl: 'wss://ws-api.korbit.co.kr/v2/public',
+    privateWebSocketUrl: 'wss://ws-api.korbit.co.kr/v2/private',
     capabilities: [
       'market:list',
       'market:ticker',
@@ -110,6 +114,8 @@ export const EXCHANGE_METADATA: Record<ExchangeId, ExchangeMetadata> = {
       'stream:private:orders',
       'portfolio:balances',
       'portfolio:positions',
+      'portfolio:history',
+      'stream:private:assets',
     ],
   },
   binance: {

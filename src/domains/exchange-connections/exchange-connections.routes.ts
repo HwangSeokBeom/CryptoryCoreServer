@@ -5,6 +5,7 @@ import {
   listExchangeConnections,
   removeExchangeConnection,
   updateExchangeConnection,
+  validateStoredExchangeConnection,
 } from '../../modules/private-account/exchange-connections.service';
 import {
   createExchangeConnectionRequestSchema,
@@ -36,15 +37,10 @@ export async function exchangeConnectionRoutes(app: FastifyInstance) {
     }
   });
 
-  app.patch('/:exchange', async (request, reply) => {
-    const { exchange } = request.params as { exchange: any };
-    const parsed = updateExchangeConnectionRequestSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.status(400).send(createErrorResponse(parsed.error.errors[0].message));
-    }
-
+  app.post('/:id/validate', async (request, reply) => {
+    const { id } = request.params as { id: string };
     try {
-      return createSuccessResponse(await updateExchangeConnection(request.user.id, exchange, parsed.data));
+      return createSuccessResponse(await validateStoredExchangeConnection(request.user.id, id));
     } catch (error) {
       if (error instanceof AppError) {
         return reply.status(error.statusCode).send(createErrorResponse(error.message));
@@ -53,10 +49,27 @@ export async function exchangeConnectionRoutes(app: FastifyInstance) {
     }
   });
 
-  app.delete('/:exchange', async (request, reply) => {
-    const { exchange } = request.params as { exchange: any };
+  app.patch('/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = updateExchangeConnectionRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send(createErrorResponse(parsed.error.errors[0].message));
+    }
+
     try {
-      return createSuccessResponse(await removeExchangeConnection(request.user.id, exchange));
+      return createSuccessResponse(await updateExchangeConnection(request.user.id, id, parsed.data));
+    } catch (error) {
+      if (error instanceof AppError) {
+        return reply.status(error.statusCode).send(createErrorResponse(error.message));
+      }
+      throw error;
+    }
+  });
+
+  app.delete('/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      return createSuccessResponse(await removeExchangeConnection(request.user.id, id));
     } catch (error) {
       if (error instanceof AppError) {
         return reply.status(error.statusCode).send(createErrorResponse(error.message));

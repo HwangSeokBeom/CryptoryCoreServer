@@ -44,6 +44,7 @@ class PublicMarketDataStore {
 
   setCollectorStatus(status: PublicMarketCollectorStatus) {
     this.collectorStatuses.set(status.exchange, status);
+    void this.persist(`market:status:${status.exchange}`, status, 120);
   }
 
   getTicker(exchange: string, symbol: string): NormalizedMarketTicker | null {

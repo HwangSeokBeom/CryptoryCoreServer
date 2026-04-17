@@ -8,6 +8,7 @@ import {
   listExchangeConnections,
   removeExchangeConnection,
   updateExchangeConnection,
+  validateStoredExchangeConnection,
 } from './exchange-connections.service';
 import {
   createExchangeConnectionRequestSchema,
@@ -53,15 +54,10 @@ export async function privateAccountRoutes(app: FastifyInstance) {
     }
   });
 
-  app.patch('/exchange-connections/:exchange', async (request, reply) => {
-    const { exchange } = request.params as { exchange: string };
-    const parsed = updateExchangeConnectionRequestSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.status(400).send(createErrorResponse(parsed.error.errors[0].message));
-    }
-
+  app.post('/exchange-connections/:id/validate', async (request, reply) => {
+    const { id } = request.params as { id: string };
     try {
-      const connection = await updateExchangeConnection(request.user.id, exchange, parsed.data);
+      const connection = await validateStoredExchangeConnection(request.user.id, id);
       return createSuccessResponse(connection);
     } catch (err) {
       if (err instanceof AppError) {
@@ -71,11 +67,29 @@ export async function privateAccountRoutes(app: FastifyInstance) {
     }
   });
 
-  app.delete('/exchange-connections/:exchange', async (request, reply) => {
-    const { exchange } = request.params as { exchange: string };
+  app.patch('/exchange-connections/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = updateExchangeConnectionRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send(createErrorResponse(parsed.error.errors[0].message));
+    }
 
     try {
-      const removed = await removeExchangeConnection(request.user.id, exchange);
+      const connection = await updateExchangeConnection(request.user.id, id, parsed.data);
+      return createSuccessResponse(connection);
+    } catch (err) {
+      if (err instanceof AppError) {
+        return reply.status(err.statusCode).send(createErrorResponse(err.message));
+      }
+      throw err;
+    }
+  });
+
+  app.delete('/exchange-connections/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+
+    try {
+      const removed = await removeExchangeConnection(request.user.id, id);
       return createSuccessResponse(removed);
     } catch (err) {
       if (err instanceof AppError) {

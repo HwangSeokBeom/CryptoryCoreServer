@@ -3,7 +3,53 @@ import { ExchangeAdapter, NormalizedTicker, NormalizedOrderbook, NormalizedCandl
 const BASE_URL = 'https://api.korbit.co.kr';
 
 function toKorbitSymbol(symbol: string): string {
-  return `${symbol.toLowerCase()}_krw`;
+  const normalized = symbol.trim().toLowerCase();
+
+  if (/^[a-z0-9]+_(krw|usdt)$/.test(normalized)) {
+    return normalized;
+  }
+
+  if (normalized.includes('/')) {
+    const [base, quote] = normalized.split('/');
+    return `${base}_${quote || 'krw'}`;
+  }
+
+  if (normalized.startsWith('krw-')) {
+    return `${normalized.replace(/^krw-/, '')}_krw`;
+  }
+
+  return `${normalized}_krw`;
+}
+
+function describePayloadShape(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `array(len=${value.length})`;
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value === null ? 'null' : typeof value;
+  }
+
+  const keys = Object.entries(value as Record<string, unknown>)
+    .slice(0, 8)
+    .map(([key, child]) => `${key}:${Array.isArray(child) ? 'array' : child === null ? 'null' : typeof child}`);
+
+  return `{${keys.join(',')}}`;
+}
+
+function toPayloadSnippet(payload: unknown): string {
+  try {
+    const text = JSON.stringify(payload);
+    return text.length > 280 ? `${text.slice(0, 280)}...` : text;
+  } catch {
+    return String(payload);
+  }
+}
+
+async function readResponseSnippet(response: Response) {
+  const text = await response.text();
+  const compact = text.replace(/\s+/g, ' ').trim();
+  return compact.length > 240 ? `${compact.slice(0, 240)}...` : compact;
 }
 
 export class KorbitAdapter implements ExchangeAdapter {
@@ -53,13 +99,24 @@ export class KorbitAdapter implements ExchangeAdapter {
   async fetchOrderbook(symbol: string, _depth = 10): Promise<NormalizedOrderbook> {
     const pair = toKorbitSymbol(symbol);
     const res = await fetch(`${BASE_URL}/v2/orderbook?symbol=${pair}`);
-    if (!res.ok) throw new Error(`Korbit orderbook HTTP ${res.status}`);
+    if (!res.ok) {
+      const snippet = await readResponseSnippet(res);
+      throw new Error(`Korbit orderbook HTTP ${res.status} for symbol=${pair}${snippet ? ` body=${snippet}` : ''}`);
+    }
+
     const json = (await res.json()) as any;
-    const asks = (json.asks || []).map((a: any) => ({
+    const data = json.data ?? json;
+    if (!Array.isArray(data?.asks) || !Array.isArray(data?.bids)) {
+      throw new Error(
+        `Korbit orderbook malformed payload for symbol=${pair}: shape=${describePayloadShape(json)} sample=${toPayloadSnippet(json)}`,
+      );
+    }
+
+    const asks = (data.asks || []).map((a: any) => ({
       price: parseFloat(a.price || a[0]),
       qty: parseFloat(a.qty || a[1]),
     }));
-    const bids = (json.bids || []).map((b: any) => ({
+    const bids = (data.bids || []).map((b: any) => ({
       price: parseFloat(b.price || b[0]),
       qty: parseFloat(b.qty || b[1]),
     }));

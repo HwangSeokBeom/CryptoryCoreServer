@@ -2,6 +2,42 @@ import { ExchangeAdapter, NormalizedTicker, NormalizedOrderbook, NormalizedCandl
 
 const BASE_URL = 'https://api.bithumb.com';
 
+function describePayloadShape(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `array(len=${value.length})`;
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value === null ? 'null' : typeof value;
+  }
+
+  const keys = Object.entries(value as Record<string, unknown>)
+    .slice(0, 8)
+    .map(([key, child]) => `${key}:${Array.isArray(child) ? 'array' : child === null ? 'null' : typeof child}`);
+
+  return `{${keys.join(',')}}`;
+}
+
+function toPayloadSnippet(payload: unknown): string {
+  try {
+    const text = JSON.stringify(payload);
+    return text.length > 280 ? `${text.slice(0, 280)}...` : text;
+  } catch {
+    return String(payload);
+  }
+}
+
+function resolveOrderbookPayload(payload: any) {
+  const candidates = [payload?.data?.data, payload?.data, payload];
+  return candidates.find((candidate) => candidate && typeof candidate === 'object') ?? payload;
+}
+
+async function readResponseSnippet(response: Response) {
+  const text = await response.text();
+  const compact = text.replace(/\s+/g, ' ').trim();
+  return compact.length > 240 ? `${compact.slice(0, 240)}...` : compact;
+}
+
 function toMinuteUnit(period: string): number {
   const map: Record<string, number> = {
     '1m': 1,
@@ -47,9 +83,21 @@ export class BithumbAdapter implements ExchangeAdapter {
 
   async fetchOrderbook(symbol: string, depth = 10): Promise<NormalizedOrderbook> {
     const res = await fetch(`${BASE_URL}/public/orderbook/${symbol}_KRW?count=${depth}`);
-    if (!res.ok) throw new Error(`Bithumb orderbook HTTP ${res.status}`);
+    if (!res.ok) {
+      const snippet = await readResponseSnippet(res);
+      throw new Error(
+        `Bithumb orderbook HTTP ${res.status} for ${symbol}_KRW${snippet ? ` body=${snippet}` : ''}`,
+      );
+    }
+
     const json = (await res.json()) as any;
-    const data = json.data;
+    const data = resolveOrderbookPayload(json);
+    if (!Array.isArray(data?.asks) || !Array.isArray(data?.bids)) {
+      throw new Error(
+        `Bithumb orderbook malformed payload for ${symbol}_KRW: shape=${describePayloadShape(json)} sample=${toPayloadSnippet(json)}`,
+      );
+    }
+
     const asks = (data.asks || []).map((a: any) => ({
       price: parseFloat(a.price),
       qty: parseFloat(a.quantity),

@@ -2,6 +2,7 @@ import { COINS } from '../../config/constants';
 import { getExchangeConfig } from '../../config/exchange.config';
 import { JwtHmacSigner } from '../../core/exchange/auth/jwt-hmac.signer';
 import type {
+  AssetHistoryRecord,
   CancelOrderRequest,
   CanonicalCandle,
   CanonicalFill,
@@ -25,6 +26,7 @@ import type {
 import { toCanonicalMarket, toCanonicalSymbol, toExchangeSymbol } from '../../core/exchange/symbol.mapper';
 import { WebSocketClientManager } from '../../core/exchange/websocket.client-manager';
 import { UpbitAdapter } from '../../exchanges/UpbitAdapter';
+import { logger } from '../../utils/logger';
 import { BaseExchangeProvider } from './base-exchange.provider';
 import { safeNumber, sortAsks, sortBids } from './provider-utils';
 
@@ -74,8 +76,8 @@ export class UpbitProvider
     const canonical = toCanonicalSymbol(symbol);
     const snapshot = await this.adapter.fetchOrderbook(canonical, depth);
     const market = toCanonicalMarket(this.exchange, canonical);
-    const asks = snapshot.asks.map((level) => ({ price: level.price, quantity: level.qty }));
-    const bids = snapshot.bids.map((level) => ({ price: level.price, quantity: level.qty }));
+    const asks = sortAsks(snapshot.asks.map((level) => ({ price: level.price, quantity: level.qty })), depth);
+    const bids = sortBids(snapshot.bids.map((level) => ({ price: level.price, quantity: level.qty })), depth);
 
     return {
       ...market,
@@ -263,11 +265,20 @@ export class UpbitProvider
     const body: Record<string, unknown> = {
       market: rawSymbol,
       side: request.side === 'buy' ? 'bid' : 'ask',
-      ord_type: request.type === 'limit' ? 'limit' : 'market',
+      ord_type: request.type === 'limit' ? 'limit' : request.side === 'buy' ? 'price' : 'market',
     };
 
-    if (request.price) body.price = request.price;
-    if (request.quantity) body.volume = request.quantity;
+    if (request.type === 'limit' || request.type === 'stop_limit') {
+      if (request.price) body.price = request.price;
+      if (request.quantity) body.volume = request.quantity;
+    } else if (request.side === 'buy') {
+      const quoteAmount =
+        request.price
+        ?? (await this.getTickerSnapshot([request.symbol]))[0]?.price * request.quantity;
+      body.price = quoteAmount;
+    } else {
+      body.volume = request.quantity;
+    }
 
     const headers = this.signer.createAuthorizationHeader({
       accessKey: credentials.apiKey,
@@ -434,28 +445,102 @@ export class UpbitProvider
     };
   }
 
+  async getAssetHistory(
+    symbol: string | undefined,
+    limit: number | undefined,
+    context: ProviderContext,
+  ): Promise<AssetHistoryRecord[]> {
+    const fills = await this.listFills(symbol, limit, context);
+    return fills.map((fill) => ({
+      exchange: this.exchange,
+      symbol: fill.symbol,
+      type: 'trade',
+      amount: fill.side === 'buy' ? fill.quantity : -fill.quantity,
+      timestamp: fill.timestamp,
+      description: `${fill.side.toUpperCase()} ${fill.quantity} @ ${fill.price}`,
+    }));
+  }
+
   private async resyncSnapshots(sink: MarketStreamSink, symbols: string[]) {
     if (sink.onReconnect) {
       for (const subscription of this.activeSubscriptions.filter((item) => item.exchange === this.exchange)) {
-        await sink.onReconnect(subscription);
+        try {
+          await sink.onReconnect(subscription);
+        } catch (error) {
+          logger.warn(
+            { domain: 'market-streaming', exchange: this.exchange, capability: 'reconnect', err: error },
+            'Upbit reconnect notification failed',
+          );
+        }
       }
     }
 
     if (sink.onTicker) {
-      const tickers = await this.getTickerSnapshot(symbols);
-      for (const ticker of tickers) await sink.onTicker(ticker);
+      try {
+        const tickers = await this.getTickerSnapshot(symbols);
+        for (const ticker of tickers) {
+          try {
+            await sink.onTicker(ticker);
+          } catch (error) {
+            logger.warn(
+              {
+                domain: 'market-streaming',
+                exchange: this.exchange,
+                symbol: ticker.symbol,
+                capability: 'ticker',
+                err: error,
+              },
+              'Upbit ticker resync sink failed',
+            );
+          }
+        }
+      } catch (error) {
+        logger.warn(
+          { domain: 'market-streaming', exchange: this.exchange, capability: 'ticker', err: error },
+          'Upbit ticker resync failed',
+        );
+      }
     }
 
     if (sink.onOrderbook) {
       for (const symbol of symbols) {
-        await sink.onOrderbook(await this.getOrderbookSnapshot(symbol));
+        try {
+          await sink.onOrderbook(await this.getOrderbookSnapshot(symbol));
+        } catch (error) {
+          logger.warn(
+            { domain: 'market-streaming', exchange: this.exchange, symbol, capability: 'orderbook', err: error },
+            'Upbit orderbook resync failed',
+          );
+        }
       }
     }
 
     if (sink.onTrade) {
       for (const symbol of symbols) {
-        const trades = await this.getRecentTrades(symbol, 20);
-        for (const trade of trades.reverse()) await sink.onTrade(trade);
+        try {
+          const trades = await this.getRecentTrades(symbol, 20);
+          for (const trade of trades.reverse()) {
+            try {
+              await sink.onTrade(trade);
+            } catch (error) {
+              logger.warn(
+                {
+                  domain: 'market-streaming',
+                  exchange: this.exchange,
+                  symbol,
+                  capability: 'trades',
+                  err: error,
+                },
+                'Upbit trade resync sink failed',
+              );
+            }
+          }
+        } catch (error) {
+          logger.warn(
+            { domain: 'market-streaming', exchange: this.exchange, symbol, capability: 'trades', err: error },
+            'Upbit trade resync failed',
+          );
+        }
       }
     }
   }

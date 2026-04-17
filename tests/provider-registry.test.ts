@@ -8,4 +8,16 @@ describe('Exchange Provider Registry', () => {
     expect(exchangeProviderRegistry.getReferencePriceSource()).toBeTruthy();
     expect(exchangeProviderRegistry.getFxRateProvider()).toBeTruthy();
   });
+
+  it('registers domestic trading and portfolio providers', () => {
+    expect(exchangeProviderRegistry.getTradingProvider('upbit').exchange).toBe('upbit');
+    expect(exchangeProviderRegistry.getTradingProvider('bithumb').exchange).toBe('bithumb');
+    expect(exchangeProviderRegistry.getTradingProvider('coinone').exchange).toBe('coinone');
+    expect(exchangeProviderRegistry.getTradingProvider('korbit').exchange).toBe('korbit');
+
+    expect(exchangeProviderRegistry.getPortfolioProvider('upbit').exchange).toBe('upbit');
+    expect(exchangeProviderRegistry.getPortfolioProvider('bithumb').exchange).toBe('bithumb');
+    expect(exchangeProviderRegistry.getPortfolioProvider('coinone').exchange).toBe('coinone');
+    expect(exchangeProviderRegistry.getPortfolioProvider('korbit').exchange).toBe('korbit');
+  });
 });

@@ -1,7 +1,7 @@
 import { createHmac, randomUUID } from 'crypto';
 
 export class CoinoneSigner {
-  createHeaders(params: {
+  createSignedRequest(params: {
     accessToken: string;
     secretKey: string;
     payload?: Record<string, unknown>;
@@ -17,9 +17,20 @@ export class CoinoneSigner {
       .digest('hex');
 
     return {
-      'content-type': 'application/json',
-      'X-COINONE-PAYLOAD': encodedPayload,
-      'X-COINONE-SIGNATURE': signature,
+      payload,
+      headers: {
+        'content-type': 'application/json',
+        'X-COINONE-PAYLOAD': encodedPayload,
+        'X-COINONE-SIGNATURE': signature,
+      },
     };
+  }
+
+  createHeaders(params: {
+    accessToken: string;
+    secretKey: string;
+    payload?: Record<string, unknown>;
+  }) {
+    return this.createSignedRequest(params).headers;
   }
 }

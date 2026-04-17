@@ -13,25 +13,39 @@ const envSchema = z.object({
   USE_LIVE_DATA: z.coerce.boolean().default(false),
   PUBLIC_STREAMING_ENABLED: z.coerce.boolean().default(true),
   PRIVATE_STREAMING_ENABLED: z.coerce.boolean().default(true),
+  ENABLE_PRIVATE_WS: z.coerce.boolean().optional(),
+  ENABLE_POLLING_FALLBACK: z.coerce.boolean().default(true),
   USD_KRW_FALLBACK: z.coerce.number().default(1350),
   FX_BASE_URL: z.string().url().default('https://api.exchangerate.host'),
   FX_STALE_THRESHOLD_MS: z.coerce.number().default(300000),
+  MARKET_DATA_STALE_THRESHOLD_MS: z.coerce.number().default(300000),
+  FX_TIMESTAMP_SKEW_THRESHOLD_MS: z.coerce.number().default(30000),
   EXCHANGE_RATE_API_KEY: z.string().optional(),
   EXCHANGE_CREDENTIAL_ENCRYPTION_KEY: z.string().optional(),
   EXCHANGE_CONNECTION_ENCRYPTION_KEY: z.string().optional(),
+  UPBIT_API_BASE_URL: z.string().url().optional(),
   UPBIT_REST_BASE_URL: z.string().url().optional(),
+  UPBIT_WS_URL: z.string().url().optional(),
   UPBIT_PUBLIC_WS_URL: z.string().url().optional(),
   UPBIT_PRIVATE_WS_URL: z.string().url().optional(),
+  BITHUMB_API_BASE_URL: z.string().url().optional(),
   BITHUMB_REST_BASE_URL: z.string().url().optional(),
+  BITHUMB_WS_URL: z.string().url().optional(),
   BITHUMB_PUBLIC_WS_URL: z.string().url().optional(),
   BITHUMB_PRIVATE_WS_URL: z.string().url().optional(),
+  COINONE_API_BASE_URL: z.string().url().optional(),
   COINONE_REST_BASE_URL: z.string().url().optional(),
+  COINONE_WS_URL: z.string().url().optional(),
   COINONE_PUBLIC_WS_URL: z.string().url().optional(),
   COINONE_PRIVATE_WS_URL: z.string().url().optional(),
+  KORBIT_API_BASE_URL: z.string().url().optional(),
   KORBIT_REST_BASE_URL: z.string().url().optional(),
+  KORBIT_WS_URL: z.string().url().optional(),
   KORBIT_PUBLIC_WS_URL: z.string().url().optional(),
   KORBIT_PRIVATE_WS_URL: z.string().url().optional(),
+  BINANCE_API_BASE_URL: z.string().url().optional(),
   BINANCE_REST_BASE_URL: z.string().url().optional(),
+  BINANCE_WS_URL: z.string().url().optional(),
   BINANCE_PUBLIC_WS_URL: z.string().url().optional(),
   BINANCE_PRIVATE_WS_URL: z.string().url().optional(),
 });
@@ -46,25 +60,39 @@ export interface Env {
   USE_LIVE_DATA: boolean;
   PUBLIC_STREAMING_ENABLED: boolean;
   PRIVATE_STREAMING_ENABLED: boolean;
+  ENABLE_PRIVATE_WS: boolean;
+  ENABLE_POLLING_FALLBACK: boolean;
   USD_KRW_FALLBACK: number;
   FX_BASE_URL: string;
   FX_STALE_THRESHOLD_MS: number;
+  MARKET_DATA_STALE_THRESHOLD_MS: number;
+  FX_TIMESTAMP_SKEW_THRESHOLD_MS: number;
   EXCHANGE_RATE_API_KEY?: string;
   EXCHANGE_CREDENTIAL_ENCRYPTION_KEY?: string;
   EXCHANGE_CONNECTION_ENCRYPTION_KEY?: string;
+  UPBIT_API_BASE_URL?: string;
   UPBIT_REST_BASE_URL?: string;
+  UPBIT_WS_URL?: string;
   UPBIT_PUBLIC_WS_URL?: string;
   UPBIT_PRIVATE_WS_URL?: string;
+  BITHUMB_API_BASE_URL?: string;
   BITHUMB_REST_BASE_URL?: string;
+  BITHUMB_WS_URL?: string;
   BITHUMB_PUBLIC_WS_URL?: string;
   BITHUMB_PRIVATE_WS_URL?: string;
+  COINONE_API_BASE_URL?: string;
   COINONE_REST_BASE_URL?: string;
+  COINONE_WS_URL?: string;
   COINONE_PUBLIC_WS_URL?: string;
   COINONE_PRIVATE_WS_URL?: string;
+  KORBIT_API_BASE_URL?: string;
   KORBIT_REST_BASE_URL?: string;
+  KORBIT_WS_URL?: string;
   KORBIT_PUBLIC_WS_URL?: string;
   KORBIT_PRIVATE_WS_URL?: string;
+  BINANCE_API_BASE_URL?: string;
   BINANCE_REST_BASE_URL?: string;
+  BINANCE_WS_URL?: string;
   BINANCE_PUBLIC_WS_URL?: string;
   BINANCE_PRIVATE_WS_URL?: string;
 }
@@ -91,27 +119,41 @@ function loadEnv(): Env {
     NODE_ENV: parsed.data.NODE_ENV,
     USE_LIVE_DATA: parsed.data.USE_LIVE_DATA,
     PUBLIC_STREAMING_ENABLED: parsed.data.PUBLIC_STREAMING_ENABLED,
-    PRIVATE_STREAMING_ENABLED: parsed.data.PRIVATE_STREAMING_ENABLED,
+    PRIVATE_STREAMING_ENABLED: parsed.data.ENABLE_PRIVATE_WS ?? parsed.data.PRIVATE_STREAMING_ENABLED,
+    ENABLE_PRIVATE_WS: parsed.data.ENABLE_PRIVATE_WS ?? parsed.data.PRIVATE_STREAMING_ENABLED,
+    ENABLE_POLLING_FALLBACK: parsed.data.ENABLE_POLLING_FALLBACK,
     USD_KRW_FALLBACK: parsed.data.USD_KRW_FALLBACK,
     FX_BASE_URL: parsed.data.FX_BASE_URL,
     FX_STALE_THRESHOLD_MS: parsed.data.FX_STALE_THRESHOLD_MS,
+    MARKET_DATA_STALE_THRESHOLD_MS: parsed.data.MARKET_DATA_STALE_THRESHOLD_MS,
+    FX_TIMESTAMP_SKEW_THRESHOLD_MS: parsed.data.FX_TIMESTAMP_SKEW_THRESHOLD_MS,
     EXCHANGE_RATE_API_KEY: parsed.data.EXCHANGE_RATE_API_KEY,
     EXCHANGE_CREDENTIAL_ENCRYPTION_KEY:
       parsed.data.EXCHANGE_CREDENTIAL_ENCRYPTION_KEY ?? parsed.data.EXCHANGE_CONNECTION_ENCRYPTION_KEY,
     EXCHANGE_CONNECTION_ENCRYPTION_KEY: parsed.data.EXCHANGE_CONNECTION_ENCRYPTION_KEY,
+    UPBIT_API_BASE_URL: parsed.data.UPBIT_API_BASE_URL,
     UPBIT_REST_BASE_URL: parsed.data.UPBIT_REST_BASE_URL,
+    UPBIT_WS_URL: parsed.data.UPBIT_WS_URL,
     UPBIT_PUBLIC_WS_URL: parsed.data.UPBIT_PUBLIC_WS_URL,
     UPBIT_PRIVATE_WS_URL: parsed.data.UPBIT_PRIVATE_WS_URL,
+    BITHUMB_API_BASE_URL: parsed.data.BITHUMB_API_BASE_URL,
     BITHUMB_REST_BASE_URL: parsed.data.BITHUMB_REST_BASE_URL,
+    BITHUMB_WS_URL: parsed.data.BITHUMB_WS_URL,
     BITHUMB_PUBLIC_WS_URL: parsed.data.BITHUMB_PUBLIC_WS_URL,
     BITHUMB_PRIVATE_WS_URL: parsed.data.BITHUMB_PRIVATE_WS_URL,
+    COINONE_API_BASE_URL: parsed.data.COINONE_API_BASE_URL,
     COINONE_REST_BASE_URL: parsed.data.COINONE_REST_BASE_URL,
+    COINONE_WS_URL: parsed.data.COINONE_WS_URL,
     COINONE_PUBLIC_WS_URL: parsed.data.COINONE_PUBLIC_WS_URL,
     COINONE_PRIVATE_WS_URL: parsed.data.COINONE_PRIVATE_WS_URL,
+    KORBIT_API_BASE_URL: parsed.data.KORBIT_API_BASE_URL,
     KORBIT_REST_BASE_URL: parsed.data.KORBIT_REST_BASE_URL,
+    KORBIT_WS_URL: parsed.data.KORBIT_WS_URL,
     KORBIT_PUBLIC_WS_URL: parsed.data.KORBIT_PUBLIC_WS_URL,
     KORBIT_PRIVATE_WS_URL: parsed.data.KORBIT_PRIVATE_WS_URL,
+    BINANCE_API_BASE_URL: parsed.data.BINANCE_API_BASE_URL,
     BINANCE_REST_BASE_URL: parsed.data.BINANCE_REST_BASE_URL,
+    BINANCE_WS_URL: parsed.data.BINANCE_WS_URL,
     BINANCE_PUBLIC_WS_URL: parsed.data.BINANCE_PUBLIC_WS_URL,
     BINANCE_PRIVATE_WS_URL: parsed.data.BINANCE_PRIVATE_WS_URL,
   };

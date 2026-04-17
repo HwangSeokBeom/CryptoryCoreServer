@@ -1,20 +1,32 @@
 import { COINS } from '../../config/constants';
 import { getExchangeConfig } from '../../config/exchange.config';
+import { JwtHmacSigner } from '../../core/exchange/auth/jwt-hmac.signer';
 import type {
+  AssetHistoryRecord,
+  CancelOrderRequest,
   CanonicalCandle,
+  CanonicalFill,
+  CanonicalOrder,
   CanonicalOrderbookSnapshot,
   CanonicalTickerSnapshot,
   CanonicalTrade,
+  CreateOrderRequest,
+  OrderChance,
+  PortfolioSnapshot,
   StreamSubscription,
 } from '../../core/exchange/exchange.types';
 import type {
   ExchangeMarketDataProvider,
+  ExchangePortfolioProvider,
   ExchangeStreamingProvider,
+  ExchangeTradingProvider,
   MarketStreamSink,
+  ProviderContext,
 } from '../../core/exchange/provider.interfaces';
-import { toCanonicalMarket, toCanonicalSymbol } from '../../core/exchange/symbol.mapper';
+import { toCanonicalMarket, toCanonicalSymbol, toExchangeSymbol } from '../../core/exchange/symbol.mapper';
 import { WebSocketClientManager } from '../../core/exchange/websocket.client-manager';
 import { BithumbAdapter } from '../../exchanges/BithumbAdapter';
+import { logger } from '../../utils/logger';
 import { BaseExchangeProvider } from './base-exchange.provider';
 import { safeNumber, sortAsks, sortBids } from './provider-utils';
 
@@ -22,9 +34,10 @@ const DEFAULT_SYMBOLS = COINS.map((coin) => coin.symbol);
 
 export class BithumbProvider
   extends BaseExchangeProvider
-  implements ExchangeMarketDataProvider, ExchangeStreamingProvider
+  implements ExchangeMarketDataProvider, ExchangeStreamingProvider, ExchangeTradingProvider, ExchangePortfolioProvider
 {
   private readonly adapter = new BithumbAdapter();
+  private readonly signer = new JwtHmacSigner();
   private streamManager: WebSocketClientManager | null = null;
   private readonly books = new Map<string, { asks: Map<number, number>; bids: Map<number, number> }>();
   private activeSubscriptions: StreamSubscription[] = [];
@@ -34,11 +47,17 @@ export class BithumbProvider
   }
 
   async listMarkets() {
-    return DEFAULT_SYMBOLS.map((symbol) => ({
-      symbol,
-      market: `${symbol}/KRW`,
-      rawSymbol: `${symbol}_KRW`,
-    }));
+    const response = await this.restClient.request<Array<{ market: string }>>('/v1/market/all', {
+      query: { isDetails: false },
+    });
+
+    return response
+      .filter((item) => item.market.startsWith('KRW-'))
+      .map((item) => ({
+        symbol: item.market.replace('KRW-', ''),
+        market: item.market.replace('KRW-', '') + '/KRW',
+        rawSymbol: item.market,
+      }));
   }
 
   async getTickerSnapshot(symbols = DEFAULT_SYMBOLS): Promise<CanonicalTickerSnapshot[]> {
@@ -58,8 +77,8 @@ export class BithumbProvider
     const canonical = toCanonicalSymbol(symbol);
     const snapshot = await this.adapter.fetchOrderbook(canonical, depth);
     const market = toCanonicalMarket(this.exchange, canonical);
-    const asks = snapshot.asks.map((level) => ({ price: level.price, quantity: level.qty }));
-    const bids = snapshot.bids.map((level) => ({ price: level.price, quantity: level.qty }));
+    const asks = sortAsks(snapshot.asks.map((level) => ({ price: level.price, quantity: level.qty })), depth);
+    const bids = sortBids(snapshot.bids.map((level) => ({ price: level.price, quantity: level.qty })), depth);
 
     return {
       ...market,
@@ -233,6 +252,249 @@ export class BithumbProvider
     this.streamManager = null;
   }
 
+  async getOrderChance(symbol: string, context: ProviderContext): Promise<OrderChance> {
+    const credentials = this.requireCredentials(context);
+    const rawSymbol = toExchangeSymbol(this.exchange, symbol);
+    const headers = this.signer.createAuthorizationHeader({
+      accessKey: credentials.apiKey,
+      secretKey: credentials.secretKey,
+      query: { market: rawSymbol },
+      includeTimestamp: true,
+    });
+    const response = await this.restClient.request<any>('/v1/orders/chance', {
+      query: { market: rawSymbol },
+      headers,
+    });
+
+    return {
+      exchange: this.exchange,
+      market: `${toCanonicalSymbol(symbol)}/KRW`,
+      symbol: toCanonicalSymbol(symbol),
+      quoteCurrency: 'KRW',
+      minTotal: safeNumber(response.market?.ask?.min_total ?? response.market?.bid?.min_total),
+      makerFee: safeNumber(response.maker_bid_fee ?? response.maker_ask_fee),
+      takerFee: safeNumber(response.bid_fee ?? response.ask_fee),
+      supportedOrderTypes: ['limit', 'market'],
+    };
+  }
+
+  async createOrder(request: CreateOrderRequest, context: ProviderContext): Promise<CanonicalOrder> {
+    const credentials = this.requireCredentials(context);
+    const rawSymbol = toExchangeSymbol(this.exchange, request.symbol);
+    const body: Record<string, unknown> = {
+      market: rawSymbol,
+      side: request.side === 'buy' ? 'bid' : 'ask',
+      ord_type: request.type === 'limit' ? 'limit' : request.side === 'buy' ? 'price' : 'market',
+    };
+
+    if (request.type === 'limit' || request.type === 'stop_limit') {
+      body.price = request.price;
+      body.volume = request.quantity;
+    } else if (request.side === 'buy') {
+      const quoteAmount =
+        request.price
+        ?? (await this.getTickerSnapshot([request.symbol]))[0]?.price * request.quantity;
+      body.price = quoteAmount;
+    } else {
+      body.volume = request.quantity;
+    }
+
+    if (request.clientOrderId) {
+      body.client_order_id = request.clientOrderId;
+    }
+
+    const headers = this.signer.createAuthorizationHeader({
+      accessKey: credentials.apiKey,
+      secretKey: credentials.secretKey,
+      body,
+      includeTimestamp: true,
+    });
+    const response = await this.restClient.request<any>('/v1/orders', {
+      method: 'POST',
+      headers,
+      json: body,
+    });
+    return this.mapPrivateOrder(response, request.symbol);
+  }
+
+  async cancelOrder(request: CancelOrderRequest, context: ProviderContext): Promise<CanonicalOrder> {
+    const credentials = this.requireCredentials(context);
+    const query = { uuid: request.orderId };
+    const headers = this.signer.createAuthorizationHeader({
+      accessKey: credentials.apiKey,
+      secretKey: credentials.secretKey,
+      query,
+      includeTimestamp: true,
+    });
+    const response = await this.restClient.request<any>('/v1/order', {
+      method: 'DELETE',
+      query,
+      headers,
+    });
+    return this.mapPrivateOrder(response, request.symbol);
+  }
+
+  async getOrder(orderId: string, symbol: string | undefined, context: ProviderContext): Promise<CanonicalOrder> {
+    const credentials = this.requireCredentials(context);
+    const query = { uuid: orderId };
+    const headers = this.signer.createAuthorizationHeader({
+      accessKey: credentials.apiKey,
+      secretKey: credentials.secretKey,
+      query,
+      includeTimestamp: true,
+    });
+    const response = await this.restClient.request<any>('/v1/order', {
+      query,
+      headers,
+    });
+    return this.mapPrivateOrder(response, symbol);
+  }
+
+  async listOpenOrders(symbol: string | undefined, context: ProviderContext): Promise<CanonicalOrder[]> {
+    const credentials = this.requireCredentials(context);
+    const query = {
+      ...(symbol ? { market: toExchangeSymbol(this.exchange, symbol) } : {}),
+      state: 'wait',
+      limit: 100,
+    };
+    const headers = this.signer.createAuthorizationHeader({
+      accessKey: credentials.apiKey,
+      secretKey: credentials.secretKey,
+      query,
+      includeTimestamp: true,
+    });
+    const response = await this.restClient.request<any[]>('/v1/orders', {
+      query,
+      headers,
+    });
+    return response.map((order) => this.mapPrivateOrder(order, symbol));
+  }
+
+  async listFills(symbol: string | undefined, limit: number | undefined, context: ProviderContext): Promise<CanonicalFill[]> {
+    const credentials = this.requireCredentials(context);
+    const query = {
+      ...(symbol ? { market: toExchangeSymbol(this.exchange, symbol) } : {}),
+      state: 'done',
+      limit: limit ?? 50,
+      order_by: 'desc',
+    };
+    const headers = this.signer.createAuthorizationHeader({
+      accessKey: credentials.apiKey,
+      secretKey: credentials.secretKey,
+      query,
+      includeTimestamp: true,
+    });
+    const response = await this.restClient.request<any[]>('/v1/orders', {
+      query,
+      headers,
+    });
+
+    return response.flatMap((order) => {
+      const market = toCanonicalMarket(
+        this.exchange,
+        symbol ?? String(order.market ?? '').replace('KRW-', '').toUpperCase(),
+      );
+      const trades = Array.isArray(order.trades) && order.trades.length > 0 ? order.trades : [order];
+      return trades.map((trade: any) => {
+        const price = safeNumber(trade.price ?? order.price);
+        const quantity = safeNumber(trade.volume ?? trade.executed_volume ?? order.executed_volume);
+        return {
+          exchange: this.exchange,
+          fillId: String(trade.uuid ?? trade.trade_uuid ?? `${order.uuid}:${trade.created_at ?? trade.trade_timestamp ?? order.created_at}`),
+          orderId: String(order.uuid ?? order.order_id),
+          symbol: market.symbol,
+          market: market.market,
+          side: String(order.side ?? '').toLowerCase() === 'ask' ? 'sell' : 'buy',
+          price,
+          quantity,
+          fee: safeNumber(trade.fee ?? order.paid_fee),
+          feeCurrency: market.quoteCurrency,
+          timestamp: safeNumber(trade.trade_timestamp ?? new Date(trade.created_at ?? order.created_at ?? Date.now()).getTime()),
+        };
+      });
+    });
+  }
+
+  async getPortfolioSnapshot(context: ProviderContext): Promise<PortfolioSnapshot> {
+    const credentials = this.requireCredentials(context);
+    const headers = this.signer.createAuthorizationHeader({
+      accessKey: credentials.apiKey,
+      secretKey: credentials.secretKey,
+      includeTimestamp: true,
+    });
+    const accounts = await this.restClient.request<any[]>('/v1/accounts', {
+      headers,
+    });
+    const balances = accounts.map((account) => ({
+      asset: String(account.currency).toUpperCase(),
+      free: safeNumber(account.balance),
+      locked: safeNumber(account.locked),
+      averageBuyPrice: safeNumber(account.avg_buy_price),
+    }));
+
+    const symbols = balances
+      .filter((balance) => balance.asset !== 'KRW' && balance.free + balance.locked > 0)
+      .map((balance) => balance.asset);
+    const tickers = symbols.length > 0 ? await this.getTickerSnapshot(symbols) : [];
+    const tickerMap = new Map(tickers.map((ticker) => [ticker.symbol, ticker.price]));
+    const positions = balances
+      .filter((balance) => balance.asset !== 'KRW' && balance.free + balance.locked > 0)
+      .map((balance) => {
+        const quantity = balance.free + balance.locked;
+        const averageBuyPrice = balance.averageBuyPrice ?? 0;
+        const currentPrice = tickerMap.get(balance.asset) ?? 0;
+        const marketValue = quantity * currentPrice;
+        const totalCost = quantity * averageBuyPrice;
+        const pnlValue = marketValue - totalCost;
+        return {
+          exchange: this.exchange,
+          symbol: balance.asset,
+          quantity,
+          free: balance.free,
+          locked: balance.locked,
+          averageBuyPrice,
+          currentPrice,
+          marketValue,
+          pnlValue,
+          pnlPercent: totalCost > 0 ? (pnlValue / totalCost) * 100 : 0,
+          timestamp: Date.now(),
+        };
+      });
+    const totalAssetValue =
+      balances
+        .filter((balance) => balance.asset === 'KRW')
+        .reduce((sum, balance) => sum + balance.free + balance.locked, 0)
+      + positions.reduce((sum, position) => sum + position.marketValue, 0);
+    const totalCost = positions.reduce((sum, position) => sum + position.averageBuyPrice * position.quantity, 0);
+    const totalPnlValue = positions.reduce((sum, position) => sum + position.pnlValue, 0);
+
+    return {
+      exchange: this.exchange,
+      balances,
+      positions,
+      totalAssetValue,
+      totalPnlValue,
+      totalPnlPercent: totalCost > 0 ? (totalPnlValue / totalCost) * 100 : 0,
+      timestamp: Date.now(),
+    };
+  }
+
+  async getAssetHistory(
+    symbol: string | undefined,
+    limit: number | undefined,
+    context: ProviderContext,
+  ): Promise<AssetHistoryRecord[]> {
+    const fills = await this.listFills(symbol, limit, context);
+    return fills.map((fill) => ({
+      exchange: this.exchange,
+      symbol: fill.symbol,
+      type: 'trade',
+      amount: fill.side === 'buy' ? fill.quantity : -fill.quantity,
+      timestamp: fill.timestamp,
+      description: `${fill.side.toUpperCase()} ${fill.quantity} @ ${fill.price}`,
+    }));
+  }
+
   private async emitBook(rawSymbol: string, timestamp: number, sink: MarketStreamSink) {
     if (!sink.onOrderbook) return;
     const book = this.books.get(rawSymbol);
@@ -255,23 +517,123 @@ export class BithumbProvider
   private async resyncSnapshots(sink: MarketStreamSink, symbols: string[]) {
     if (sink.onReconnect) {
       for (const subscription of this.activeSubscriptions.filter((item) => item.exchange === this.exchange)) {
-        await sink.onReconnect(subscription);
+        try {
+          await sink.onReconnect(subscription);
+        } catch (error) {
+          logger.warn(
+            { domain: 'market-streaming', exchange: this.exchange, capability: 'reconnect', err: error },
+            'Bithumb reconnect notification failed',
+          );
+        }
       }
     }
     if (sink.onTicker) {
-      const tickers = await this.getTickerSnapshot(symbols);
-      for (const ticker of tickers) await sink.onTicker(ticker);
+      try {
+        const tickers = await this.getTickerSnapshot(symbols);
+        for (const ticker of tickers) {
+          try {
+            await sink.onTicker(ticker);
+          } catch (error) {
+            logger.warn(
+              {
+                domain: 'market-streaming',
+                exchange: this.exchange,
+                symbol: ticker.symbol,
+                capability: 'ticker',
+                err: error,
+              },
+              'Bithumb ticker resync sink failed',
+            );
+          }
+        }
+      } catch (error) {
+        logger.warn(
+          { domain: 'market-streaming', exchange: this.exchange, capability: 'ticker', err: error },
+          'Bithumb ticker resync failed',
+        );
+      }
     }
     if (sink.onOrderbook) {
       for (const symbol of symbols) {
-        await sink.onOrderbook(await this.getOrderbookSnapshot(symbol));
+        try {
+          await sink.onOrderbook(await this.getOrderbookSnapshot(symbol));
+        } catch (error) {
+          logger.warn(
+            { domain: 'market-streaming', exchange: this.exchange, symbol, capability: 'orderbook', err: error },
+            'Bithumb orderbook resync failed',
+          );
+        }
       }
     }
     if (sink.onTrade) {
       for (const symbol of symbols) {
-        const trades = await this.getRecentTrades(symbol, 20);
-        for (const trade of trades.reverse()) await sink.onTrade(trade);
+        try {
+          const trades = await this.getRecentTrades(symbol, 20);
+          for (const trade of trades.reverse()) {
+            try {
+              await sink.onTrade(trade);
+            } catch (error) {
+              logger.warn(
+                {
+                  domain: 'market-streaming',
+                  exchange: this.exchange,
+                  symbol,
+                  capability: 'trades',
+                  err: error,
+                },
+                'Bithumb trade resync sink failed',
+              );
+            }
+          }
+        } catch (error) {
+          logger.warn(
+            { domain: 'market-streaming', exchange: this.exchange, symbol, capability: 'trades', err: error },
+            'Bithumb trade resync failed',
+          );
+        }
       }
     }
+  }
+
+  private requireCredentials(context: ProviderContext) {
+    if (!context.credentials) {
+      throw new Error('Bithumb credentials are required');
+    }
+
+    return context.credentials;
+  }
+
+  private mapPrivateOrder(order: any, symbol?: string): CanonicalOrder {
+    const resolvedSymbol = symbol ? toCanonicalSymbol(symbol) : String(order.market ?? '').replace('KRW-', '').toUpperCase();
+    const market = toCanonicalMarket(this.exchange, resolvedSymbol);
+    const quantity = safeNumber(order.volume ?? order.original_qty ?? order.qty ?? order.executed_volume);
+    const filledQuantity = safeNumber(order.executed_volume ?? order.executed_qty ?? order.traded_qty ?? 0);
+    const remainingQuantity = safeNumber(order.remaining_volume ?? order.remain_qty ?? Math.max(quantity - filledQuantity, 0));
+    const state = String(order.state ?? order.status ?? 'wait').toLowerCase();
+    const status =
+      state === 'done' ? 'filled'
+      : state === 'cancel' || state === 'cancelled' || state === 'canceled' ? 'cancelled'
+      : filledQuantity > 0 ? 'partial'
+      : 'open';
+
+    return {
+      exchange: this.exchange,
+      orderId: String(order.uuid ?? order.order_id ?? order.id),
+      symbol: market.symbol,
+      market: market.market,
+      side: String(order.side ?? '').toLowerCase() === 'ask' ? 'sell' : 'buy',
+      type: String(order.ord_type ?? order.order_type ?? 'limit') === 'price' ? 'market' : (order.ord_type ?? order.order_type ?? 'limit'),
+      status,
+      price: safeNumber(order.price ?? order.avg_price),
+      quantity,
+      filledQuantity,
+      remainingQuantity,
+      averageFillPrice: safeNumber(order.avg_price ?? order.price),
+      createdAt: safeNumber(new Date(order.created_at ?? order.order_timestamp ?? Date.now()).getTime()),
+      updatedAt: safeNumber(
+        order.trade_timestamp
+          ?? new Date(order.updated_at ?? order.created_at ?? order.order_timestamp ?? Date.now()).getTime(),
+      ),
+    };
   }
 }

@@ -1,6 +1,6 @@
 # API Contracts
 
-All REST responses use the same envelope:
+All REST responses use one envelope:
 
 ```json
 {
@@ -9,7 +9,7 @@ All REST responses use the same envelope:
 }
 ```
 
-Error responses use:
+Errors use:
 
 ```json
 {
@@ -18,25 +18,75 @@ Error responses use:
 }
 ```
 
-## Public REST
+## Security
 
-Base path: `/api/v1/public`
+- User exchange credentials are stored only through DB encrypted fields backed by `EXCHANGE_CREDENTIAL_ENCRYPTION_KEY`.
+- Provider auth/signing is handled only inside provider or validator code.
+- Developer fallback keys in `.env` are manual smoke-test placeholders only and must never proxy user trading or portfolio requests.
+- Binance is public-reference-only. Private trading and private portfolio are intentionally unsupported.
 
-### `GET /tickers`
+## Exchange Status
+
+| Exchange | Public REST | Private Trading | Portfolio | Public WS | Private WS | Polling Fallback | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Upbit | Done | Done | Done | Done | Partial | Done | Private WS session orchestration is not wired to user-facing routes yet. HTTP APIs use live private REST. |
+| Bithumb | Done | Done | Done | Done | Pending | Done | Private REST uses JWT HMAC signing with live validation. |
+| Coinone | Done | Done | Done | Done | Pending | Done | `GET/DELETE /trading/orders/:exchange/:orderId` requires `symbol` query for provider lookup. |
+| Korbit | Done | Done | Done | Done | Pending | Done | `GET/DELETE /trading/orders/:exchange/:orderId` requires `symbol` query for provider lookup. |
+| Binance | Done | Unsupported | Unsupported | Done | Unsupported | Done | Reference market source for kimchi premium only. |
+
+## Public Market Routes
+
+Base paths:
+
+- `GET /market/markets`
+- `GET /market/tickers`
+- `GET /market/orderbook`
+- `GET /market/trades`
+- `GET /market/candles`
+- `GET /kimchi-premium`
+
+### `GET /market/markets`
+
+Query:
+
+- `exchange?: upbit | bithumb | coinone | korbit | binance`
+
+Example response:
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "exchange": "upbit",
+      "exchangeName": "업비트",
+      "symbol": "BTC",
+      "market": "BTC/KRW",
+      "rawSymbol": "KRW-BTC",
+      "quoteCurrency": "KRW",
+      "nameKo": "비트코인",
+      "nameEn": "Bitcoin"
+    }
+  ]
+}
+```
+
+### `GET /market/tickers`
 
 Query:
 
 - `exchange?: upbit | bithumb | coinone | korbit | binance`
 - `symbol?: BTC | ETH | ...`
 
-Response `data`:
+Freshness fields are attached to every item.
 
 ```json
 {
-  "items": [
+  "success": true,
+  "data": [
     {
       "exchange": "upbit",
-      "exchangeName": "업비트",
       "symbol": "BTC",
       "market": "BTC/KRW",
       "baseCurrency": "BTC",
@@ -47,112 +97,117 @@ Response `data`:
       "volume24h": 1234,
       "high24h": 101000000,
       "low24h": 98000000,
-      "timestamp": 1712345678000
+      "timestamp": 1712345678000,
+      "sourceTimestamp": 1712345678000,
+      "stale": false,
+      "staleAgeMs": 420
     }
-  ],
-  "total": 1,
-  "snapshotAt": 1712345678000
+  ]
 }
 ```
 
-### `GET /orderbook`
+### `GET /market/orderbook`
 
 Query:
 
 - `exchange: upbit | bithumb | coinone | korbit | binance`
 - `symbol: BTC | ETH | ...`
 
-Response `data`:
-
 ```json
 {
-  "exchange": "upbit",
-  "exchangeName": "업비트",
-  "symbol": "BTC",
-  "market": "BTC/KRW",
-  "baseCurrency": "BTC",
-  "quoteCurrency": "KRW",
-  "rawSymbol": "KRW-BTC",
-  "bestAsk": 100010000,
-  "bestBid": 99990000,
-  "spread": 20000,
-  "asks": [
-    { "price": 100010000, "quantity": 0.2 }
-  ],
-  "bids": [
-    { "price": 99990000, "quantity": 0.3 }
-  ],
-  "timestamp": 1712345678000
+  "success": true,
+  "data": {
+    "exchange": "bithumb",
+    "symbol": "BTC",
+    "market": "BTC/KRW",
+    "baseCurrency": "BTC",
+    "quoteCurrency": "KRW",
+    "rawSymbol": "BTC_KRW",
+    "asks": [
+      { "price": 100010000, "quantity": 0.2 }
+    ],
+    "bids": [
+      { "price": 99990000, "quantity": 0.3 }
+    ],
+    "bestAsk": 100010000,
+    "bestBid": 99990000,
+    "spread": 20000,
+    "timestamp": 1712345678000,
+    "sourceTimestamp": 1712345678000,
+    "stale": false,
+    "staleAgeMs": 310
+  }
 }
 ```
 
-### `GET /trades`
+### `GET /market/trades`
 
 Query:
 
 - `exchange: upbit | bithumb | coinone | korbit | binance`
 - `symbol: BTC | ETH | ...`
-- `limit?: number` default `50`
-
-Response `data`:
+- `limit?: number`
 
 ```json
 {
-  "exchange": "upbit",
-  "exchangeName": "업비트",
-  "symbol": "BTC",
-  "market": "BTC/KRW",
-  "items": [
+  "success": true,
+  "data": [
     {
-      "exchange": "upbit",
-      "exchangeName": "업비트",
+      "exchange": "coinone",
       "symbol": "BTC",
       "market": "BTC/KRW",
       "baseCurrency": "BTC",
       "quoteCurrency": "KRW",
-      "rawSymbol": "KRW-BTC",
+      "rawSymbol": "BTC",
       "tradeId": "trade-1",
       "side": "buy",
       "price": 100000000,
       "quantity": 0.01,
       "notional": 1000000,
-      "timestamp": 1712345678000
+      "timestamp": 1712345678000,
+      "sourceTimestamp": 1712345678000,
+      "stale": false,
+      "staleAgeMs": 210
     }
-  ],
-  "total": 1,
-  "snapshotAt": 1712345678000
+  ]
 }
 ```
 
-### `GET /candles`
+### `GET /market/candles`
 
 Query:
 
 - `exchange: upbit | bithumb | coinone | korbit | binance`
 - `symbol: BTC | ETH | ...`
-- `period?: 1m | 3m | 5m | 15m | 30m | 1h | 4h | 1d | 1w`
+- `interval?: 1m | 3m | 5m | 10m | 15m | 30m | 1h | 4h | 1d | 1w`
 - `limit?: number`
 
-Response `data`:
+If the requested interval is unsupported by the exchange, the server resolves to the next supported canonical interval before calling the provider.
 
 ```json
 {
-  "exchange": "upbit",
-  "exchangeName": "업비트",
-  "symbol": "BTC",
-  "market": "BTC/KRW",
-  "interval": "1h",
-  "items": [
+  "success": true,
+  "data": [
     {
-      "timestamp": 1712345320000,
-      "open": 99000000,
-      "high": 101000000,
-      "low": 98500000,
+      "exchange": "korbit",
+      "symbol": "BTC",
+      "market": "BTC/KRW",
+      "baseCurrency": "BTC",
+      "quoteCurrency": "KRW",
+      "rawSymbol": "btc_krw",
+      "interval": "15m",
+      "openTime": 1712344800000,
+      "closeTime": 1712345699999,
+      "open": 99500000,
+      "high": 100300000,
+      "low": 99200000,
       "close": 100000000,
-      "volume": 321
+      "volume": 21.7,
+      "sourceTimestamp": 1712345699999,
+      "stale": false,
+      "staleAgeMs": 2000
     }
-  ],
-  "total": 1
+  ]
 }
 ```
 
@@ -160,268 +215,238 @@ Response `data`:
 
 Query:
 
-- `symbols: BTC,ETH,...`
+- `symbols=BTC,ETH,...`
 
-Response `data`:
+Unknown symbols return `400 unsupported symbol: <SYMBOL>`.
 
 ```json
 {
-  "baseExchange": "binance",
-  "items": [
+  "success": true,
+  "data": [
     {
       "symbol": "BTC",
       "nameKo": "비트코인",
       "nameEn": "Bitcoin",
-      "binanceKrwPrice": 99500000,
+      "referenceExchange": "binance",
+      "referenceMarket": "BTC/USDT",
+      "referenceTimestamp": 1712345678000,
+      "referenceStale": false,
+      "referenceStaleAgeMs": 500,
+      "binanceUsdtPrice": 70000,
+      "usdKrwRate": 1350,
+      "binanceKrwPrice": 94500000,
+      "krwConvertedReference": 94500000,
+      "fxProvider": "exchangerate.host",
+      "fxTimestamp": 1712345677000,
+      "fxStale": false,
+      "fxStaleAgeMs": 600,
       "domestic": [
         {
           "exchange": "upbit",
-          "exchangeName": "업비트",
           "market": "BTC/KRW",
           "priceKrw": 100000000,
-          "premiumPercent": 0.5
+          "premiumPercent": 5.82010582010582,
+          "timestamp": 1712345679000,
+          "sourceExchange": "upbit",
+          "sourceTimestamp": 1712345679000,
+          "stale": false,
+          "staleAgeMs": 300,
+          "krwConvertedReference": 94500000
         }
-      ]
+      ],
+      "stale": false,
+      "timestampSkewMs": 2000
     }
-  ],
-  "snapshotAt": 1712345678000
+  ]
 }
 ```
 
-## Unified Market WebSocket
+## Trading Routes
 
-Path: `/ws/market`
+All trading routes require `Authorization: Bearer <jwt>`.
 
-Server welcome:
+### `GET /trading/chance`
 
-```json
-{
-  "type": "welcome",
-  "protocolVersion": "2026-04-15",
-  "path": "/ws/market",
-  "authRequired": false,
-  "channels": ["tickers", "orderbook", "trades"],
-  "timestamp": 1712345678000
-}
-```
+Query:
 
-### Client request payloads
+- `exchange`
+- `symbol`
 
-Ping:
+Unsupported capability returns `501`.
+
+### `POST /trading/orders`
+
+Body:
 
 ```json
 {
-  "requestId": "req-1",
-  "action": "ping"
-}
-```
-
-Ticker subscribe or unsubscribe:
-
-```json
-{
-  "requestId": "req-2",
-  "action": "subscribe",
-  "channel": "tickers",
-  "exchanges": ["upbit", "binance"],
-  "symbols": ["BTC", "ETH"]
-}
-```
-
-Orderbook subscribe or unsubscribe:
-
-```json
-{
-  "requestId": "req-3",
-  "action": "subscribe",
-  "channel": "orderbook",
   "exchange": "upbit",
-  "symbols": ["BTC", "ETH"]
+  "symbol": "BTC",
+  "side": "buy",
+  "type": "limit",
+  "quantity": 0.01,
+  "price": 100000000,
+  "clientOrderId": "client-123"
 }
 ```
 
-Trades subscribe or unsubscribe:
+`stop_limit` is explicitly unsupported by the current canonical create-order contract and returns `501`.
+
+Example response:
 
 ```json
 {
-  "requestId": "req-4",
-  "action": "subscribe",
-  "channel": "trades",
-  "exchange": "binance",
-  "symbols": ["BTC"]
-}
-```
-
-### Server response payloads
-
-Ack:
-
-```json
-{
-  "type": "ack",
-  "requestId": "req-3",
-  "action": "subscribe",
-  "channel": "orderbook",
-  "filters": {
-    "exchange": "upbit",
-    "symbols": ["BTC", "ETH"]
-  },
-  "snapshotSent": true,
-  "timestamp": 1712345678000
-}
-```
-
-For `tickers`, the `filters` object contains `active`, `exchanges`, and `symbols`.
-
-Pong:
-
-```json
-{
-  "type": "pong",
-  "requestId": "req-1",
-  "timestamp": 1712345678000
-}
-```
-
-Error:
-
-```json
-{
-  "type": "error",
-  "requestId": "req-5",
-  "code": "invalid_request",
-  "message": "Invalid websocket request.",
-  "timestamp": 1712345678000
-}
-```
-
-Event:
-
-```json
-{
-  "type": "event",
-  "channel": "tickers",
+  "success": true,
   "data": {
     "exchange": "upbit",
-    "exchangeName": "업비트",
+    "orderId": "b6d6f3e1-1f4b-4f57-a5ad-1d42c4bb3e98",
     "symbol": "BTC",
     "market": "BTC/KRW",
-    "baseCurrency": "BTC",
-    "quoteCurrency": "KRW",
-    "rawSymbol": "KRW-BTC",
+    "side": "buy",
+    "type": "limit",
+    "status": "open",
     "price": 100000000,
-    "change24h": 1.25,
-    "volume24h": 1234,
-    "high24h": 101000000,
-    "low24h": 98000000,
+    "quantity": 0.01,
+    "filledQuantity": 0,
+    "remainingQuantity": 0.01,
+    "averageFillPrice": 0,
+    "createdAt": 1712345678000,
+    "updatedAt": 1712345678000
+  }
+}
+```
+
+### `DELETE /trading/orders/:exchange/:orderId`
+
+Query:
+
+- `symbol?: BTC | ETH | ...`
+
+`coinone` and `korbit` require `symbol` for cancel and detail lookup because the upstream private API is pair-scoped.
+
+### `GET /trading/orders/:exchange/:orderId`
+
+Query:
+
+- `symbol?: BTC | ETH | ...`
+
+### `GET /trading/open-orders`
+
+Query:
+
+- `exchange`
+- `symbol?`
+
+### `GET /trading/fills`
+
+Query:
+
+- `exchange`
+- `symbol?`
+- `limit?`
+
+## Portfolio Routes
+
+All portfolio routes require `Authorization: Bearer <jwt>`.
+
+### `GET /portfolio/summary`
+
+Query:
+
+- `exchange`
+
+```json
+{
+  "success": true,
+  "data": {
+    "exchange": "upbit",
+    "balances": [
+      { "asset": "KRW", "free": 1000000, "locked": 0, "averageBuyPrice": 0 },
+      { "asset": "BTC", "free": 0.01, "locked": 0, "averageBuyPrice": 95000000 }
+    ],
+    "positions": [
+      {
+        "exchange": "upbit",
+        "symbol": "BTC",
+        "quantity": 0.01,
+        "free": 0.01,
+        "locked": 0,
+        "averageBuyPrice": 95000000,
+        "currentPrice": 100000000,
+        "marketValue": 1000000,
+        "pnlValue": 50000,
+        "pnlPercent": 5.26,
+        "timestamp": 1712345678000
+      }
+    ],
+    "totalAssetValue": 2000000,
+    "totalPnlValue": 50000,
+    "totalPnlPercent": 2.56,
     "timestamp": 1712345678000
-  },
-  "timestamp": 1712345678000
+  }
 }
 ```
 
-`orderbook` and `trades` event payloads reuse the same DTOs as the REST response bodies.
+### `GET /portfolio/history`
 
-## Private Exchange Connection CRUD
+Query:
 
-Base path: `/api/v1/private/exchange-connections`
+- `exchange`
+- `symbol?`
+- `limit?`
 
-All endpoints require `Authorization: Bearer <jwt>`.
+Current history is trade-driven canonical history produced from private fills/completed orders.
 
-### `GET /`
+## Exchange Connection Routes
 
-Response `data`:
+All routes require `Authorization: Bearer <jwt>`.
+
+- `GET /exchange-connections`
+- `POST /exchange-connections`
+- `POST /exchange-connections/:id/validate`
+- `PATCH /exchange-connections/:id`
+- `DELETE /exchange-connections/:id`
+
+Example `GET /exchange-connections` response:
 
 ```json
 {
-  "items": [
-    {
-      "id": "conn-1",
-      "exchange": "upbit",
-      "exchangeName": "업비트",
-      "label": "Primary Upbit",
-      "apiKeyMasked": "abc***xyz",
-      "hasSecretKey": true,
-      "hasPassphrase": false,
-      "validation": {
-        "status": "placeholder",
-        "mode": "placeholder",
-        "canUsePrivateApi": false,
-        "message": "Credentials stored for upbit, but a live private adapter is not implemented yet.",
-        "checkedAt": "2026-04-15T00:00:00.000Z"
-      },
-      "createdAt": "2026-04-15T00:00:00.000Z",
-      "updatedAt": "2026-04-15T00:00:00.000Z"
-    }
-  ],
-  "total": 1
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "conn-1",
+        "exchange": "upbit",
+        "exchangeName": "업비트",
+        "label": "Primary Upbit",
+        "apiKeyMasked": "abc*****xyz",
+        "hasSecretKey": true,
+        "hasPassphrase": false,
+        "validation": {
+          "status": "verified",
+          "mode": "live_api",
+          "canUsePrivateApi": true,
+          "message": "upbit private API credentials verified successfully.",
+          "checkedAt": "2026-04-17T06:00:00.000Z"
+        },
+        "operational": {
+          "connectionStatus": "active",
+          "lastSyncAt": "2026-04-17T06:05:00.000Z",
+          "failureReason": null,
+          "isTestConnectionResult": true
+        },
+        "createdAt": "2026-04-17T05:59:00.000Z",
+        "updatedAt": "2026-04-17T06:05:00.000Z"
+      }
+    ],
+    "total": 1
+  }
 }
 ```
 
-### `POST /`
+## Unsupported Cases
 
-Request:
-
-```json
-{
-  "exchange": "upbit",
-  "label": "Primary Upbit",
-  "apiKey": "live-api-key",
-  "secretKey": "live-secret-key",
-  "passphrase": "optional"
-}
-```
-
-Response `data`: same DTO as list item. Returns `201`.
-
-### `PATCH /:exchange`
-
-Request:
-
-```json
-{
-  "label": "Updated Upbit",
-  "apiKey": "rotated-api-key",
-  "secretKey": "rotated-secret-key",
-  "passphrase": null
-}
-```
-
-Notes:
-
-- `label: null` clears the label
-- `passphrase: null` clears the passphrase
-- omitted fields keep the previous value
-
-Response `data`: same DTO as list item.
-
-### `DELETE /:exchange`
-
-Response `data`:
-
-```json
-{
-  "exchange": "upbit",
-  "exchangeName": "업비트",
-  "removedAt": "2026-04-15T00:10:00.000Z"
-}
-```
-
-## Placeholder Private Domains
-
-The following private endpoints are still backed by the internal database placeholder provider, not by live exchange private adapters:
-
-- `/api/v1/private/balances`
-- `/api/v1/private/holdings`
-- `/api/v1/private/portfolio`
-- `/api/v1/private/portfolio/summary`
-- `/api/v1/private/orders` (read)
-- `/api/v1/private/open-orders`
-- `/api/v1/private/fills`
-
-Current provider boundary:
-
-- Public market data: live exchange public WebSocket and REST collectors
-- Exchange connection CRUD: encrypted credential storage plus validation metadata
-- Private account reads: database placeholder provider
-- Live private exchange adapter: not implemented yet
+- Binance private trading and private portfolio.
+- Canonical `stop_limit` order creation.
+- Provider-pair-scoped order lookup without `symbol` for Coinone and Korbit.
+- Private websocket session fan-out to user-facing server routes. Current HTTP private APIs use live REST and update connection sync state; private WS orchestration is still pending.

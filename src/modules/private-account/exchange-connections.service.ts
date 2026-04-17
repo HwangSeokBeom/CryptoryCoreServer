@@ -23,7 +23,11 @@ type ExchangeConnectionRecord = {
   validationMode: string;
   validationMessage: string | null;
   canUsePrivateApi: boolean;
+  connectionStatus: string;
   lastValidatedAt: Date | null;
+  lastSyncAt: Date | null;
+  isTestConnectionResult: boolean;
+  failureReason: string | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -52,6 +56,30 @@ async function validateConnection(params: {
   });
 }
 
+async function findConnectionByIdentifier(userId: string, identifier: string) {
+  if (EXCHANGE_MAP.has(identifier)) {
+    return prisma.exchangeConnection.findUnique({
+      where: {
+        userId_exchange: {
+          userId,
+          exchange: identifier,
+        },
+      },
+    });
+  }
+
+  return prisma.exchangeConnection.findFirst({
+    where: {
+      id: identifier,
+      userId,
+    },
+  });
+}
+
+function toOperationalStatus(validation: Awaited<ReturnType<typeof validateConnection>>) {
+  return validation.status === 'verified' ? 'active' : validation.status === 'invalid' ? 'invalid' : 'pending';
+}
+
 function mapConnection(connection: ExchangeConnectionRecord) {
   const exchangeInfo = EXCHANGE_MAP.get(connection.exchange);
   const apiKey = decryptSecret(connection.apiKeyEncrypted);
@@ -74,6 +102,12 @@ function mapConnection(connection: ExchangeConnectionRecord) {
       canUsePrivateApi: connection.canUsePrivateApi,
       message: connection.validationMessage ?? 'Validation has not been executed yet.',
       checkedAt: (connection.lastValidatedAt ?? connection.updatedAt).toISOString(),
+    },
+    operational: {
+      connectionStatus: connection.connectionStatus as 'pending' | 'active' | 'degraded' | 'invalid',
+      lastSyncAt: connection.lastSyncAt?.toISOString() ?? null,
+      failureReason: connection.failureReason,
+      isTestConnectionResult: connection.isTestConnectionResult,
     },
     createdAt: connection.createdAt,
     updatedAt: connection.updatedAt,
@@ -126,7 +160,11 @@ export async function createExchangeConnection(
       validationMode: validation.mode,
       validationMessage: validation.message,
       canUsePrivateApi: validation.canUsePrivateApi,
+      connectionStatus: toOperationalStatus(validation),
       lastValidatedAt: new Date(validation.checkedAt),
+      lastSyncAt: null,
+      isTestConnectionResult: validation.canUsePrivateApi,
+      failureReason: validation.canUsePrivateApi ? null : validation.message,
     },
   });
 
@@ -148,22 +186,16 @@ export async function createExchangeConnection(
 
 export async function updateExchangeConnection(
   userId: string,
-  exchange: string,
+  identifier: string,
   input: UpdateExchangeConnectionRequest,
 ) {
-  assertSupportedExchange(exchange);
-  const existing = await prisma.exchangeConnection.findUnique({
-    where: {
-      userId_exchange: {
-        userId,
-        exchange,
-      },
-    },
-  });
+  const existing = await findConnectionByIdentifier(userId, identifier);
 
   if (!existing) {
     throw new AppError(404, '거래소 연결을 찾을 수 없습니다');
   }
+  assertSupportedExchange(existing.exchange);
+  const exchange = existing.exchange;
 
   const mergedCredentials = {
     exchange,
@@ -201,7 +233,10 @@ export async function updateExchangeConnection(
       validationMode: validation.mode,
       validationMessage: validation.message,
       canUsePrivateApi: validation.canUsePrivateApi,
+      connectionStatus: toOperationalStatus(validation),
       lastValidatedAt: new Date(validation.checkedAt),
+      isTestConnectionResult: validation.canUsePrivateApi,
+      failureReason: validation.canUsePrivateApi ? null : validation.message,
     },
   });
 
@@ -221,31 +256,78 @@ export async function updateExchangeConnection(
   return mapConnection(connection);
 }
 
-export async function removeExchangeConnection(userId: string, exchange: string) {
-  const exchangeInfo = assertSupportedExchange(exchange);
-  const existing = await prisma.exchangeConnection.findUnique({
-    where: {
-      userId_exchange: {
-        userId,
-        exchange,
-      },
-    },
-  });
+export async function removeExchangeConnection(userId: string, identifier: string) {
+  const existing = await findConnectionByIdentifier(userId, identifier);
 
   if (!existing) {
     throw new AppError(404, '거래소 연결을 찾을 수 없습니다');
   }
+  const exchangeInfo = assertSupportedExchange(existing.exchange);
 
   logger.info(
-    { domain: 'private-account', userId, exchange, operation: 'delete-exchange-connection' },
+    { domain: 'private-account', userId, exchange: existing.exchange, operation: 'delete-exchange-connection' },
     'Removing private exchange connection',
   );
 
   await prisma.exchangeConnection.delete({ where: { id: existing.id } });
 
   return serializeExchangeConnectionDeleteResponse({
-    exchange: exchange as ExchangeId,
+    exchange: existing.exchange as ExchangeId,
     exchangeName: exchangeInfo.name,
     removedAt: new Date(),
   });
+}
+
+export async function validateStoredExchangeConnection(userId: string, identifier: string) {
+  const existing = await findConnectionByIdentifier(userId, identifier);
+  if (!existing) {
+    throw new AppError(404, '거래소 연결을 찾을 수 없습니다');
+  }
+
+  const validation = await validateConnection({
+    exchange: existing.exchange,
+    apiKey: decryptSecret(existing.apiKeyEncrypted),
+    secretKey: decryptSecret(existing.secretKeyEncrypted),
+    passphrase: existing.passphraseEncrypted ? decryptSecret(existing.passphraseEncrypted) : null,
+  });
+
+  const updated = await prisma.exchangeConnection.update({
+    where: { id: existing.id },
+    data: {
+      validationStatus: validation.status,
+      validationMode: validation.mode,
+      validationMessage: validation.message,
+      canUsePrivateApi: validation.canUsePrivateApi,
+      connectionStatus: toOperationalStatus(validation),
+      lastValidatedAt: new Date(validation.checkedAt),
+      isTestConnectionResult: validation.canUsePrivateApi,
+      failureReason: validation.canUsePrivateApi ? null : validation.message,
+    },
+  });
+
+  return mapConnection(updated);
+}
+
+export async function markExchangeConnectionSync(
+  userId: string,
+  exchange: string,
+  params: { success: boolean; failureReason?: string | null },
+) {
+  try {
+    await prisma.exchangeConnection.update({
+      where: {
+        userId_exchange: {
+          userId,
+          exchange,
+        },
+      },
+      data: {
+        connectionStatus: params.success ? 'active' : 'degraded',
+        lastSyncAt: params.success ? new Date() : undefined,
+        failureReason: params.success ? null : params.failureReason ?? 'Exchange sync failed',
+      },
+    });
+  } catch {
+    return;
+  }
 }
