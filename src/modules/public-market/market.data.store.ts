@@ -1,6 +1,10 @@
 import { redis } from '../../config/redis';
+import type { ExchangeId } from '../../core/exchange/exchange.types';
+import { marketIngestHealth } from '../../domains/market-data/market.ingest-health';
+import { marketTrendProjectionStore } from '../../domains/market-data/market-trend.projection';
 import { logger } from '../../utils/logger';
 import type {
+  NormalizedMarketCandle,
   NormalizedMarketOrderbook,
   NormalizedMarketTicker,
   NormalizedMarketTrade,
@@ -8,20 +12,26 @@ import type {
 } from './market.types';
 
 const TRADE_CACHE_LIMIT = 100;
+const TICKER_HISTORY_LIMIT = 120;
 
-function marketKey(exchange: string, symbol: string): string {
-  return `${exchange}:${symbol}`;
+function marketKey(exchange: string, symbol: string, interval?: string): string {
+  return interval ? `${exchange}:${symbol}:${interval}` : `${exchange}:${symbol}`;
 }
 
 class PublicMarketDataStore {
   private readonly tickers = new Map<string, NormalizedMarketTicker>();
+  private readonly tickerHistory = new Map<string, Array<{ price: number; timestamp: number }>>();
   private readonly orderbooks = new Map<string, NormalizedMarketOrderbook>();
   private readonly trades = new Map<string, NormalizedMarketTrade[]>();
+  private readonly candles = new Map<string, NormalizedMarketCandle>();
   private readonly collectorStatuses = new Map<string, PublicMarketCollectorStatus>();
 
   upsertTicker(ticker: NormalizedMarketTicker) {
     const key = marketKey(ticker.exchange, ticker.symbol);
     this.tickers.set(key, ticker);
+    this.appendTickerHistory(key, ticker.price, ticker.timestamp);
+    marketIngestHealth.noteTickerReceived(ticker.exchange as ExchangeId, ticker.timestamp);
+    marketTrendProjectionStore.recordTicker(ticker);
     void this.persist(`market:ticker:${key}`, ticker, 120);
   }
 
@@ -39,7 +49,16 @@ class PublicMarketDataStore {
       existing.length = TRADE_CACHE_LIMIT;
     }
     this.trades.set(key, existing);
+    this.refreshTickerFromTrade(trade);
+    marketIngestHealth.noteTradeReceived(trade.exchange as ExchangeId, trade.timestamp);
+    marketTrendProjectionStore.recordTrade(trade);
     void this.persist(`market:trades:${key}`, existing, 60);
+  }
+
+  upsertCandle(candle: NormalizedMarketCandle) {
+    const key = marketKey(candle.exchange, candle.symbol, candle.interval);
+    this.candles.set(key, candle);
+    void this.persist(`market:candle:${key}`, candle, 120);
   }
 
   setCollectorStatus(status: PublicMarketCollectorStatus) {
@@ -61,12 +80,20 @@ class PublicMarketDataStore {
       .sort((left, right) => left.symbol.localeCompare(right.symbol));
   }
 
+  getTickerHistory(exchange: string, symbol: string): Array<{ price: number; timestamp: number }> {
+    return [...(this.tickerHistory.get(marketKey(exchange, symbol)) ?? [])];
+  }
+
   getOrderbook(exchange: string, symbol: string): NormalizedMarketOrderbook | null {
     return this.orderbooks.get(marketKey(exchange, symbol)) ?? null;
   }
 
   getTrades(exchange: string, symbol: string, limit = 50): NormalizedMarketTrade[] {
     return (this.trades.get(marketKey(exchange, symbol)) ?? []).slice(0, limit);
+  }
+
+  getCandle(exchange: string, symbol: string, interval: string): NormalizedMarketCandle | null {
+    return this.candles.get(marketKey(exchange, symbol, interval)) ?? null;
   }
 
   getCollectorStatuses(): PublicMarketCollectorStatus[] {
@@ -81,6 +108,39 @@ class PublicMarketDataStore {
     } catch (err) {
       logger.debug({ err, key }, 'Failed to persist public market cache to redis');
     }
+  }
+
+  private appendTickerHistory(key: string, price: number, timestamp: number) {
+    const history = this.tickerHistory.get(key) ?? [];
+    const last = history[history.length - 1];
+    if (!last || last.price !== price || last.timestamp !== timestamp) {
+      history.push({ price, timestamp });
+      if (history.length > TICKER_HISTORY_LIMIT) {
+        history.splice(0, history.length - TICKER_HISTORY_LIMIT);
+      }
+      this.tickerHistory.set(key, history);
+      return;
+    }
+
+    last.timestamp = Math.max(last.timestamp, timestamp);
+  }
+
+  private refreshTickerFromTrade(trade: NormalizedMarketTrade) {
+    const key = marketKey(trade.exchange, trade.symbol);
+    const existingTicker = this.tickers.get(key);
+    if (!existingTicker || trade.timestamp < existingTicker.timestamp) {
+      return;
+    }
+
+    const updatedTicker: NormalizedMarketTicker = {
+      ...existingTicker,
+      price: trade.price,
+      timestamp: trade.timestamp,
+    };
+
+    this.tickers.set(key, updatedTicker);
+    this.appendTickerHistory(key, updatedTicker.price, updatedTicker.timestamp);
+    void this.persist(`market:ticker:${key}`, updatedTicker, 120);
   }
 }
 

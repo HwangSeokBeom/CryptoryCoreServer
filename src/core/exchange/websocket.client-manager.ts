@@ -15,6 +15,14 @@ export interface WebSocketClientDefinition {
   onReconnect?: (ctx: WebSocketClientManager) => Promise<void> | void;
 }
 
+export interface WebSocketReconnectMetadata {
+  attempt: number;
+  reasonType: 'close' | 'error' | 'connect_error' | 'unknown';
+  code?: number;
+  reason?: string;
+  message?: string;
+}
+
 export class WebSocketClientManager {
   private socket: WebSocket | null = null;
   private reconnectAttempts = 0;
@@ -23,6 +31,7 @@ export class WebSocketClientManager {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private hasOpened = false;
   private activeUrl: string;
+  private lastReconnectMetadata: WebSocketReconnectMetadata | null = null;
 
   constructor(private readonly definition: WebSocketClientDefinition) {
     this.activeUrl = definition.url;
@@ -54,6 +63,10 @@ export class WebSocketClientManager {
     this.socket.send(payload);
   }
 
+  getReconnectMetadata(): WebSocketReconnectMetadata | null {
+    return this.lastReconnectMetadata;
+  }
+
   private async connect() {
     try {
       const request = await this.definition.buildConnectionRequest?.();
@@ -75,7 +88,24 @@ export class WebSocketClientManager {
         });
       });
 
-      this.socket.on('close', () => {
+      this.socket.on('close', (code, reason) => {
+        const reasonText = reason?.toString('utf8').trim() || undefined;
+        this.lastReconnectMetadata = {
+          attempt: this.reconnectAttempts + 1,
+          reasonType: 'close',
+          code,
+          reason: reasonText,
+        };
+        logger.warn(
+          {
+            domain: 'exchange-ws',
+            client: this.definition.name,
+            url: this.activeUrl,
+            closeCode: code,
+            closeReason: reasonText,
+          },
+          'Websocket client closed',
+        );
         if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
         this.heartbeatTimer = null;
         this.socket = null;
@@ -83,6 +113,11 @@ export class WebSocketClientManager {
       });
 
       this.socket.on('error', (err) => {
+        this.lastReconnectMetadata = {
+          attempt: this.reconnectAttempts + 1,
+          reasonType: 'error',
+          message: err.message,
+        };
         logger.warn({ domain: 'exchange-ws', client: this.definition.name, err }, 'Websocket client error');
       });
 
@@ -90,6 +125,11 @@ export class WebSocketClientManager {
         this.socket?.pong(data);
       });
     } catch (error) {
+      this.lastReconnectMetadata = {
+        attempt: this.reconnectAttempts + 1,
+        reasonType: 'connect_error',
+        message: error instanceof Error ? error.message : String(error),
+      };
       logger.warn({ domain: 'exchange-ws', client: this.definition.name, url: this.activeUrl, err: error }, 'Websocket connect failed');
       this.socket = null;
       await this.scheduleReconnect();
@@ -147,6 +187,7 @@ export class WebSocketClientManager {
         reconnectAttempts: this.reconnectAttempts,
         reconnectDelayMs,
         url: this.activeUrl,
+        reconnectReason: this.lastReconnectMetadata,
       },
       'Scheduling websocket reconnect',
     );

@@ -3,6 +3,8 @@ import type {
   CancelOrderRequest,
   CanonicalCandle,
   CanonicalFill,
+  ExchangeMarketDescriptor,
+  MarketCapabilitySnapshot,
   CanonicalOrder,
   CanonicalOrderbookSnapshot,
   CanonicalTickerSnapshot,
@@ -31,7 +33,8 @@ export interface ExchangeProviderBase {
 }
 
 export interface ExchangeMarketDataProvider extends ExchangeProviderBase {
-  listMarkets(): Promise<Array<{ symbol: string; market: string; rawSymbol: string }>>;
+  listMarkets(): Promise<ExchangeMarketDescriptor[]>;
+  getMarketCapabilitySnapshot?(markets?: ExchangeMarketDescriptor[]): Promise<MarketCapabilitySnapshot>;
   getTickerSnapshot(symbols?: string[]): Promise<CanonicalTickerSnapshot[]>;
   getOrderbookSnapshot(symbol: string, depth?: number): Promise<CanonicalOrderbookSnapshot>;
   getRecentTrades(symbol: string, limit?: number): Promise<CanonicalTrade[]>;

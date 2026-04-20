@@ -1,0 +1,55 @@
+{
+  "result": "success",
+  "error_code": "0",
+  "server_time": 1776429101123,
+  "tickers": [
+    {
+      "quote_currency": "krw",
+      "target_currency": "btc",
+      "timestamp": 1776429078302,
+      "high": "112790000.0",
+      "low": "108620000.0",
+      "first": "110390000.0",
+      "last": "112260000.0",
+      "quote_volume": "9012764771.9973",
+      "target_volume": "81.40973422",
+      "yesterday_last": "110700000.0"
+    },
+    {
+      "quote_currency": "krw",
+      "target_currency": "eth",
+      "timestamp": 1776429079302,
+      "high": "5300000.0",
+      "low": "5150000.0",
+      "first": "5200000.0",
+      "last": "5255000.0",
+      "quote_volume": "1200000000.5",
+      "target_volume": "228.1",
+      "yesterday_last": "5180000.0"
+    },
+    {
+      "quote_currency": "krw",
+      "target_currency": "xrp",
+      "timestamp": 1776429080302,
+      "high": "3200.0",
+      "low": "3050.0",
+      "first": "3100.0",
+      "last": "3155.0",
+      "quote_volume": "800000000.9",
+      "target_volume": "255000.1",
+      "yesterday_last": "3090.0"
+    },
+    {
+      "quote_currency": "krw",
+      "target_currency": "tnsr",
+      "timestamp": 1776429081302,
+      "high": "69.05",
+      "low": "58.7",
+      "first": "58.7",
+      "last": "60.0",
+      "quote_volume": "6715910.2285",
+      "target_volume": "111644.3482289",
+      "yesterday_last": "59.45"
+    }
+  ]
+}

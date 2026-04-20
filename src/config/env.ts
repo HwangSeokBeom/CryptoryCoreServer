@@ -20,9 +20,21 @@ const envSchema = z.object({
   FX_STALE_THRESHOLD_MS: z.coerce.number().default(300000),
   MARKET_DATA_STALE_THRESHOLD_MS: z.coerce.number().default(300000),
   FX_TIMESTAMP_SKEW_THRESHOLD_MS: z.coerce.number().default(30000),
+  COINGECKO_API_BASE_URL: z.string().url().default('https://api.coingecko.com/api/v3'),
+  COINGECKO_API_KEY: z.string().optional(),
   EXCHANGE_RATE_API_KEY: z.string().optional(),
   EXCHANGE_CREDENTIAL_ENCRYPTION_KEY: z.string().optional(),
   EXCHANGE_CONNECTION_ENCRYPTION_KEY: z.string().optional(),
+  UPBIT_ACCESS_KEY: z.string().optional(),
+  UPBIT_SECRET_KEY: z.string().optional(),
+  BITHUMB_API_KEY: z.string().optional(),
+  BITHUMB_SECRET_KEY: z.string().optional(),
+  COINONE_ACCESS_TOKEN: z.string().optional(),
+  COINONE_SECRET_KEY: z.string().optional(),
+  KORBIT_API_KEY: z.string().optional(),
+  KORBIT_SECRET_KEY: z.string().optional(),
+  BINANCE_API_KEY: z.string().optional(),
+  BINANCE_SECRET_KEY: z.string().optional(),
   UPBIT_API_BASE_URL: z.string().url().optional(),
   UPBIT_REST_BASE_URL: z.string().url().optional(),
   UPBIT_WS_URL: z.string().url().optional(),
@@ -67,9 +79,21 @@ export interface Env {
   FX_STALE_THRESHOLD_MS: number;
   MARKET_DATA_STALE_THRESHOLD_MS: number;
   FX_TIMESTAMP_SKEW_THRESHOLD_MS: number;
+  COINGECKO_API_BASE_URL: string;
+  COINGECKO_API_KEY?: string;
   EXCHANGE_RATE_API_KEY?: string;
   EXCHANGE_CREDENTIAL_ENCRYPTION_KEY?: string;
   EXCHANGE_CONNECTION_ENCRYPTION_KEY?: string;
+  UPBIT_ACCESS_KEY?: string;
+  UPBIT_SECRET_KEY?: string;
+  BITHUMB_API_KEY?: string;
+  BITHUMB_SECRET_KEY?: string;
+  COINONE_ACCESS_TOKEN?: string;
+  COINONE_SECRET_KEY?: string;
+  KORBIT_API_KEY?: string;
+  KORBIT_SECRET_KEY?: string;
+  BINANCE_API_KEY?: string;
+  BINANCE_SECRET_KEY?: string;
   UPBIT_API_BASE_URL?: string;
   UPBIT_REST_BASE_URL?: string;
   UPBIT_WS_URL?: string;
@@ -127,10 +151,22 @@ function loadEnv(): Env {
     FX_STALE_THRESHOLD_MS: parsed.data.FX_STALE_THRESHOLD_MS,
     MARKET_DATA_STALE_THRESHOLD_MS: parsed.data.MARKET_DATA_STALE_THRESHOLD_MS,
     FX_TIMESTAMP_SKEW_THRESHOLD_MS: parsed.data.FX_TIMESTAMP_SKEW_THRESHOLD_MS,
+    COINGECKO_API_BASE_URL: parsed.data.COINGECKO_API_BASE_URL,
+    COINGECKO_API_KEY: parsed.data.COINGECKO_API_KEY,
     EXCHANGE_RATE_API_KEY: parsed.data.EXCHANGE_RATE_API_KEY,
     EXCHANGE_CREDENTIAL_ENCRYPTION_KEY:
       parsed.data.EXCHANGE_CREDENTIAL_ENCRYPTION_KEY ?? parsed.data.EXCHANGE_CONNECTION_ENCRYPTION_KEY,
     EXCHANGE_CONNECTION_ENCRYPTION_KEY: parsed.data.EXCHANGE_CONNECTION_ENCRYPTION_KEY,
+    UPBIT_ACCESS_KEY: parsed.data.UPBIT_ACCESS_KEY,
+    UPBIT_SECRET_KEY: parsed.data.UPBIT_SECRET_KEY,
+    BITHUMB_API_KEY: parsed.data.BITHUMB_API_KEY,
+    BITHUMB_SECRET_KEY: parsed.data.BITHUMB_SECRET_KEY,
+    COINONE_ACCESS_TOKEN: parsed.data.COINONE_ACCESS_TOKEN,
+    COINONE_SECRET_KEY: parsed.data.COINONE_SECRET_KEY,
+    KORBIT_API_KEY: parsed.data.KORBIT_API_KEY,
+    KORBIT_SECRET_KEY: parsed.data.KORBIT_SECRET_KEY,
+    BINANCE_API_KEY: parsed.data.BINANCE_API_KEY,
+    BINANCE_SECRET_KEY: parsed.data.BINANCE_SECRET_KEY,
     UPBIT_API_BASE_URL: parsed.data.UPBIT_API_BASE_URL,
     UPBIT_REST_BASE_URL: parsed.data.UPBIT_REST_BASE_URL,
     UPBIT_WS_URL: parsed.data.UPBIT_WS_URL,

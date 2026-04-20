@@ -1,6 +1,10 @@
 import WebSocket from 'ws';
 import { updateSparkline } from '../../exchanges/ExchangeManager';
 import { getUsdKrwRate } from '../../exchanges/exchangeRateService';
+import {
+  normalizeExchangeTimestampFromCandidates,
+  toIsoTimestamp,
+} from '../../providers/exchanges/provider-utils';
 import { logger } from '../../utils/logger';
 import { marketEventBus } from './market.event-bus';
 import { publicMarketDataStore } from './market.data.store';
@@ -85,6 +89,22 @@ function persistOrderbook(orderbook: NormalizedMarketOrderbook) {
 function persistTrade(trade: NormalizedMarketTrade) {
   publicMarketDataStore.appendTrade(trade);
   marketEventBus.emitTrade(trade);
+}
+
+function logInvalidTradeTimestamp(params: {
+  exchange: string;
+  raw: unknown;
+  reason: string | null;
+}) {
+  logger.warn(
+    {
+      domain: 'public-market',
+      exchange: params.exchange,
+      rawTimestamp: params.raw,
+      reason: params.reason,
+    },
+    `[TradeTimestampAPI] exchange=${params.exchange} invalidTimestamp raw=${String(params.raw)} reason=${params.reason ?? 'unknown'}`,
+  );
 }
 
 abstract class BasePublicExchangeCollector {
@@ -297,13 +317,29 @@ class UpbitCollector extends BasePublicExchangeCollector {
     }
 
     if (type === 'trade') {
+      const normalizedTimestamp = normalizeExchangeTimestampFromCandidates(
+        [payload.trade_timestamp, payload.ttms, payload.timestamp],
+        { assumeTimezone: 'UTC' },
+      );
+      if (normalizedTimestamp.timestamp === null) {
+        logInvalidTradeTimestamp({
+          exchange: this.exchange,
+          raw: normalizedTimestamp.raw,
+          reason: normalizedTimestamp.reason,
+        });
+        return;
+      }
+      const tradeBase = buildEventBase(this.exchange, rawSymbol, normalizedTimestamp.timestamp);
+      if (!tradeBase) return;
+
       persistTrade({
-        ...base,
+        ...tradeBase,
         channel: 'trades',
-        tradeId: String(payload.sequential_id ?? payload.sid ?? `${rawSymbol}:${timestamp}`),
+        tradeId: String(payload.sequential_id ?? payload.sid ?? `${rawSymbol}:${normalizedTimestamp.timestamp}`),
         price: safeNumber(payload.trade_price ?? payload.tp),
         quantity: safeNumber(payload.trade_volume ?? payload.tv),
         side: String(payload.ask_bid ?? payload.ab).toLowerCase() === 'ask' ? 'sell' : 'buy',
+        executedAt: toIsoTimestamp(normalizedTimestamp.timestamp),
       });
     }
   }
@@ -373,13 +409,29 @@ class BinanceCollector extends BasePublicExchangeCollector {
     }
 
     if (type === 'trade' || type === 'aggTrade') {
+      const normalizedTimestamp = normalizeExchangeTimestampFromCandidates(
+        [wrapped.T, wrapped.E, wrapped.time],
+        { assumeTimezone: 'UTC' },
+      );
+      if (normalizedTimestamp.timestamp === null) {
+        logInvalidTradeTimestamp({
+          exchange: this.exchange,
+          raw: normalizedTimestamp.raw,
+          reason: normalizedTimestamp.reason,
+        });
+        return;
+      }
+      const tradeBase = buildEventBase(this.exchange, rawSymbol, normalizedTimestamp.timestamp);
+      if (!tradeBase) return;
+
       persistTrade({
-        ...base,
+        ...tradeBase,
         channel: 'trades',
-        tradeId: String(wrapped.t ?? wrapped.a ?? `${rawSymbol}:${timestamp}`),
+        tradeId: String(wrapped.t ?? wrapped.a ?? `${rawSymbol}:${normalizedTimestamp.timestamp}`),
         price: safeNumber(wrapped.p) * rate,
         quantity: safeNumber(wrapped.q),
         side: wrapped.m ? 'sell' : 'buy',
+        executedAt: toIsoTimestamp(normalizedTimestamp.timestamp),
       });
     }
   }
@@ -480,16 +532,29 @@ class BithumbCollector extends BasePublicExchangeCollector {
       const trades = content.list ?? [];
       for (const trade of trades) {
         const rawSymbol = String(trade.symbol ?? '');
-        const base = buildEventBase(this.exchange, rawSymbol, Date.now());
+        const normalizedTimestamp = normalizeExchangeTimestampFromCandidates(
+          [trade.contDtm, trade.transaction_date, trade.datetime, content.datetime],
+          { assumeTimezone: 'KST' },
+        );
+        if (normalizedTimestamp.timestamp === null) {
+          logInvalidTradeTimestamp({
+            exchange: this.exchange,
+            raw: normalizedTimestamp.raw,
+            reason: normalizedTimestamp.reason,
+          });
+          continue;
+        }
+        const base = buildEventBase(this.exchange, rawSymbol, normalizedTimestamp.timestamp);
         if (!base) continue;
 
         persistTrade({
           ...base,
           channel: 'trades',
-          tradeId: String(trade.contNo ?? trade.transaction_date ?? `${rawSymbol}:${Date.now()}`),
+          tradeId: String(trade.contNo ?? trade.transaction_date ?? `${rawSymbol}:${normalizedTimestamp.timestamp}`),
           price: safeNumber(trade.contPrice ?? trade.price),
           quantity: safeNumber(trade.contQty ?? trade.quantity),
           side: String(trade.buySellGb ?? '') === '1' ? 'sell' : 'buy',
+          executedAt: toIsoTimestamp(normalizedTimestamp.timestamp),
         });
       }
     }
@@ -594,14 +659,30 @@ class CoinoneCollector extends BasePublicExchangeCollector {
     if (channel === 'TRADE') {
       const trades = Array.isArray(data) ? data : Array.isArray(data.trades) ? data.trades : [data];
       for (const trade of trades) {
+        const normalizedTimestamp = normalizeExchangeTimestampFromCandidates(
+          [trade.timestamp, trade.ts, data.timestamp, data.ts],
+          { assumeTimezone: 'UTC' },
+        );
+        if (normalizedTimestamp.timestamp === null) {
+          logInvalidTradeTimestamp({
+            exchange: this.exchange,
+            raw: normalizedTimestamp.raw,
+            reason: normalizedTimestamp.reason,
+          });
+          continue;
+        }
+        const tradeBase = buildEventBase(this.exchange, rawSymbol, normalizedTimestamp.timestamp);
+        if (!tradeBase) continue;
+
         persistTrade({
-          ...base,
+          ...tradeBase,
           channel: 'trades',
-          tradeId: String(trade.id ?? trade.trade_id ?? `${rawSymbol}:${trade.timestamp ?? Date.now()}`),
+          tradeId: String(trade.id ?? trade.trade_id ?? `${rawSymbol}:${normalizedTimestamp.timestamp}`),
           price: safeNumber(trade.price ?? trade.last),
           quantity: safeNumber(trade.qty ?? trade.quantity),
           side: trade.is_buy === true || trade.side === 'BUY' ? 'buy' : 'sell',
-          timestamp: safeNumber(trade.timestamp ?? timestamp),
+          timestamp: normalizedTimestamp.timestamp,
+          executedAt: toIsoTimestamp(normalizedTimestamp.timestamp),
         });
       }
     }
@@ -674,14 +755,29 @@ class KorbitCollector extends BasePublicExchangeCollector {
     if (type === 'trade') {
       const trades = Array.isArray(payload.data) ? payload.data : Array.isArray(payload.data?.trades) ? payload.data.trades : [payload.data];
       for (const trade of trades) {
+        const normalizedTimestamp = normalizeExchangeTimestampFromCandidates(
+          [trade.timestamp, payload.timestamp, payload.data?.timestamp],
+          { assumeTimezone: 'UTC' },
+        );
+        if (normalizedTimestamp.timestamp === null) {
+          logInvalidTradeTimestamp({
+            exchange: this.exchange,
+            raw: normalizedTimestamp.raw,
+            reason: normalizedTimestamp.reason,
+          });
+          continue;
+        }
+        const tradeBase = buildEventBase(this.exchange, rawSymbol, normalizedTimestamp.timestamp);
+        if (!tradeBase) continue;
+
         persistTrade({
-          ...base,
+          ...tradeBase,
           channel: 'trades',
-          tradeId: String(trade.id ?? trade.tradeId ?? `${rawSymbol}:${trade.timestamp ?? Date.now()}`),
+          tradeId: String(trade.id ?? trade.tradeId ?? `${rawSymbol}:${normalizedTimestamp.timestamp}`),
           price: safeNumber(trade.price),
           quantity: safeNumber(trade.amount ?? trade.qty),
           side: String(trade.takerSide ?? trade.side ?? '').toLowerCase() === 'buy' ? 'buy' : 'sell',
-          timestamp: safeNumber(trade.timestamp ?? timestamp),
+          executedAt: toIsoTimestamp(normalizedTimestamp.timestamp),
         });
       }
     }

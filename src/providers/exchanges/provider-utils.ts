@@ -39,6 +39,169 @@ export function safeString(value: unknown) {
   return typeof value === 'string' ? value : value === null || value === undefined ? '' : String(value);
 }
 
+type TimestampAssumption = 'UTC' | 'KST';
+
+export type TimestampNormalizationResult = {
+  raw: unknown;
+  timestamp: number | null;
+  reason: string | null;
+};
+
+const MIN_PLAUSIBLE_TIMESTAMP_MS = Date.UTC(2000, 0, 1);
+const MAX_PLAUSIBLE_TIMESTAMP_MS = Date.UTC(2101, 0, 1);
+
+function isPlausibleTimestamp(timestamp: number) {
+  return Number.isFinite(timestamp)
+    && timestamp >= MIN_PLAUSIBLE_TIMESTAMP_MS
+    && timestamp < MAX_PLAUSIBLE_TIMESTAMP_MS;
+}
+
+function normalizeNumericTimestamp(value: number) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+
+  const candidates = [
+    value >= 1_000_000_000_000_000 ? Math.trunc(value / 1_000) : null,
+    value >= 1_000_000_000_000 ? Math.trunc(value) : null,
+    value >= 1_000_000_000 ? Math.trunc(value * 1_000) : null,
+  ].filter((candidate): candidate is number => candidate !== null);
+
+  return candidates.find((candidate) => isPlausibleTimestamp(candidate)) ?? null;
+}
+
+function parseTimestampWithAssumption(value: string, assumption: TimestampAssumption) {
+  const hasExplicitTimezone = /[zZ]|[+-]\d{2}:\d{2}$/.test(value);
+  if (hasExplicitTimezone) {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) || !isPlausibleTimestamp(parsed) ? null : parsed;
+  }
+
+  const match = value.match(
+    /^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,6}))?)?$/,
+  );
+  if (!match) {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) || !isPlausibleTimestamp(parsed) ? null : parsed;
+  }
+
+  const [
+    ,
+    yearText,
+    monthText,
+    dayText,
+    hourText,
+    minuteText,
+    secondText = '0',
+    fractionalText = '0',
+  ] = match;
+  const year = Number.parseInt(yearText, 10);
+  const month = Number.parseInt(monthText, 10);
+  const day = Number.parseInt(dayText, 10);
+  const hour = Number.parseInt(hourText, 10);
+  const minute = Number.parseInt(minuteText, 10);
+  const second = Number.parseInt(secondText, 10);
+  const millisecond = Number.parseInt(fractionalText.padEnd(3, '0').slice(0, 3), 10);
+  const offsetMinutes = assumption === 'KST' ? 9 * 60 : 0;
+  const parsed = Date.UTC(year, month - 1, day, hour, minute - offsetMinutes, second, millisecond);
+  return isPlausibleTimestamp(parsed) ? parsed : null;
+}
+
+export function normalizeExchangeTimestamp(
+  value: unknown,
+  options?: {
+    assumeTimezone?: TimestampAssumption;
+    rejectDateOnly?: boolean;
+  },
+): TimestampNormalizationResult {
+  if (value === null || value === undefined) {
+    return { raw: value, timestamp: null, reason: 'missing' };
+  }
+
+  if (typeof value === 'number') {
+    const normalized = normalizeNumericTimestamp(value);
+    return {
+      raw: value,
+      timestamp: normalized,
+      reason: normalized === null ? 'invalid_numeric_timestamp' : null,
+    };
+  }
+
+  if (value instanceof Date) {
+    const timestamp = value.getTime();
+    return {
+      raw: value.toISOString(),
+      timestamp: isPlausibleTimestamp(timestamp) ? timestamp : null,
+      reason: isPlausibleTimestamp(timestamp) ? null : 'invalid_date_object',
+    };
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return { raw: value, timestamp: null, reason: 'empty_string' };
+    }
+
+    if ((options?.rejectDateOnly ?? true) && /^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      return { raw: trimmed, timestamp: null, reason: 'date_only_string_blocked' };
+    }
+
+    if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
+      return normalizeExchangeTimestamp(Number.parseFloat(trimmed), options);
+    }
+
+    const normalized = parseTimestampWithAssumption(trimmed, options?.assumeTimezone ?? 'UTC');
+    return {
+      raw: trimmed,
+      timestamp: normalized,
+      reason: normalized === null ? 'unparseable_timestamp_string' : null,
+    };
+  }
+
+  return {
+    raw: value,
+    timestamp: null,
+    reason: 'unsupported_timestamp_type',
+  };
+}
+
+export function normalizeExchangeTimestampFromCandidates(
+  candidates: unknown[],
+  options?: {
+    assumeTimezone?: TimestampAssumption;
+    rejectDateOnly?: boolean;
+  },
+): TimestampNormalizationResult {
+  for (const candidate of candidates) {
+    if (candidate === null || candidate === undefined || candidate === '') {
+      continue;
+    }
+
+    const normalized = normalizeExchangeTimestamp(candidate, options);
+    if (normalized.timestamp !== null) {
+      return normalized;
+    }
+  }
+
+  const raw = candidates.find((candidate) => candidate !== null && candidate !== undefined && candidate !== '') ?? null;
+  const fallback = raw !== null
+    ? normalizeExchangeTimestamp(raw, options)
+    : { raw, timestamp: null, reason: 'missing' as const };
+  return {
+    raw,
+    timestamp: null,
+    reason: fallback.reason ?? 'missing',
+  };
+}
+
+export function toIsoTimestamp(timestamp: number | null | undefined) {
+  if (!timestamp || !Number.isFinite(timestamp) || timestamp <= 0) {
+    return null;
+  }
+
+  return new Date(timestamp).toISOString();
+}
+
 export function toTimestamp(value: unknown) {
   if (typeof value === 'number') {
     if (value > 1_000_000_000_000) return value;
@@ -61,6 +224,57 @@ export function toTimestamp(value: unknown) {
   }
 
   return Date.now();
+}
+
+const INTERVAL_MS_MAP: Record<string, number> = {
+  '1m': 60_000,
+  '3m': 3 * 60_000,
+  '5m': 5 * 60_000,
+  '10m': 10 * 60_000,
+  '15m': 15 * 60_000,
+  '30m': 30 * 60_000,
+  '1h': 60 * 60_000,
+  '2h': 2 * 60 * 60_000,
+  '4h': 4 * 60 * 60_000,
+  '6h': 6 * 60 * 60_000,
+  '8h': 8 * 60 * 60_000,
+  '12h': 12 * 60 * 60_000,
+  '1d': 24 * 60 * 60_000,
+  '3d': 3 * 24 * 60 * 60_000,
+  '1w': 7 * 24 * 60 * 60_000,
+};
+
+export function intervalToMilliseconds(interval: string) {
+  return INTERVAL_MS_MAP[interval] ?? null;
+}
+
+export function toHistoricalCandleWindow(params: {
+  interval: string;
+  timestamp: unknown;
+  index: number;
+  total: number;
+  now?: number;
+}) {
+  const intervalMs = intervalToMilliseconds(params.interval) ?? 60_000;
+  const rawTimestamp = toTimestamp(params.timestamp);
+  const usableTimestamp = rawTimestamp >= 946_684_800_000 ? rawTimestamp : null;
+
+  if (usableTimestamp !== null) {
+    const openTime = Math.floor(usableTimestamp / intervalMs) * intervalMs;
+    return {
+      openTime,
+      closeTime: openTime + intervalMs,
+      intervalMs,
+    };
+  }
+
+  const bucketStart = Math.floor((params.now ?? Date.now()) / intervalMs) * intervalMs;
+  const openTime = bucketStart - Math.max(params.total - params.index, 1) * intervalMs;
+  return {
+    openTime,
+    closeTime: openTime + intervalMs,
+    intervalMs,
+  };
 }
 
 export function requireCredentials(exchange: ExchangeId, context: ProviderContext): UserExchangeCredentials {

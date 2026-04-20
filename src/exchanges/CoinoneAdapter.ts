@@ -1,46 +1,83 @@
 import { ExchangeAdapter, NormalizedTicker, NormalizedOrderbook, NormalizedCandle } from './ExchangeAdapter';
+import { ExchangeRequestError } from '../core/exchange/errors';
+import { logger } from '../utils/logger';
+import { parseCoinoneTickersResponse } from '../providers/exchanges/coinone.mapper';
 
 const BASE_URL = 'https://api.coinone.co.kr';
+const TICKER_TIMEOUT_MS = 1_500;
+const DEFAULT_TIMEOUT_MS = 3_000;
+const SLOW_LOG_MS = 800;
+
+async function fetchJsonWithTimeout(url: string, timeoutMs: number, operation: string) {
+  const controller = new AbortController();
+  const startedAt = Date.now();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    logger.debug(
+      { domain: 'market-provider', exchange: 'coinone', operation, event: 'fetch_start', url },
+      'Coinone adapter fetch start',
+    );
+    const res = await fetch(url, { signal: controller.signal });
+    const latencyMs = Date.now() - startedAt;
+    const log = latencyMs > SLOW_LOG_MS ? logger.warn.bind(logger) : logger.debug.bind(logger);
+    log(
+      { domain: 'market-provider', exchange: 'coinone', operation, event: 'fetch_end', latencyMs, slow: latencyMs > SLOW_LOG_MS },
+      'Coinone adapter fetch end',
+    );
+
+    if (!res.ok) {
+      const responseBody = await res.text();
+      throw new ExchangeRequestError('coinone', res.status, url, `Coinone ${operation} request failed`, responseBody);
+    }
+
+    return (await res.json()) as any;
+  } catch (error) {
+    const latencyMs = Date.now() - startedAt;
+    logger.warn(
+      { domain: 'market-provider', exchange: 'coinone', operation, event: 'fetch_failed', latencyMs, err: error },
+      'Coinone adapter fetch failed',
+    );
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 export class CoinoneAdapter implements ExchangeAdapter {
   readonly id = 'coinone';
   readonly name = '코인원';
 
   async fetchTickers(symbols: string[]): Promise<NormalizedTicker[]> {
-    const res = await fetch(`${BASE_URL}/public/v2/ticker_new/KRW/ALL`);
-    if (!res.ok) throw new Error(`Coinone ticker HTTP ${res.status}`);
-    const json = (await res.json()) as any;
-    const tickers = json.tickers || [];
-    const now = Date.now();
+    const url = `${BASE_URL}/public/v2/ticker_new/KRW?additional_data=true`;
+    const json = await fetchJsonWithTimeout(url, TICKER_TIMEOUT_MS, 'tickers');
+    const parsed = parseCoinoneTickersResponse(json, symbols);
 
-    const tickerMap = new Map<string, any>();
-    for (const t of tickers) {
-      tickerMap.set(t.target_currency?.toUpperCase(), t);
+    parsed.dropped.forEach(({ symbol, reason }) => {
+      logger.debug(
+        { domain: 'market-provider', exchange: 'coinone', operation: 'tickers', symbol, reason },
+        'Coinone ticker item dropped during normalization',
+      );
+    });
+
+    if (parsed.missingSymbols.length > 0) {
+      logger.debug(
+        {
+          domain: 'market-provider',
+          exchange: 'coinone',
+          operation: 'tickers',
+          missingSymbols: parsed.missingSymbols,
+        },
+        'Coinone requested tickers missing from upstream payload',
+      );
     }
 
-    return symbols
-      .filter((s) => tickerMap.has(s))
-      .map((symbol) => {
-        const item = tickerMap.get(symbol)!;
-        const last = parseFloat(item.last);
-        const yesterdayLast = parseFloat(item.yesterday_last || item.last);
-        const change24h = yesterdayLast > 0 ? ((last - yesterdayLast) / yesterdayLast) * 100 : 0;
-        return {
-          symbol,
-          price: last,
-          change24h: Math.round(change24h * 100) / 100,
-          volume24h: parseFloat(item.quote_volume || '0'),
-          high24h: parseFloat(item.high || '0'),
-          low24h: parseFloat(item.low || '0'),
-          timestamp: now,
-        };
-      });
+    return parsed.tickers;
   }
 
   async fetchOrderbook(symbol: string, depth = 10): Promise<NormalizedOrderbook> {
-    const res = await fetch(`${BASE_URL}/public/v2/orderbook/KRW/${symbol}?size=${depth}`);
-    if (!res.ok) throw new Error(`Coinone orderbook HTTP ${res.status}`);
-    const json = (await res.json()) as any;
+    const url = `${BASE_URL}/public/v2/orderbook/KRW/${symbol}?size=${depth}`;
+    const json = await fetchJsonWithTimeout(url, DEFAULT_TIMEOUT_MS, 'orderbook');
     const asks = (json.asks || []).map((a: any) => ({
       price: parseFloat(a.price),
       qty: parseFloat(a.qty),
@@ -62,10 +99,8 @@ export class CoinoneAdapter implements ExchangeAdapter {
       size: limit.toString(),
     });
 
-    const res = await fetch(`${BASE_URL}/public/v2/chart/KRW/${symbol}?${params.toString()}`);
-    if (!res.ok) throw new Error(`Coinone candles HTTP ${res.status}`);
-
-    const json = (await res.json()) as any;
+    const url = `${BASE_URL}/public/v2/chart/KRW/${symbol}?${params.toString()}`;
+    const json = await fetchJsonWithTimeout(url, DEFAULT_TIMEOUT_MS, 'candles');
     const data = json.chart ?? json.data?.chart ?? json.data ?? [];
 
     return data.map((item: any) => ({

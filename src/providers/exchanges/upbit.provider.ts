@@ -11,6 +11,8 @@ import type {
   CanonicalTickerSnapshot,
   CanonicalTrade,
   CreateOrderRequest,
+  ExchangeMarketDescriptor,
+  MarketCapabilitySnapshot,
   OrderChance,
   PortfolioSnapshot,
   StreamSubscription,
@@ -23,14 +25,35 @@ import type {
   MarketStreamSink,
   ProviderContext,
 } from '../../core/exchange/provider.interfaces';
+import { buildStreamSubscriptionPlan } from '../../core/exchange/stream-subscription.plan';
 import { toCanonicalMarket, toCanonicalSymbol, toExchangeSymbol } from '../../core/exchange/symbol.mapper';
-import { WebSocketClientManager } from '../../core/exchange/websocket.client-manager';
+import { WebSocketClientManager, type WebSocketReconnectMetadata } from '../../core/exchange/websocket.client-manager';
 import { UpbitAdapter } from '../../exchanges/UpbitAdapter';
 import { logger } from '../../utils/logger';
 import { BaseExchangeProvider } from './base-exchange.provider';
-import { safeNumber, sortAsks, sortBids } from './provider-utils';
+import {
+  normalizeExchangeTimestampFromCandidates,
+  requireCredentials,
+  safeNumber,
+  sortAsks,
+  sortBids,
+  toHistoricalCandleWindow,
+  toIsoTimestamp,
+} from './provider-utils';
 
 const DEFAULT_SYMBOLS = COINS.map((coin) => coin.symbol);
+const MARKET_CACHE_TTL_MS = 60_000;
+const MARKET_STALE_TTL_MS = 5 * 60_000;
+const TICKER_CACHE_TTL_MS = 2_000;
+const TICKER_STALE_TTL_MS = 30_000;
+
+function normalizeRequestedSymbols(symbols?: string[]) {
+  return Array.from(new Set((symbols ?? []).map(toCanonicalSymbol)));
+}
+
+function toSortedSymbols(symbols: Iterable<string>) {
+  return Array.from(new Set(symbols)).sort((left, right) => left.localeCompare(right));
+}
 
 export class UpbitProvider
   extends BaseExchangeProvider
@@ -40,36 +63,105 @@ export class UpbitProvider
   private readonly signer = new JwtHmacSigner();
   private streamManager: WebSocketClientManager | null = null;
   private activeSubscriptions: StreamSubscription[] = [];
+  private supportedStreamSymbols = new Set<string>();
 
   constructor() {
     super('upbit');
   }
 
   async listMarkets() {
-    const response = await this.restClient.request<Array<{ market: string }>>('/v1/market/all', {
-      query: { isDetails: false },
-    });
+    return this.withRequestCache({
+      operation: 'markets',
+      key: 'krw',
+      ttlMs: MARKET_CACHE_TTL_MS,
+      staleTtlMs: MARKET_STALE_TTL_MS,
+      loader: async () => {
+        const response = await this.restClient.request<Array<{ market: string }>>('/v1/market/all', {
+          query: { isDetails: false },
+        });
 
-    return response
-      .filter((item) => item.market.startsWith('KRW-'))
-      .map((item) => ({
-        symbol: item.market.replace('KRW-', ''),
-        market: item.market.replace('KRW-', '') + '/KRW',
-        rawSymbol: item.market,
-      }));
+        return response
+          .filter((item) => item.market.startsWith('KRW-'))
+          .map<ExchangeMarketDescriptor>((item) => {
+            const symbol = item.market.replace('KRW-', '');
+            return {
+              symbol,
+              exchangeSymbol: item.market,
+              market: `${symbol}/KRW`,
+              baseCurrency: symbol,
+              quoteCurrency: 'KRW',
+              rawSymbol: item.market,
+              tradable: true,
+            };
+          });
+      },
+      responseItemCount: (items) => items.length,
+    });
   }
 
-  async getTickerSnapshot(symbols = DEFAULT_SYMBOLS): Promise<CanonicalTickerSnapshot[]> {
-    const tickers = await this.adapter.fetchTickers(symbols.map(toCanonicalSymbol));
-    return tickers.map((ticker) => ({
-      ...toCanonicalMarket(this.exchange, ticker.symbol),
-      price: ticker.price,
-      change24h: ticker.change24h,
-      volume24h: ticker.volume24h,
-      high24h: ticker.high24h,
-      low24h: ticker.low24h,
-      timestamp: ticker.timestamp,
-    }));
+  async getMarketCapabilitySnapshot(markets?: ExchangeMarketDescriptor[]): Promise<MarketCapabilitySnapshot> {
+    const marketUniverse = toSortedSymbols((markets ?? await this.listMarkets()).map((market) => market.symbol));
+    return {
+      websocketTickerSymbols: this.supportedStreamSymbols.size > 0 ? toSortedSymbols(this.supportedStreamSymbols) : marketUniverse,
+      capabilitySymbols: {
+        tickers: marketUniverse,
+        orderbook: marketUniverse,
+        trades: marketUniverse,
+        candles: marketUniverse,
+      },
+    };
+  }
+
+  async getTickerSnapshot(symbols?: string[]): Promise<CanonicalTickerSnapshot[]> {
+    const listedMarkets = await this.listMarkets();
+    const marketUniverse = toSortedSymbols(listedMarkets.map((market) => market.symbol));
+    const requestedSymbols = normalizeRequestedSymbols(symbols);
+    const effectiveRequestedSymbols = requestedSymbols.length > 0 ? requestedSymbols : marketUniverse;
+    const requestedSet = new Set(effectiveRequestedSymbols);
+    const marketSymbols = new Set(marketUniverse);
+    const snapshots = await this.withRequestCache({
+      operation: 'tickers',
+      key: 'krw:all',
+      ttlMs: TICKER_CACHE_TTL_MS,
+      staleTtlMs: TICKER_STALE_TTL_MS,
+      requestedMarketCount: effectiveRequestedSymbols.length,
+      normalizedSymbolCount: effectiveRequestedSymbols.length,
+      loader: async () => {
+        const tickers = await this.adapter.fetchTickers(Array.from(marketSymbols));
+        return tickers.map((ticker) => ({
+          ...toCanonicalMarket(this.exchange, ticker.symbol),
+          price: ticker.price,
+          change24h: ticker.change24h,
+          volume24h: ticker.volume24h,
+          high24h: ticker.high24h,
+          low24h: ticker.low24h,
+          timestamp: ticker.timestamp,
+        }));
+      },
+      responseItemCount: (items) => items.length,
+      symbolDiff: {
+        requestedSymbols: effectiveRequestedSymbols,
+        resolvedSymbols: (items) => items.map((item) => item.symbol),
+        droppedReason: (symbol) =>
+          marketSymbols.has(symbol) ? 'missing_from_exchange_ticker_response' : 'not_listed_on_exchange_market_universe',
+      },
+    });
+
+    const filtered = snapshots.filter((ticker) => requestedSet.has(ticker.symbol));
+    const capabilitySnapshot = await this.getMarketCapabilitySnapshot(listedMarkets);
+    this.logResolvedMarketUniverse({
+      operation: 'tickers',
+      requestedSymbols: effectiveRequestedSymbols,
+      returnedSymbols: toSortedSymbols(filtered.map((ticker) => ticker.symbol)),
+      droppedReason: (symbol) => (marketSymbols.has(symbol) ? 'missing_upstream_ticker' : 'unsupported_on_exchange'),
+      universe: {
+        registrySymbols: DEFAULT_SYMBOLS,
+        marketSymbols: marketUniverse,
+        ...capabilitySnapshot,
+      },
+    });
+
+    return filtered;
   }
 
   async getOrderbookSnapshot(symbol: string, depth = 15): Promise<CanonicalOrderbookSnapshot> {
@@ -101,15 +193,29 @@ export class UpbitProvider
     });
     const market = toCanonicalMarket(this.exchange, canonical);
 
-    return response.map((trade) => ({
-      ...market,
-      tradeId: String(trade.sequential_id ?? `${rawSymbol}:${trade.trade_timestamp}`),
-      side: String(trade.ask_bid).toLowerCase() === 'ask' ? 'sell' : 'buy',
-      price: safeNumber(trade.trade_price),
-      quantity: safeNumber(trade.trade_volume),
-      notional: safeNumber(trade.trade_price) * safeNumber(trade.trade_volume),
-      timestamp: safeNumber(trade.trade_timestamp),
-    }));
+    return response.map((trade) => {
+      const normalizedTimestamp = normalizeExchangeTimestampFromCandidates(
+        [trade.trade_timestamp, trade.ttms, trade.timestamp],
+        { assumeTimezone: 'UTC' },
+      );
+      if (normalizedTimestamp.timestamp === null) {
+        logger.warn(
+          { domain: 'market-routes', exchange: this.exchange, rawTimestamp: normalizedTimestamp.raw, reason: normalizedTimestamp.reason },
+          `[TradeTimestampAPI] exchange=${this.exchange} invalidTimestamp raw=${String(normalizedTimestamp.raw)} reason=${normalizedTimestamp.reason ?? 'unknown'}`,
+        );
+      }
+
+      return {
+        ...market,
+        tradeId: String(trade.sequential_id ?? `${rawSymbol}:${trade.trade_timestamp}`),
+        side: String(trade.ask_bid).toLowerCase() === 'ask' ? 'sell' : 'buy',
+        price: safeNumber(trade.trade_price),
+        quantity: safeNumber(trade.trade_volume),
+        notional: safeNumber(trade.trade_price) * safeNumber(trade.trade_volume),
+        timestamp: normalizedTimestamp.timestamp,
+        executedAt: toIsoTimestamp(normalizedTimestamp.timestamp),
+      };
+    });
   }
 
   async getCandles(symbol: string, interval: string, limit = 60): Promise<CanonicalCandle[]> {
@@ -118,10 +224,14 @@ export class UpbitProvider
     const market = toCanonicalMarket(this.exchange, canonical);
 
     return candles.map((candle, index) => ({
+      ...toHistoricalCandleWindow({
+        interval,
+        timestamp: candle.time,
+        index,
+        total: candles.length,
+      }),
       ...market,
       interval,
-      openTime: safeNumber(candle.time) || Date.now() - (limit - index) * 60_000,
-      closeTime: safeNumber(candle.time) || Date.now() - (limit - index - 1) * 60_000,
       open: candle.open,
       high: candle.high,
       low: candle.low,
@@ -131,16 +241,19 @@ export class UpbitProvider
   }
 
   async startPublicStream(subscriptions: StreamSubscription[], sink: MarketStreamSink) {
-    this.activeSubscriptions = subscriptions;
-    const symbols = Array.from(
-      new Set(
-        subscriptions
-          .filter((subscription) => subscription.exchange === this.exchange)
-          .flatMap((subscription) => subscription.symbols.map(toCanonicalSymbol)),
-      ),
-    );
+    this.activeSubscriptions = subscriptions.filter((subscription) => subscription.exchange === this.exchange);
+    if (this.activeSubscriptions.length === 0) {
+      return;
+    }
 
-    if (symbols.length === 0) {
+    await this.refreshSupportedStreamSymbols();
+    const initialPlan = await this.buildActiveStreamPlan();
+    this.logStreamPlan('start', initialPlan);
+    if (initialPlan.totalResolvedSymbols === 0) {
+      logger.warn(
+        { domain: 'market-streaming', exchange: this.exchange, skippedResyncSymbols: initialPlan.skippedSymbols },
+        'Skipping Upbit public stream start because no symbols resolved',
+      );
       return;
     }
 
@@ -149,13 +262,33 @@ export class UpbitProvider
       name: 'upbit-public',
       url: config.publicWebSocketUrl,
       onOpen: async (ctx) => {
-        ctx.sendJson([
-          { ticket: `cryptory-upbit-${Date.now()}` },
-          { type: 'ticker', codes: symbols.map((symbol) => toExchangeSymbol(this.exchange, symbol)), is_only_realtime: true },
-          { type: 'orderbook', codes: symbols.map((symbol) => toExchangeSymbol(this.exchange, symbol)), is_only_realtime: true },
-          { type: 'trade', codes: symbols.map((symbol) => toExchangeSymbol(this.exchange, symbol)), is_only_realtime: true },
-          { format: 'DEFAULT' },
-        ]);
+        const plan = await this.buildActiveStreamPlan();
+        const payload = [{ ticket: `cryptory-upbit-${Date.now()}` }] as Array<Record<string, unknown>>;
+
+        if (plan.resolvedByChannel.tickers.length > 0) {
+          payload.push({
+            type: 'ticker',
+            codes: plan.resolvedByChannel.tickers.map((symbol) => toExchangeSymbol(this.exchange, symbol)),
+            is_only_realtime: true,
+          });
+        }
+        if (plan.resolvedByChannel.orderbook.length > 0) {
+          payload.push({
+            type: 'orderbook',
+            codes: plan.resolvedByChannel.orderbook.map((symbol) => toExchangeSymbol(this.exchange, symbol)),
+            is_only_realtime: true,
+          });
+        }
+        if (plan.resolvedByChannel.trades.length > 0) {
+          payload.push({
+            type: 'trade',
+            codes: plan.resolvedByChannel.trades.map((symbol) => toExchangeSymbol(this.exchange, symbol)),
+            is_only_realtime: true,
+          });
+        }
+
+        payload.push({ format: 'DEFAULT' });
+        ctx.sendJson(payload);
       },
       onMessage: async (raw) => {
         const payload = JSON.parse(raw.toString());
@@ -207,24 +340,36 @@ export class UpbitProvider
         if (type === 'trade' && sink.onTrade) {
           const price = safeNumber(payload.trade_price ?? payload.tp);
           const quantity = safeNumber(payload.trade_volume ?? payload.tv);
+          const normalizedTimestamp = normalizeExchangeTimestampFromCandidates(
+            [payload.trade_timestamp, payload.ttms, payload.timestamp],
+            { assumeTimezone: 'UTC' },
+          );
+          if (normalizedTimestamp.timestamp === null) {
+            logger.warn(
+              { domain: 'market-streaming', exchange: this.exchange, rawTimestamp: normalizedTimestamp.raw, reason: normalizedTimestamp.reason },
+              `[TradeTimestampAPI] exchange=${this.exchange} invalidTimestamp raw=${String(normalizedTimestamp.raw)} reason=${normalizedTimestamp.reason ?? 'unknown'}`,
+            );
+            return;
+          }
           await sink.onTrade({
             ...market,
-            tradeId: String(payload.sequential_id ?? payload.sid ?? `${rawSymbol}:${timestamp}`),
+            tradeId: String(payload.sequential_id ?? payload.sid ?? `${rawSymbol}:${normalizedTimestamp.timestamp}`),
             side: String(payload.ask_bid ?? payload.ab).toLowerCase() === 'ask' ? 'sell' : 'buy',
             price,
             quantity,
             notional: price * quantity,
-            timestamp,
+            timestamp: normalizedTimestamp.timestamp,
+            executedAt: toIsoTimestamp(normalizedTimestamp.timestamp),
           });
         }
       },
-      onReconnect: async () => {
-        await this.resyncSnapshots(sink, symbols);
+      onReconnect: async (ctx) => {
+        await this.resyncSnapshots(sink, 'reconnect', ctx.getReconnectMetadata() ?? undefined);
       },
     });
 
     await this.streamManager.start();
-    await this.resyncSnapshots(sink, symbols);
+    await this.resyncSnapshots(sink, 'initial');
   }
 
   async stopPublicStream() {
@@ -233,8 +378,7 @@ export class UpbitProvider
   }
 
   async getOrderChance(symbol: string, context: ProviderContext): Promise<OrderChance> {
-    const credentials = context.credentials;
-    if (!credentials) throw new Error('Upbit credentials are required');
+    const credentials = requireCredentials(this.exchange, context);
     const rawSymbol = toExchangeSymbol(this.exchange, symbol);
     const headers = this.signer.createAuthorizationHeader({
       accessKey: credentials.apiKey,
@@ -259,8 +403,7 @@ export class UpbitProvider
   }
 
   async createOrder(request: CreateOrderRequest, context: ProviderContext): Promise<CanonicalOrder> {
-    const credentials = context.credentials;
-    if (!credentials) throw new Error('Upbit credentials are required');
+    const credentials = requireCredentials(this.exchange, context);
     const rawSymbol = toExchangeSymbol(this.exchange, request.symbol);
     const body: Record<string, unknown> = {
       market: rawSymbol,
@@ -295,8 +438,7 @@ export class UpbitProvider
   }
 
   async cancelOrder(request: CancelOrderRequest, context: ProviderContext): Promise<CanonicalOrder> {
-    const credentials = context.credentials;
-    if (!credentials) throw new Error('Upbit credentials are required');
+    const credentials = requireCredentials(this.exchange, context);
     const query = { uuid: request.orderId };
     const headers = this.signer.createAuthorizationHeader({
       accessKey: credentials.apiKey,
@@ -312,8 +454,7 @@ export class UpbitProvider
   }
 
   async getOrder(orderId: string, symbol: string | undefined, context: ProviderContext): Promise<CanonicalOrder> {
-    const credentials = context.credentials;
-    if (!credentials) throw new Error('Upbit credentials are required');
+    const credentials = requireCredentials(this.exchange, context);
     const query = { uuid: orderId };
     const headers = this.signer.createAuthorizationHeader({
       accessKey: credentials.apiKey,
@@ -328,8 +469,7 @@ export class UpbitProvider
   }
 
   async listOpenOrders(symbol: string | undefined, context: ProviderContext): Promise<CanonicalOrder[]> {
-    const credentials = context.credentials;
-    if (!credentials) throw new Error('Upbit credentials are required');
+    const credentials = requireCredentials(this.exchange, context);
     const query = symbol ? { market: toExchangeSymbol(this.exchange, symbol) } : {};
     const headers = this.signer.createAuthorizationHeader({
       accessKey: credentials.apiKey,
@@ -344,8 +484,7 @@ export class UpbitProvider
   }
 
   async listFills(symbol: string | undefined, limit: number | undefined, context: ProviderContext): Promise<CanonicalFill[]> {
-    const credentials = context.credentials;
-    if (!credentials) throw new Error('Upbit credentials are required');
+    const credentials = requireCredentials(this.exchange, context);
     const query = {
       ...(symbol ? { market: toExchangeSymbol(this.exchange, symbol) } : {}),
       limit: limit ?? 50,
@@ -384,8 +523,7 @@ export class UpbitProvider
   }
 
   async getPortfolioSnapshot(context: ProviderContext): Promise<PortfolioSnapshot> {
-    const credentials = context.credentials;
-    if (!credentials) throw new Error('Upbit credentials are required');
+    const credentials = requireCredentials(this.exchange, context);
     const headers = this.signer.createAuthorizationHeader({
       accessKey: credentials.apiKey,
       secretKey: credentials.secretKey,
@@ -461,23 +599,76 @@ export class UpbitProvider
     }));
   }
 
-  private async resyncSnapshots(sink: MarketStreamSink, symbols: string[]) {
-    if (sink.onReconnect) {
-      for (const subscription of this.activeSubscriptions.filter((item) => item.exchange === this.exchange)) {
+  private async refreshSupportedStreamSymbols() {
+    this.supportedStreamSymbols = new Set((await this.listMarkets()).map((market) => market.symbol));
+  }
+
+  private async buildActiveStreamPlan() {
+    if (this.supportedStreamSymbols.size === 0) {
+      await this.refreshSupportedStreamSymbols();
+    }
+
+    return buildStreamSubscriptionPlan({
+      subscriptions: this.activeSubscriptions,
+      supportedSymbolsByChannel: {
+        tickers: this.supportedStreamSymbols,
+        orderbook: this.supportedStreamSymbols,
+        trades: this.supportedStreamSymbols,
+        candles: this.supportedStreamSymbols,
+      },
+    });
+  }
+
+  private logStreamPlan(
+    phase: 'start' | 'initial' | 'reconnect',
+    plan: Awaited<ReturnType<UpbitProvider['buildActiveStreamPlan']>>,
+    reconnectMetadata?: WebSocketReconnectMetadata,
+  ) {
+    logger.info(
+      {
+        domain: 'market-streaming',
+        exchange: this.exchange,
+        phase,
+        reconnectReason: reconnectMetadata,
+        activeSubscriptionCount: plan.activeSubscriptionCount,
+        resyncScope: plan.activeChannels.map((channel) => ({
+          channel,
+          symbolCount: plan.resolvedByChannel[channel].length,
+        })),
+        skippedResyncSymbols: plan.skippedSymbols,
+      },
+      phase === 'start' ? 'Prepared Upbit public stream plan' : 'Prepared Upbit public resync plan',
+    );
+  }
+
+  private async resyncSnapshots(
+    sink: MarketStreamSink,
+    phase: 'initial' | 'reconnect',
+    reconnectMetadata?: WebSocketReconnectMetadata,
+  ) {
+    const plan = await this.buildActiveStreamPlan();
+    this.logStreamPlan(phase, plan, reconnectMetadata);
+
+    if (phase === 'reconnect' && sink.onReconnect) {
+      for (const channel of plan.activeChannels) {
         try {
-          await sink.onReconnect(subscription);
+          await sink.onReconnect({
+            exchange: this.exchange,
+            channel,
+            symbols: plan.resolvedByChannel[channel],
+          });
         } catch (error) {
           logger.warn(
-            { domain: 'market-streaming', exchange: this.exchange, capability: 'reconnect', err: error },
+            { domain: 'market-streaming', exchange: this.exchange, capability: 'reconnect', channel, err: error },
             'Upbit reconnect notification failed',
           );
         }
       }
     }
 
-    if (sink.onTicker) {
+    if (sink.onTicker && plan.resolvedByChannel.tickers.length > 0) {
       try {
-        const tickers = await this.getTickerSnapshot(symbols);
+        const tickers = await this.getTickerSnapshot(plan.resolvedByChannel.tickers);
         for (const ticker of tickers) {
           try {
             await sink.onTicker(ticker);
@@ -502,8 +693,8 @@ export class UpbitProvider
       }
     }
 
-    if (sink.onOrderbook) {
-      for (const symbol of symbols) {
+    if (sink.onOrderbook && plan.resolvedByChannel.orderbook.length > 0) {
+      for (const symbol of plan.resolvedByChannel.orderbook) {
         try {
           await sink.onOrderbook(await this.getOrderbookSnapshot(symbol));
         } catch (error) {
@@ -515,8 +706,8 @@ export class UpbitProvider
       }
     }
 
-    if (sink.onTrade) {
-      for (const symbol of symbols) {
+    if (sink.onTrade && plan.resolvedByChannel.trades.length > 0) {
+      for (const symbol of plan.resolvedByChannel.trades) {
         try {
           const trades = await this.getRecentTrades(symbol, 20);
           for (const trade of trades.reverse()) {

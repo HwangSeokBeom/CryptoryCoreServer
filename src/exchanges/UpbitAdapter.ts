@@ -1,4 +1,5 @@
 import { ExchangeAdapter, NormalizedTicker, NormalizedOrderbook, NormalizedCandle } from './ExchangeAdapter';
+import { ExchangeRequestError } from '../core/exchange/errors';
 
 const BASE_URL = 'https://api.upbit.com';
 
@@ -55,11 +56,16 @@ export class UpbitAdapter implements ExchangeAdapter {
     }
 
     const markets = symbols.map(formatUpbitMarketSymbol);
-    const res = await fetch(buildUpbitUrl('/v1/ticker', { markets: markets.join(',') }));
+    const url = buildUpbitUrl('/v1/ticker', { markets: markets.join(',') });
+    const res = await fetch(url);
     if (!res.ok) {
       const snippet = await readResponseSnippet(res);
-      throw new Error(
-        `Upbit ticker HTTP ${res.status} for markets=${markets.join(',')}${snippet ? ` body=${snippet}` : ''}`,
+      throw new ExchangeRequestError(
+        'upbit',
+        res.status,
+        url,
+        `Upbit ticker request failed for markets=${markets.join(',')}`,
+        snippet,
       );
     }
 
@@ -77,10 +83,17 @@ export class UpbitAdapter implements ExchangeAdapter {
 
   async fetchOrderbook(symbol: string, _depth = 10): Promise<NormalizedOrderbook> {
     const market = formatUpbitMarketSymbol(symbol);
-    const res = await fetch(buildUpbitUrl('/v1/orderbook', { markets: market }));
+    const url = buildUpbitUrl('/v1/orderbook', { markets: market });
+    const res = await fetch(url);
     if (!res.ok) {
       const snippet = await readResponseSnippet(res);
-      throw new Error(`Upbit orderbook HTTP ${res.status} for market=${market}${snippet ? ` body=${snippet}` : ''}`);
+      throw new ExchangeRequestError(
+        'upbit',
+        res.status,
+        url,
+        `Upbit orderbook request failed for market=${market}`,
+        snippet,
+      );
     }
 
     const data = (await res.json()) as any[];
@@ -112,10 +125,17 @@ export class UpbitAdapter implements ExchangeAdapter {
       url = `${BASE_URL}/v1/candles/minutes/${unit}?market=${market}&count=${limit}`;
     }
     const res = await fetch(url);
-    if (!res.ok) throw new Error(`Upbit candles HTTP ${res.status}`);
+    if (!res.ok) {
+      const snippet = await readResponseSnippet(res);
+      throw new ExchangeRequestError('upbit', res.status, url, `Upbit candles request failed for market=${market}`, snippet);
+    }
     const data = (await res.json()) as any[];
-    return data.reverse().map((item, i) => ({
-      time: i,
+    return data.reverse().map((item) => ({
+      time:
+        item.candle_date_time_utc
+        ?? item.candle_date_time_kst
+        ?? item.timestamp
+        ?? Date.now(),
       open: item.opening_price,
       high: item.high_price,
       low: item.low_price,

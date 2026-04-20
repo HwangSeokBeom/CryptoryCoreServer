@@ -1,8 +1,11 @@
 export const EXCHANGE_IDS = ['upbit', 'bithumb', 'coinone', 'korbit', 'binance'] as const;
 export type ExchangeId = (typeof EXCHANGE_IDS)[number];
+export const DOMESTIC_EXCHANGE_IDS = ['upbit', 'bithumb', 'coinone', 'korbit'] as const;
+export type DomesticExchangeId = (typeof DOMESTIC_EXCHANGE_IDS)[number];
 
 export const QUOTE_CURRENCIES = ['KRW', 'USDT'] as const;
 export type QuoteCurrency = (typeof QUOTE_CURRENCIES)[number];
+export type MarketDataMode = 'streaming' | 'snapshot' | 'cached_snapshot';
 
 export const EXCHANGE_CAPABILITIES = [
   'market:list',
@@ -82,7 +85,8 @@ export interface CanonicalTrade extends CanonicalMarket {
   price: number;
   quantity: number;
   notional: number;
-  timestamp: number;
+  timestamp: number | null;
+  executedAt: string | null;
 }
 
 export interface CanonicalCandle extends CanonicalMarket {
@@ -239,40 +243,192 @@ export interface FxRate {
   provider: string;
 }
 
+export interface FreshnessMetadata {
+  dataMode: MarketDataMode;
+  isStale: boolean;
+  lastUpdatedAt: number | null;
+  sourceTimestamp: number | null;
+  cacheAgeMs: number | null;
+}
+
+export type SnapshotSource = 'snapshot' | 'cache' | 'derived' | 'fallback' | 'mixed';
+export type SnapshotOverallStatus = 'success' | 'partial_success' | 'failure';
+export type SnapshotItemStatus = 'success' | 'partial' | 'error' | 'stale';
+export type SnapshotErrorCode =
+  | 'UNSUPPORTED_SYMBOL'
+  | 'SYMBOL_MAPPING_NOT_FOUND'
+  | 'EXCHANGE_TEMPORARILY_UNAVAILABLE'
+  | 'FX_RATE_UNAVAILABLE'
+  | 'PARTIAL_DATA'
+  | 'SNAPSHOT_STALE'
+  | 'ALL_PROVIDERS_FAILED';
+
+export interface SnapshotPartialFailure {
+  code: SnapshotErrorCode;
+  message: string;
+  symbol?: string;
+  exchange?: ExchangeId | 'fx';
+  stage?: string;
+  source?: SnapshotSource;
+  retryable?: boolean;
+}
+
+export type KimchiPremiumRowStatus = 'loaded' | 'partial' | 'unavailable' | 'failed' | 'stale';
+export type KimchiPremiumFreshnessState = 'fresh' | 'slightly_stale' | 'stale' | 'partial' | 'unavailable';
+export type KimchiPremiumSparklineStatus = 'ok' | 'insufficientData' | 'empty';
+export type KimchiPremiumStatusReason =
+  | 'READY'
+  | 'DOMESTIC_MARKET_MISSING'
+  | 'DOMESTIC_TICKER_MISSING'
+  | 'BINANCE_REFERENCE_MISSING'
+  | 'FX_RATE_UNAVAILABLE'
+  | 'PREMIUM_DATA_INCOMPLETE'
+  | 'STALE_SNAPSHOT'
+  | 'UNKNOWN';
+export type KimchiPremiumFailureStage = 'reference_ticker' | 'domestic_ticker' | 'fx_rate' | 'premium_compute' | 'settlement';
+export type KimchiPremiumDelayBucket = 'none' | 'slight' | 'moderate' | 'severe';
+export type KimchiPremiumDisplayHint = 'keep_last_good' | 'loading_initial' | 'unavailable_cold';
+export type KimchiPremiumStableStatus = 'ready' | 'stale' | 'partial' | 'unavailable';
+
 export interface KimchiPremiumQuote {
   exchange: ExchangeId;
   market: string;
   priceKrw: number;
-  premiumPercent: number;
+  premiumPercent: number | null;
   timestamp: number;
   sourceExchange: ExchangeId;
   sourceTimestamp: number;
   stale: boolean;
   staleAgeMs: number;
-  krwConvertedReference: number;
+  krwConvertedReference: number | null;
+  reason?: string | null;
 }
 
 export interface KimchiPremiumEntry {
   symbol: string;
   nameKo: string;
   nameEn: string;
-  referenceExchange: ExchangeId;
-  referenceMarket: string;
-  referenceTimestamp: number;
+  quoteCurrency: 'KRW';
+  status: KimchiPremiumRowStatus;
+  statusReason: KimchiPremiumStatusReason;
+  domesticVenue: DomesticExchangeId;
+  missingFields: string[];
+  failureStage: KimchiPremiumFailureStage | null;
+  referenceExchange: ExchangeId | null;
+  referenceMarket: string | null;
+  referenceTimestamp: number | null;
   referenceStale: boolean;
-  referenceStaleAgeMs: number;
-  binanceUsdtPrice: number;
-  usdKrwRate: number;
-  binanceKrwPrice: number;
-  krwConvertedReference: number;
-  fxProvider: string;
-  fxTimestamp: number;
+  referenceStaleAgeMs: number | null;
+  binancePrice: number | null;
+  binanceUsdtPrice: number | null;
+  usdKrwRate: number | null;
+  binanceKrwPrice: number | null;
+  krwConvertedReference: number | null;
+  domesticExchange: DomesticExchangeId;
+  domesticMarket: string | null;
+  domesticPrice: number | null;
+  domesticPriceKRW: number | null;
+  premiumPercent: number | null;
+  premiumAmountKRW: number | null;
+  selectedExchange: DomesticExchangeId;
+  sourceExchange: DomesticExchangeId | null;
+  domesticPriceTimestamp: number | null;
+  globalPriceTimestamp: number | null;
+  fxRateTimestamp: number | null;
+  computedAt: number;
+  freshnessState: KimchiPremiumFreshnessState;
+  freshnessReason: string | null;
+  displayMeta?: {
+    status: KimchiPremiumStableStatus;
+    hasUsableDomesticPrice: boolean;
+    hasUsableReferencePrice: boolean;
+    hasUsableFxRate: boolean;
+    lastSuccessfulDomesticAt: number | null;
+    lastSuccessfulReferenceAt: number | null;
+    lastSuccessfulFxAt: number | null;
+    delayBucket: KimchiPremiumDelayBucket;
+    displayHint: KimchiPremiumDisplayHint;
+  };
+  stableStatus?: KimchiPremiumStableStatus;
+  hasUsableDomesticPrice?: boolean;
+  hasUsableReferencePrice?: boolean;
+  hasUsableFxRate?: boolean;
+  lastSuccessfulDomesticAt?: number | null;
+  lastSuccessfulReferenceAt?: number | null;
+  lastSuccessfulFxAt?: number | null;
+  delayBucket?: KimchiPremiumDelayBucket;
+  displayHint?: KimchiPremiumDisplayHint;
+  fxProvider: string | null;
+  fxTimestamp: number | null;
   fxStale: boolean;
-  fxStaleAgeMs: number;
+  fxStaleAgeMs: number | null;
+  globalPrice: number | null;
+  fxRate: number | null;
+  convertedGlobalPriceKRW: number | null;
   domestic: KimchiPremiumQuote[];
+  sparkline: number[];
+  sparklinePoints: Array<{ price: number; timestamp: number; premiumPercent?: number }>;
+  sparklineSource: 'history' | 'current_sample' | 'unavailable';
+  sparklineValueType: 'premium_percent';
+  sparklineStatus: KimchiPremiumSparklineStatus;
+  sparklinePointCount: number;
+  pointCount: number;
+  rangeMin: number | null;
+  rangeMax: number | null;
+  sparklineLastUpdatedAt: number | null;
+  sourceTimestamps: {
+    reference: number | null;
+    domestic: number | null;
+    fx: number | null;
+  };
+  dataMode: MarketDataMode;
+  isStale: boolean;
+  updatedAt: number | null;
+  lastUpdatedAt: number | null;
+  sourceTimestamp: number | null;
+  cacheAgeMs: number | null;
   stale: boolean;
-  timestampSkewMs: number;
+  timestampSkewMs: number | null;
+  asOf?: number | null;
+  freshnessMs?: number | null;
+  source?: Exclude<SnapshotSource, 'mixed'>;
+  errorCode?: SnapshotErrorCode | null;
+  errorMessage?: string | null;
 }
+
+export interface MarketSymbolSupportEntry {
+  exchange: ExchangeId;
+  symbol: string;
+  exchangeSymbol: string;
+  market: string;
+  baseCurrency: string;
+  quoteCurrency: QuoteCurrency;
+  tradable: boolean;
+  kimchiComparable: boolean;
+  kimchiComparisonReason:
+    | 'COMPARABLE'
+    | 'DOMESTIC_ONLY'
+    | 'BINANCE_REFERENCE_MISSING'
+    | 'QUOTE_NOT_SUPPORTED';
+}
+
+export interface ExchangeMarketDescriptor {
+  symbol: string;
+  exchangeSymbol: string;
+  market: string;
+  baseCurrency: string;
+  quoteCurrency: QuoteCurrency;
+  rawSymbol: string;
+  tradable: boolean;
+}
+
+export type MarketCapabilityChannel = 'tickers' | 'orderbook' | 'trades' | 'candles';
+
+export type MarketCapabilitySnapshot = {
+  websocketTickerSymbols: string[];
+  capabilitySymbols: Partial<Record<MarketCapabilityChannel, string[]>>;
+  capabilityExcludedSymbols?: Partial<Record<MarketCapabilityChannel, Array<{ symbol: string; reason: string }>>>;
+};
 
 export interface StreamSubscription<TChannel extends MarketStreamChannel = MarketStreamChannel> {
   channel: TChannel;

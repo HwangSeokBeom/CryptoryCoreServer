@@ -1,0 +1,37 @@
+{
+  "result": "success",
+  "error_code": "0",
+  "server_time": 1776429101123,
+  "markets": [
+    {
+      "quote_currency": "krw",
+      "target_currency": "btc",
+      "trade_status": 1,
+      "maintenance_status": 0
+    },
+    {
+      "quote_currency": "krw",
+      "target_currency": "eth",
+      "trade_status": 1,
+      "maintenance_status": 0
+    },
+    {
+      "quote_currency": "krw",
+      "target_currency": "xrp",
+      "trade_status": 1,
+      "maintenance_status": 0
+    },
+    {
+      "quote_currency": "krw",
+      "target_currency": "tnsr",
+      "trade_status": 1,
+      "maintenance_status": 0
+    },
+    {
+      "quote_currency": "btc",
+      "target_currency": "eth",
+      "trade_status": 1,
+      "maintenance_status": 0
+    }
+  ]
+}

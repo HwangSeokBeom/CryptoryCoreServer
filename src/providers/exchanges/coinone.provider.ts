@@ -13,6 +13,8 @@ import type {
   CanonicalTickerSnapshot,
   CanonicalTrade,
   CreateOrderRequest,
+  ExchangeMarketDescriptor,
+  MarketCapabilitySnapshot,
   PortfolioSnapshot,
   StreamSubscription,
 } from '../../core/exchange/exchange.types';
@@ -24,13 +26,39 @@ import type {
   MarketStreamSink,
   ProviderContext,
 } from '../../core/exchange/provider.interfaces';
+import { buildStreamSubscriptionPlan } from '../../core/exchange/stream-subscription.plan';
 import { toCanonicalMarket, toCanonicalSymbol } from '../../core/exchange/symbol.mapper';
-import { WebSocketClientManager } from '../../core/exchange/websocket.client-manager';
+import { WebSocketClientManager, type WebSocketReconnectMetadata } from '../../core/exchange/websocket.client-manager';
 import { CoinoneAdapter } from '../../exchanges/CoinoneAdapter';
+import { parseCoinoneMarketsResponse } from './coinone.mapper';
 import { BaseExchangeProvider } from './base-exchange.provider';
-import { buildPortfolioSnapshot, normalizeOrderStatus, normalizeOrderType, safeNumber, safeString, sortAsks, sortBids } from './provider-utils';
+import { logger } from '../../utils/logger';
+import {
+  buildPortfolioSnapshot,
+  normalizeExchangeTimestampFromCandidates,
+  normalizeOrderStatus,
+  normalizeOrderType,
+  safeNumber,
+  safeString,
+  sortAsks,
+  sortBids,
+  toHistoricalCandleWindow,
+  toIsoTimestamp,
+} from './provider-utils';
 
 const DEFAULT_SYMBOLS = COINS.map((coin) => coin.symbol);
+const MARKET_CACHE_TTL_MS = 60_000;
+const MARKET_STALE_TTL_MS = 5 * 60_000;
+const TICKER_CACHE_TTL_MS = 1_000;
+const TICKER_STALE_TTL_MS = 20_000;
+
+function normalizeRequestedSymbols(symbols?: string[]) {
+  return Array.from(new Set((symbols ?? []).map(toCanonicalSymbol)));
+}
+
+function toSortedSymbols(symbols: Iterable<string>) {
+  return Array.from(new Set(symbols)).sort((left, right) => left.localeCompare(right));
+}
 
 export class CoinoneProvider
   extends BaseExchangeProvider
@@ -40,30 +68,105 @@ export class CoinoneProvider
   private readonly signer = new CoinoneSigner();
   private streamManager: WebSocketClientManager | null = null;
   private activeSubscriptions: StreamSubscription[] = [];
+  private supportedStreamSymbols = new Set<string>();
 
   constructor() {
     super('coinone');
   }
 
   async listMarkets() {
-    return DEFAULT_SYMBOLS.map((symbol) => ({
-      symbol,
-      market: `${symbol}/KRW`,
-      rawSymbol: symbol,
-    }));
+    return this.withRequestCache({
+      operation: 'markets',
+      key: 'krw',
+      ttlMs: MARKET_CACHE_TTL_MS,
+      staleTtlMs: MARKET_STALE_TTL_MS,
+      loader: async () => {
+        const response = await this.restClient.request<any>('/public/v2/markets/KRW');
+        return parseCoinoneMarketsResponse(response);
+      },
+      responseItemCount: (items) => items.length,
+    });
   }
 
-  async getTickerSnapshot(symbols = DEFAULT_SYMBOLS): Promise<CanonicalTickerSnapshot[]> {
-    const tickers = await this.adapter.fetchTickers(symbols.map(toCanonicalSymbol));
-    return tickers.map((ticker) => ({
-      ...toCanonicalMarket(this.exchange, ticker.symbol),
-      price: ticker.price,
-      change24h: ticker.change24h,
-      volume24h: ticker.volume24h,
-      high24h: ticker.high24h,
-      low24h: ticker.low24h,
-      timestamp: ticker.timestamp,
-    }));
+  async getMarketCapabilitySnapshot(markets?: ExchangeMarketDescriptor[]): Promise<MarketCapabilitySnapshot> {
+    const marketUniverse = toSortedSymbols((markets ?? await this.listMarkets()).map((market) => market.symbol));
+    return {
+      websocketTickerSymbols: this.supportedStreamSymbols.size > 0 ? toSortedSymbols(this.supportedStreamSymbols) : marketUniverse,
+      capabilitySymbols: {
+        tickers: marketUniverse,
+        orderbook: marketUniverse,
+        trades: marketUniverse,
+        candles: marketUniverse,
+      },
+    };
+  }
+
+  async getTickerSnapshot(symbols?: string[]): Promise<CanonicalTickerSnapshot[]> {
+    const listedMarkets = await this.listMarkets();
+    const marketUniverse = toSortedSymbols(listedMarkets.map((market) => market.symbol));
+    const requestedSymbols = normalizeRequestedSymbols(symbols);
+    const effectiveRequestedSymbols = requestedSymbols.length > 0 ? requestedSymbols : marketUniverse;
+    const requestedSet = new Set(effectiveRequestedSymbols);
+    const marketSymbols = new Set(marketUniverse);
+    const snapshots = await this.withRequestCache({
+      operation: 'tickers',
+      key: 'krw:all',
+      ttlMs: TICKER_CACHE_TTL_MS,
+      staleTtlMs: TICKER_STALE_TTL_MS,
+      staleWhileRevalidate: true,
+      requestedMarketCount: effectiveRequestedSymbols.length,
+      normalizedSymbolCount: effectiveRequestedSymbols.length,
+      loader: async () => {
+        const tickers = await this.adapter.fetchTickers(Array.from(marketSymbols));
+        return tickers.map((ticker) => ({
+          ...toCanonicalMarket(this.exchange, ticker.symbol),
+          price: ticker.price,
+          change24h: ticker.change24h,
+          volume24h: ticker.volume24h,
+          high24h: ticker.high24h,
+          low24h: ticker.low24h,
+          timestamp: ticker.timestamp,
+        }));
+      },
+      responseItemCount: (items) => items.length,
+      symbolDiff: {
+        requestedSymbols: effectiveRequestedSymbols,
+        resolvedSymbols: (items) => items.map((item) => item.symbol),
+        droppedReason: (symbol) =>
+          marketSymbols.has(symbol) ? 'missing_from_exchange_ticker_response' : 'not_listed_on_exchange_market_universe',
+      },
+    });
+    const filtered = snapshots.filter((ticker) => requestedSet.has(ticker.symbol));
+    logger.debug(
+      {
+        domain: 'market-provider',
+        exchange: this.exchange,
+        operation: 'tickers',
+        requestedMarketCount: effectiveRequestedSymbols.length,
+        responseItemCount: filtered.length,
+        sample: filtered.slice(0, 3).map((ticker) => ({
+          symbol: ticker.symbol,
+          rawSymbol: ticker.rawSymbol,
+          price: ticker.price,
+          change24h: ticker.change24h,
+        })),
+      },
+      'Coinone ticker normalization sample',
+    );
+    const capabilitySnapshot = await this.getMarketCapabilitySnapshot(listedMarkets);
+    this.logResolvedMarketUniverse({
+      operation: 'tickers',
+      requestedSymbols: effectiveRequestedSymbols,
+      returnedSymbols: toSortedSymbols(filtered.map((ticker) => ticker.symbol)),
+      droppedReason: (symbol) => (marketSymbols.has(symbol) ? 'missing_upstream_ticker' : 'unsupported_on_exchange'),
+      universe: {
+        registrySymbols: DEFAULT_SYMBOLS,
+        marketSymbols: marketUniverse,
+        ...capabilitySnapshot,
+      },
+    });
+
+    return filtered;
   }
 
   async getOrderbookSnapshot(symbol: string, depth = 15): Promise<CanonicalOrderbookSnapshot> {
@@ -95,6 +198,16 @@ export class CoinoneProvider
     return trades.map((trade: any) => {
       const price = safeNumber(trade.price ?? trade.last);
       const quantity = safeNumber(trade.qty ?? trade.quantity);
+      const normalizedTimestamp = normalizeExchangeTimestampFromCandidates(
+        [trade.timestamp, trade.ts],
+        { assumeTimezone: 'UTC' },
+      );
+      if (normalizedTimestamp.timestamp === null) {
+        logger.warn(
+          { domain: 'market-routes', exchange: this.exchange, rawTimestamp: normalizedTimestamp.raw, reason: normalizedTimestamp.reason },
+          `[TradeTimestampAPI] exchange=${this.exchange} invalidTimestamp raw=${String(normalizedTimestamp.raw)} reason=${normalizedTimestamp.reason ?? 'unknown'}`,
+        );
+      }
       return {
         ...market,
         tradeId: String(trade.id ?? trade.trade_id ?? `${canonical}:${Date.now()}`),
@@ -102,7 +215,8 @@ export class CoinoneProvider
         price,
         quantity,
         notional: price * quantity,
-        timestamp: safeNumber(trade.timestamp ?? Date.now()),
+        timestamp: normalizedTimestamp.timestamp,
+        executedAt: toIsoTimestamp(normalizedTimestamp.timestamp),
       };
     });
   }
@@ -113,10 +227,14 @@ export class CoinoneProvider
     const market = toCanonicalMarket(this.exchange, canonical);
 
     return candles.map((candle, index) => ({
+      ...toHistoricalCandleWindow({
+        interval,
+        timestamp: candle.time,
+        index,
+        total: candles.length,
+      }),
       ...market,
       interval,
-      openTime: safeNumber(candle.time) || Date.now() - (limit - index) * 60_000,
-      closeTime: safeNumber(candle.time) || Date.now() - (limit - index - 1) * 60_000,
       open: candle.open,
       high: candle.high,
       low: candle.low,
@@ -126,26 +244,46 @@ export class CoinoneProvider
   }
 
   async startPublicStream(subscriptions: StreamSubscription[], sink: MarketStreamSink) {
-    this.activeSubscriptions = subscriptions;
-    const symbols = Array.from(
-      new Set(
-        subscriptions
-          .filter((subscription) => subscription.exchange === this.exchange)
-          .flatMap((subscription) => subscription.symbols.map(toCanonicalSymbol)),
-      ),
-    );
-    if (symbols.length === 0) return;
+    this.activeSubscriptions = subscriptions.filter((subscription) => subscription.exchange === this.exchange);
+    if (this.activeSubscriptions.length === 0) return;
+
+    await this.refreshSupportedStreamSymbols();
+    const initialPlan = await this.buildActiveStreamPlan();
+    this.logStreamPlan('start', initialPlan);
+    if (initialPlan.totalResolvedSymbols === 0) {
+      logger.warn(
+        { domain: 'market-streaming', exchange: this.exchange, skippedResyncSymbols: initialPlan.skippedSymbols },
+        'Skipping Coinone public stream start because no symbols resolved',
+      );
+      return;
+    }
 
     this.streamManager = new WebSocketClientManager({
       name: 'coinone-public',
       url: getExchangeConfig(this.exchange).publicWebSocketUrl,
       heartbeatIntervalMs: 15 * 60 * 1000,
       onOpen: async (ctx) => {
-        for (const symbol of symbols) {
+        const plan = await this.buildActiveStreamPlan();
+        const tickerSymbols = new Set(plan.resolvedByChannel.tickers);
+        const orderbookSymbols = new Set(plan.resolvedByChannel.orderbook);
+        const tradeSymbols = new Set(plan.resolvedByChannel.trades);
+        const allSymbols = Array.from(new Set([
+          ...plan.resolvedByChannel.tickers,
+          ...plan.resolvedByChannel.orderbook,
+          ...plan.resolvedByChannel.trades,
+        ]));
+
+        for (const symbol of allSymbols) {
           const topic = { quote_currency: 'KRW', target_currency: symbol };
-          ctx.sendJson({ request_type: 'SUBSCRIBE', channel: 'TICKER', topic, format: 'DEFAULT' });
-          ctx.sendJson({ request_type: 'SUBSCRIBE', channel: 'ORDERBOOK', topic, format: 'DEFAULT' });
-          ctx.sendJson({ request_type: 'SUBSCRIBE', channel: 'TRADE', topic, format: 'DEFAULT' });
+          if (tickerSymbols.has(symbol)) {
+            ctx.sendJson({ request_type: 'SUBSCRIBE', channel: 'TICKER', topic, format: 'DEFAULT' });
+          }
+          if (orderbookSymbols.has(symbol)) {
+            ctx.sendJson({ request_type: 'SUBSCRIBE', channel: 'ORDERBOOK', topic, format: 'DEFAULT' });
+          }
+          if (tradeSymbols.has(symbol)) {
+            ctx.sendJson({ request_type: 'SUBSCRIBE', channel: 'TRADE', topic, format: 'DEFAULT' });
+          }
         }
       },
       onMessage: async (raw, ctx) => {
@@ -208,25 +346,37 @@ export class CoinoneProvider
           for (const trade of trades) {
             const price = safeNumber(trade.price ?? trade.last);
             const quantity = safeNumber(trade.qty ?? trade.quantity);
+            const normalizedTimestamp = normalizeExchangeTimestampFromCandidates(
+              [trade.timestamp, trade.ts, data.timestamp, data.ts],
+              { assumeTimezone: 'UTC' },
+            );
+            if (normalizedTimestamp.timestamp === null) {
+              logger.warn(
+                { domain: 'market-streaming', exchange: this.exchange, rawTimestamp: normalizedTimestamp.raw, reason: normalizedTimestamp.reason },
+                `[TradeTimestampAPI] exchange=${this.exchange} invalidTimestamp raw=${String(normalizedTimestamp.raw)} reason=${normalizedTimestamp.reason ?? 'unknown'}`,
+              );
+              continue;
+            }
             await sink.onTrade({
               ...market,
-              tradeId: String(trade.id ?? trade.trade_id ?? `${symbol}:${timestamp}`),
+              tradeId: String(trade.id ?? trade.trade_id ?? `${symbol}:${normalizedTimestamp.timestamp}`),
               side: trade.is_buy === true || String(trade.side ?? '').toUpperCase() === 'BUY' ? 'buy' : 'sell',
               price,
               quantity,
               notional: price * quantity,
-              timestamp: safeNumber(trade.timestamp ?? timestamp),
+              timestamp: normalizedTimestamp.timestamp,
+              executedAt: toIsoTimestamp(normalizedTimestamp.timestamp),
             });
           }
         }
       },
-      onReconnect: async () => {
-        await this.resyncSnapshots(sink, symbols);
+      onReconnect: async (ctx) => {
+        await this.resyncSnapshots(sink, 'reconnect', ctx.getReconnectMetadata() ?? undefined);
       },
     });
 
     await this.streamManager.start();
-    await this.resyncSnapshots(sink, symbols);
+    await this.resyncSnapshots(sink, 'initial');
   }
 
   async stopPublicStream() {
@@ -354,23 +504,76 @@ export class CoinoneProvider
     }));
   }
 
-  private async resyncSnapshots(sink: MarketStreamSink, symbols: string[]) {
-    if (sink.onReconnect) {
-      for (const subscription of this.activeSubscriptions.filter((item) => item.exchange === this.exchange)) {
-        await sink.onReconnect(subscription);
+  private async refreshSupportedStreamSymbols() {
+    this.supportedStreamSymbols = new Set((await this.listMarkets()).map((market) => market.symbol));
+  }
+
+  private async buildActiveStreamPlan() {
+    if (this.supportedStreamSymbols.size === 0) {
+      await this.refreshSupportedStreamSymbols();
+    }
+
+    return buildStreamSubscriptionPlan({
+      subscriptions: this.activeSubscriptions,
+      supportedSymbolsByChannel: {
+        tickers: this.supportedStreamSymbols,
+        orderbook: this.supportedStreamSymbols,
+        trades: this.supportedStreamSymbols,
+        candles: this.supportedStreamSymbols,
+      },
+    });
+  }
+
+  private logStreamPlan(
+    phase: 'start' | 'initial' | 'reconnect',
+    plan: Awaited<ReturnType<CoinoneProvider['buildActiveStreamPlan']>>,
+    reconnectMetadata?: WebSocketReconnectMetadata,
+  ) {
+    logger.info(
+      {
+        domain: 'market-streaming',
+        exchange: this.exchange,
+        phase,
+        reconnectReason: reconnectMetadata,
+        activeSubscriptionCount: plan.activeSubscriptionCount,
+        resyncScope: plan.activeChannels.map((channel) => ({
+          channel,
+          symbolCount: plan.resolvedByChannel[channel].length,
+        })),
+        skippedResyncSymbols: plan.skippedSymbols,
+      },
+      phase === 'start' ? 'Prepared Coinone public stream plan' : 'Prepared Coinone public resync plan',
+    );
+  }
+
+  private async resyncSnapshots(
+    sink: MarketStreamSink,
+    phase: 'initial' | 'reconnect',
+    reconnectMetadata?: WebSocketReconnectMetadata,
+  ) {
+    const plan = await this.buildActiveStreamPlan();
+    this.logStreamPlan(phase, plan, reconnectMetadata);
+
+    if (phase === 'reconnect' && sink.onReconnect) {
+      for (const channel of plan.activeChannels) {
+        await sink.onReconnect({
+          exchange: this.exchange,
+          channel,
+          symbols: plan.resolvedByChannel[channel],
+        });
       }
     }
-    if (sink.onTicker) {
-      const tickers = await this.getTickerSnapshot(symbols);
+    if (sink.onTicker && plan.resolvedByChannel.tickers.length > 0) {
+      const tickers = await this.getTickerSnapshot(plan.resolvedByChannel.tickers);
       for (const ticker of tickers) await sink.onTicker(ticker);
     }
-    if (sink.onOrderbook) {
-      for (const symbol of symbols) {
+    if (sink.onOrderbook && plan.resolvedByChannel.orderbook.length > 0) {
+      for (const symbol of plan.resolvedByChannel.orderbook) {
         await sink.onOrderbook(await this.getOrderbookSnapshot(symbol));
       }
     }
-    if (sink.onTrade) {
-      for (const symbol of symbols) {
+    if (sink.onTrade && plan.resolvedByChannel.trades.length > 0) {
+      for (const symbol of plan.resolvedByChannel.trades) {
         const trades = await this.getRecentTrades(symbol, 20);
         for (const trade of trades.reverse()) await sink.onTrade(trade);
       }

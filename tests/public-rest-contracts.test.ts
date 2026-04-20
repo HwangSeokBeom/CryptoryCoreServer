@@ -8,6 +8,8 @@ vi.mock('../src/modules/public-market/public-market.service', () => ({
       channel: 'tickers',
       exchange: 'upbit',
       symbol: 'BTC',
+      canonicalAssetKey: 'BTC',
+      assetImageUrl: 'https://assets.example.com/btc.png',
       market: 'BTC/KRW',
       baseCurrency: 'BTC',
       quoteCurrency: 'KRW',
@@ -60,9 +62,34 @@ vi.mock('../src/modules/public-market/public-market.service', () => ({
       volume: 321,
     },
   ]),
+  getPublicCandlesWithMeta: vi.fn(async () => ({
+    items: [
+      {
+        time: 1712345320000,
+        open: 99000000,
+        high: 101000000,
+        low: 98500000,
+        close: 100000000,
+        volume: 321,
+      },
+    ],
+    meta: {
+      isRenderable: true,
+      freshnessState: 'live',
+      lastSuccessfulAt: 1712345678000,
+      source: 'memory',
+      fallbackReason: null,
+      pointCount: 1,
+      renderPriority: 'cached',
+      refreshPriority: 'visible',
+      recommendedClientBehavior: 'first_paint_ok',
+    },
+  })),
   getPublicKimchiPremium: vi.fn(async () => [
     {
       symbol: 'BTC',
+      canonicalAssetKey: 'BTC',
+      assetImageUrl: 'https://assets.example.com/btc.png',
       nameKo: '비트코인',
       nameEn: 'Bitcoin',
       binanceKrwPrice: 99500000,
@@ -101,6 +128,8 @@ describe('Public REST Contracts', () => {
     expect(body.success).toBe(true);
     expect(body.data.items[0].exchange).toBe('upbit');
     expect(body.data.items[0].exchangeName).toBe('업비트');
+    expect(body.data.items[0].canonicalAssetKey).toBe('BTC');
+    expect(body.data.items[0].assetImageUrl).toBe('https://assets.example.com/btc.png');
     expect(body.data.total).toBe(1);
     await app.close();
   });
@@ -147,6 +176,8 @@ describe('Public REST Contracts', () => {
     expect(body.success).toBe(true);
     expect(body.data.interval).toBe('1h');
     expect(body.data.items[0].close).toBe(100000000);
+    expect(body.data.meta.freshnessState).toBe('live');
+    expect(body.data.meta.recommendedClientBehavior).toBe('first_paint_ok');
     await app.close();
   });
 
@@ -161,6 +192,8 @@ describe('Public REST Contracts', () => {
     const body = JSON.parse(res.body);
     expect(body.success).toBe(true);
     expect(body.data.baseExchange).toBe('binance');
+    expect(body.data.items[0].canonicalAssetKey).toBe('BTC');
+    expect(body.data.items[0].assetImageUrl).toBe('https://assets.example.com/btc.png');
     expect(body.data.items[0].domestic[0].priceKrw).toBe(100000000);
     await app.close();
   });

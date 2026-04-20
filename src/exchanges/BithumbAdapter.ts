@@ -1,6 +1,16 @@
 import { ExchangeAdapter, NormalizedTicker, NormalizedOrderbook, NormalizedCandle } from './ExchangeAdapter';
+import {
+  ExchangeMalformedPayloadError,
+  ExchangeRateLimitError,
+  ExchangeRequestError,
+  ExchangeTemporaryUnavailableError,
+  ExchangeUnsupportedSymbolError,
+} from '../core/exchange/errors';
+import { logger } from '../utils/logger';
 
 const BASE_URL = 'https://api.bithumb.com';
+const TICKER_TIMEOUT_MS = 1_500;
+const SLOW_LOG_MS = 800;
 
 function describePayloadShape(value: unknown): string {
   if (Array.isArray(value)) {
@@ -38,6 +48,42 @@ async function readResponseSnippet(response: Response) {
   return compact.length > 240 ? `${compact.slice(0, 240)}...` : compact;
 }
 
+async function fetchWithTimeout(url: string, timeoutMs: number, operation: string) {
+  const controller = new AbortController();
+  const startedAt = Date.now();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    logger.debug(
+      { domain: 'market-provider', exchange: 'bithumb', operation, event: 'fetch_start', url },
+      'Bithumb adapter fetch start',
+    );
+    const response = await fetch(url, { signal: controller.signal });
+    const latencyMs = Date.now() - startedAt;
+    const log = latencyMs > SLOW_LOG_MS ? logger.warn.bind(logger) : logger.debug.bind(logger);
+    log(
+      { domain: 'market-provider', exchange: 'bithumb', operation, event: 'fetch_end', latencyMs, slow: latencyMs > SLOW_LOG_MS },
+      'Bithumb adapter fetch end',
+    );
+    return response;
+  } catch (error) {
+    logger.warn(
+      {
+        domain: 'market-provider',
+        exchange: 'bithumb',
+        operation,
+        event: 'fetch_failed',
+        latencyMs: Date.now() - startedAt,
+        err: error,
+      },
+      'Bithumb adapter fetch failed',
+    );
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function toMinuteUnit(period: string): number {
   const map: Record<string, number> = {
     '1m': 1,
@@ -54,14 +100,36 @@ function toMinuteUnit(period: string): number {
   return Number.isFinite(parsed) ? parsed : 60;
 }
 
+function classifyBithumbPayloadError(symbol: string, payload: any) {
+  const status = String(payload?.status ?? '');
+  const message = String(payload?.message ?? payload?.error ?? '').trim();
+  const snippet = toPayloadSnippet(payload);
+  const summary = `Bithumb orderbook ${message || 'upstream error'} for ${symbol}_KRW${snippet ? ` payload=${snippet}` : ''}`;
+
+  if (/상장 코인 아님|unsupported|invalid symbol|not listed/i.test(message)) {
+    return new ExchangeUnsupportedSymbolError('bithumb', summary, 200, symbol, snippet);
+  }
+  if (status === '5600' || /too[_\s-]?many[_\s-]?requests|rate limit/i.test(message)) {
+    return new ExchangeRateLimitError('bithumb', summary, 200, symbol, snippet);
+  }
+  return new ExchangeTemporaryUnavailableError('bithumb', summary, 200, symbol, snippet);
+}
+
 export class BithumbAdapter implements ExchangeAdapter {
   readonly id = 'bithumb';
   readonly name = '빗썸';
 
   async fetchTickers(symbols: string[]): Promise<NormalizedTicker[]> {
-    const res = await fetch(`${BASE_URL}/public/ticker/ALL_KRW`);
-    if (!res.ok) throw new Error(`Bithumb ticker HTTP ${res.status}`);
+    const url = `${BASE_URL}/public/ticker/ALL_KRW`;
+    const res = await fetchWithTimeout(url, TICKER_TIMEOUT_MS, 'tickers');
+    if (!res.ok) {
+      const responseBody = await res.text();
+      throw new ExchangeRequestError('bithumb', res.status, url, `Bithumb ticker HTTP ${res.status}`, responseBody);
+    }
     const json = (await res.json()) as any;
+    if (String(json?.status ?? '') !== '0000') {
+      throw classifyBithumbPayloadError('ALL', json);
+    }
     const data = json.data;
     const now = Date.now();
 
@@ -85,16 +153,28 @@ export class BithumbAdapter implements ExchangeAdapter {
     const res = await fetch(`${BASE_URL}/public/orderbook/${symbol}_KRW?count=${depth}`);
     if (!res.ok) {
       const snippet = await readResponseSnippet(res);
-      throw new Error(
-        `Bithumb orderbook HTTP ${res.status} for ${symbol}_KRW${snippet ? ` body=${snippet}` : ''}`,
-      );
+      const message = `Bithumb orderbook HTTP ${res.status} for ${symbol}_KRW${snippet ? ` body=${snippet}` : ''}`;
+      if (res.status === 429) {
+        throw new ExchangeRateLimitError('bithumb', message, res.status, symbol, snippet);
+      }
+      if ([408, 425, 500, 502, 503, 504].includes(res.status)) {
+        throw new ExchangeTemporaryUnavailableError('bithumb', message, res.status, symbol, snippet);
+      }
+      throw new Error(message);
     }
 
     const json = (await res.json()) as any;
+    if (String(json?.status ?? '') !== '0000') {
+      throw classifyBithumbPayloadError(symbol, json);
+    }
     const data = resolveOrderbookPayload(json);
     if (!Array.isArray(data?.asks) || !Array.isArray(data?.bids)) {
-      throw new Error(
+      throw new ExchangeMalformedPayloadError(
+        'bithumb',
         `Bithumb orderbook malformed payload for ${symbol}_KRW: shape=${describePayloadShape(json)} sample=${toPayloadSnippet(json)}`,
+        200,
+        symbol,
+        toPayloadSnippet(json),
       );
     }
 
@@ -131,7 +211,11 @@ export class BithumbAdapter implements ExchangeAdapter {
 
     const data = (await res.json()) as any[];
     return data.reverse().map((item) => ({
-      time: item.timestamp ?? item.candle_date_time_kst ?? Date.now(),
+      time:
+        item.candle_date_time_utc
+        ?? item.candle_date_time_kst
+        ?? item.timestamp
+        ?? Date.now(),
       open: parseFloat(item.opening_price),
       high: parseFloat(item.high_price),
       low: parseFloat(item.low_price),

@@ -53,4 +53,24 @@ describe('BithumbAdapter', () => {
     await expect(new BithumbAdapter().fetchOrderbook('BTC', 1)).rejects.toThrow(/malformed payload/i);
     await expect(new BithumbAdapter().fetchOrderbook('BTC', 1)).rejects.toThrow(/shape=/i);
   });
+
+  it('classifies unlisted orderbook payloads as unsupported symbols', async () => {
+    global.fetch = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          status: '5500',
+          message: '상장 코인 아님',
+        }),
+        {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        },
+      )) as typeof fetch;
+
+    await expect(new BithumbAdapter().fetchOrderbook('MATIC', 1)).rejects.toMatchObject({
+      name: 'ExchangeUnsupportedSymbolError',
+      kind: 'unsupported_symbol',
+      symbol: 'MATIC',
+    });
+  });
 });

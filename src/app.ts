@@ -3,13 +3,14 @@ import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
 import { env } from './config/env';
 import { logger } from './utils/logger';
-import { createErrorResponse } from './utils/errors';
+import { AppError, createErrorResponse } from './utils/errors';
 
 // Route imports
 import { authRoutes } from './modules/auth/auth.controller';
 import { publicMarketRoutes } from './modules/public-market/public-market.controller';
 import { privateAccountRoutes } from './modules/private-account/private-account.controller';
 import { marketRoutes } from './domains/market-data/market.routes';
+import { chartRoutes } from './domains/charts/chart.routes';
 import { tradingRoutes } from './domains/trading/trading.routes';
 import { portfolioRoutes } from './domains/portfolio/portfolio.routes';
 import { kimchiPremiumRoutes } from './domains/kimchi-premium/kimchi-premium.routes';
@@ -37,7 +38,9 @@ export async function buildApp() {
   app.setErrorHandler((error, _request, reply) => {
     logger.error({ err: error }, 'Unhandled error');
     const statusCode = error.statusCode || 500;
-    reply.status(statusCode).send(createErrorResponse(error.message || 'Internal Server Error'));
+    reply
+      .status(statusCode)
+      .send(createErrorResponse(error.message || 'Internal Server Error', error instanceof AppError ? error.details : undefined));
   });
 
   // Health check
@@ -48,6 +51,7 @@ export async function buildApp() {
   await app.register(publicMarketRoutes, { prefix: '/api/v1/public' });
   await app.register(privateAccountRoutes, { prefix: '/api/v1/private' });
   await app.register(marketRoutes, { prefix: '/market' });
+  await app.register(chartRoutes, { prefix: '/charts' });
   await app.register(kimchiPremiumRoutes, { prefix: '/kimchi-premium' });
   await app.register(tradingRoutes, { prefix: '/trading' });
   await app.register(portfolioRoutes, { prefix: '/portfolio' });

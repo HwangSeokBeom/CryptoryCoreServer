@@ -1,10 +1,13 @@
 import { Server as HttpServer } from 'http';
 import { RawData, WebSocket, WebSocketServer } from 'ws';
+import type { ExchangeId } from '../core/exchange/exchange.types';
+import { ensureChartLiveCandle } from '../domains/charts/chart.service';
 import { marketEventBus } from '../modules/public-market/market.event-bus';
 import { publicMarketDataStore } from '../modules/public-market/market.data.store';
 import { toUnifiedSymbol } from '../modules/public-market/market.normalization';
 import {
   serializeWsAckPayload,
+  serializeWsCandleEvent,
   serializeWsErrorPayload,
   serializeWsOrderbookEvent,
   serializeWsPongPayload,
@@ -16,6 +19,7 @@ import {
 } from '../modules/public-market/public-market.contract';
 import type {
   MarketChannel,
+  NormalizedMarketCandle,
   NormalizedMarketOrderbook,
   NormalizedMarketTicker,
   NormalizedMarketTrade,
@@ -30,6 +34,7 @@ interface ClientSubscriptionState {
   };
   orderbook: Set<string>;
   trades: Set<string>;
+  candles: Set<string>;
 }
 
 interface ClientSocket extends WebSocket {
@@ -49,6 +54,10 @@ function buildKey(exchange: string, symbol: string) {
   return `${exchange}:${toUnifiedSymbol(symbol)}`;
 }
 
+function buildCandleKey(exchange: string, symbol: string, interval: string) {
+  return `${exchange}:${toUnifiedSymbol(symbol)}:${interval}`;
+}
+
 function createSubscriptionState(): ClientSubscriptionState {
   return {
     tickers: {
@@ -58,6 +67,7 @@ function createSubscriptionState(): ClientSubscriptionState {
     },
     orderbook: new Set<string>(),
     trades: new Set<string>(),
+    candles: new Set<string>(),
   };
 }
 
@@ -98,6 +108,14 @@ function publishTrade(trade: NormalizedMarketTrade) {
   for (const [ws, subscriptions] of clientSubscriptions.entries()) {
     if (matchesKeySubscription(subscriptions.trades, trade.exchange, trade.symbol)) {
       sendJson(ws, serializeWsTradeEvent(trade));
+    }
+  }
+}
+
+function publishCandle(candle: NormalizedMarketCandle) {
+  for (const [ws, subscriptions] of clientSubscriptions.entries()) {
+    if (subscriptions.candles.has(buildCandleKey(candle.exchange, candle.symbol, candle.interval))) {
+      sendJson(ws, serializeWsCandleEvent(candle));
     }
   }
 }
@@ -199,6 +217,62 @@ function handleKeyedSubscription(
   }
 }
 
+async function handleCandleSubscription(
+  ws: ClientSocket,
+  subscriptions: Set<string>,
+  message: Extract<WsMarketRequest, { channel: 'candles' }>,
+) {
+  const exchange = message.exchange.toLowerCase();
+  const interval = message.interval ?? '1m';
+  const symbols = message.symbols.map((symbol) => toUnifiedSymbol(symbol));
+  const keys = symbols.map((symbol) => buildCandleKey(exchange, symbol, interval));
+
+  if (message.action === 'subscribe') {
+    keys.forEach((key) => subscriptions.add(key));
+  } else {
+    keys.forEach((key) => subscriptions.delete(key));
+  }
+
+  sendJson(
+    ws,
+    serializeWsAckPayload({
+      requestId: message.requestId,
+      action: message.action,
+      channel: 'candles',
+      filters: {
+        exchange,
+        symbols,
+        interval,
+      },
+      snapshotSent: message.action === 'subscribe',
+    }),
+  );
+
+  if (message.action !== 'subscribe') return;
+
+  for (const symbol of symbols) {
+    try {
+      const candle = await ensureChartLiveCandle({
+        exchange: exchange as ExchangeId,
+        symbol,
+        interval,
+      });
+      if (candle) {
+        sendJson(ws, serializeWsCandleEvent(candle));
+      }
+    } catch (error) {
+      sendJson(
+        ws,
+        serializeWsErrorPayload({
+          requestId: message.requestId,
+          code: 'candle_snapshot_unavailable',
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    }
+  }
+}
+
 function handleClientMessage(ws: ClientSocket, raw: RawData) {
   let payload: unknown;
 
@@ -253,6 +327,11 @@ function handleClientMessage(ws: ClientSocket, raw: RawData) {
     return;
   }
 
+  if (message.channel === 'candles') {
+    void handleCandleSubscription(ws, subscriptions.candles, message);
+    return;
+  }
+
   handleKeyedSubscription(ws, subscriptions.trades, 'trades', message);
 }
 
@@ -283,6 +362,7 @@ function startHeartbeat() {
 marketEventBus.onTicker(publishTicker);
 marketEventBus.onOrderbook(publishOrderbook);
 marketEventBus.onTrade(publishTrade);
+marketEventBus.onCandle(publishCandle);
 
 export function setupWebSocket(server: HttpServer) {
   if (wss) {

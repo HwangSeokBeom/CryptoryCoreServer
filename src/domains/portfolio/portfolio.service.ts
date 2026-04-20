@@ -2,8 +2,9 @@ import { ExchangeAuthError, ExchangeCapabilityError, ExchangeRequestError } from
 import type { ExchangeId } from '../../core/exchange/exchange.types';
 import { exchangeProviderRegistry } from '../../core/exchange/registry.bootstrap';
 import { AppError } from '../../utils/errors';
-import { getUserExchangeCredentials } from '../exchange-connections/user-exchange-credentials.service';
+import { resolveRuntimeExchangeCredentials } from '../exchange-connections/user-exchange-credentials.service';
 import { markExchangeConnectionSync } from '../../modules/private-account/exchange-connections.service';
+import { logger } from '../../utils/logger';
 
 function resolvePortfolioProvider(exchange: ExchangeId) {
   try {
@@ -46,11 +47,18 @@ async function executePortfolioOperation<T>(
   }
 }
 
+async function getPortfolioContext(userId: string, exchange: ExchangeId) {
+  const resolved = await resolveRuntimeExchangeCredentials(userId, exchange);
+  logger.debug(
+    { domain: 'credentials', exchange, userId, source: resolved.source, capabilityGroup: 'portfolio' },
+    'Resolved private exchange credentials',
+  );
+  return { credentials: resolved.credentials };
+}
+
 export async function getPortfolioSnapshot(userId: string, exchange: ExchangeId) {
   const provider = resolvePortfolioProvider(exchange);
-  return executePortfolioOperation(userId, exchange, async () => provider.getPortfolioSnapshot({
-    credentials: await getUserExchangeCredentials(userId, exchange),
-  }));
+  return executePortfolioOperation(userId, exchange, async () => provider.getPortfolioSnapshot(await getPortfolioContext(userId, exchange)));
 }
 
 export async function getAssetHistory(userId: string, exchange: ExchangeId, symbol?: string, limit?: number) {
@@ -59,7 +67,5 @@ export async function getAssetHistory(userId: string, exchange: ExchangeId, symb
     throw new AppError(501, `${exchange} asset history is unsupported`);
   }
 
-  return executePortfolioOperation(userId, exchange, async () => provider.getAssetHistory!(symbol, limit, {
-    credentials: await getUserExchangeCredentials(userId, exchange),
-  }));
+  return executePortfolioOperation(userId, exchange, async () => provider.getAssetHistory!(symbol, limit, await getPortfolioContext(userId, exchange)));
 }

@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { EXCHANGE_MAP } from '../../config/constants';
+import type { DomesticExchangeId } from '../../core/exchange/exchange.types';
 import { createErrorResponse, createSuccessResponse } from '../../utils/errors';
 import { logger } from '../../utils/logger';
 import { buildUnifiedMarketName, toUnifiedSymbol } from './market.normalization';
@@ -12,6 +13,7 @@ import {
 } from './public-market.contract';
 import {
   getPublicCandles,
+  getPublicCandlesWithMeta,
   getPublicKimchiPremium,
   getPublicOrderbook,
   getPublicTickers,
@@ -23,6 +25,14 @@ import {
 function ensureSupportedExchange(exchange: string | undefined) {
   if (!exchange) return null;
   return EXCHANGE_MAP.has(exchange) ? null : createErrorResponse('unsupported exchange');
+}
+
+function normalizeKimchiExchange(exchange: string | undefined): DomesticExchangeId | undefined {
+  const normalized = exchange?.trim().toLowerCase();
+  if (!normalized) return undefined;
+  return ['upbit', 'bithumb', 'coinone', 'korbit'].includes(normalized)
+    ? normalized as DomesticExchangeId
+    : undefined;
 }
 
 export async function publicMarketRoutes(app: FastifyInstance) {
@@ -118,7 +128,7 @@ export async function publicMarketRoutes(app: FastifyInstance) {
       return reply.status(400).send(exchangeError);
     }
 
-    const candles = await getPublicCandles(
+    const candles = await getPublicCandlesWithMeta(
       symbol,
       exchange,
       period ?? '1h',
@@ -132,19 +142,32 @@ export async function publicMarketRoutes(app: FastifyInstance) {
         symbol: unifiedSymbol,
         market: buildUnifiedMarketName(exchange, unifiedSymbol),
         interval: period ?? '1h',
-        items: candles,
+        items: candles.items,
+        meta: candles.meta,
       }),
     );
   });
 
   app.get('/kimchi-premium', async (request, reply) => {
-    const { symbols } = request.query as { symbols?: string };
+    const { symbols, exchange, venue, domesticExchange } = request.query as {
+      symbols?: string;
+      exchange?: string;
+      venue?: string;
+      domesticExchange?: string;
+    };
     if (!symbols) {
       return reply.status(400).send(createErrorResponse('symbols query parameter is required'));
     }
 
+    const requestedExchange = domesticExchange ?? venue ?? exchange;
+    const selectedExchange = normalizeKimchiExchange(requestedExchange);
+    if (requestedExchange && !selectedExchange) {
+      return reply.status(400).send(createErrorResponse('unsupported domestic exchange'));
+    }
+
     const result = await getPublicKimchiPremium(
       symbols.split(',').map((symbol) => symbol.trim()).filter(Boolean),
+      selectedExchange ? { venues: [selectedExchange] } : undefined,
     );
 
     return createSuccessResponse(serializeKimchiPremiumResponse(result));

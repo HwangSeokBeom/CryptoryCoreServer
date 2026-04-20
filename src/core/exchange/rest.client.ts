@@ -26,6 +26,16 @@ function buildUrl(baseUrl: string, path: string, query?: RestRequestOptions['que
   return url.toString();
 }
 
+function sanitizeUrlForLogs(rawUrl: string) {
+  try {
+    const url = new URL(rawUrl);
+    url.search = '';
+    return url.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
 function buildFormBody(form?: RestRequestOptions['form']) {
   if (!form) return undefined;
   const params = new URLSearchParams();
@@ -75,7 +85,7 @@ async function parseResponseBody<T>(response: Response): Promise<T> {
 
 export class RestClient {
   constructor(
-    private readonly owner: ExchangeId | 'fx',
+    private readonly owner: ExchangeId | 'fx' | 'coingecko',
     private readonly baseUrl: string,
   ) {}
 
@@ -85,6 +95,7 @@ export class RestClient {
       ...options.retryPolicy,
     };
     const url = buildUrl(this.baseUrl, path, options.query);
+    const logUrl = sanitizeUrlForLogs(url);
     const formBody = buildFormBody(options.form);
 
     for (let attempt = 1; attempt <= policy.maxAttempts; attempt += 1) {
@@ -114,7 +125,7 @@ export class RestClient {
               {
                 domain: 'exchange-rest',
                 owner: this.owner,
-                url,
+                url: logUrl,
                 attempt,
                 upstreamStatus: response.status,
                 retry: true,
@@ -129,7 +140,7 @@ export class RestClient {
           throw new ExchangeRequestError(
             this.owner,
             response.status,
-            url,
+            logUrl,
             `${this.owner} request failed with HTTP ${response.status}`,
             responseBody,
           );
@@ -143,13 +154,13 @@ export class RestClient {
         }
 
         logger.warn(
-          { domain: 'exchange-rest', owner: this.owner, url, attempt, retry: true, err: error },
+          { domain: 'exchange-rest', owner: this.owner, url: logUrl, attempt, retry: true, err: error },
           'Retrying exchange REST request',
         );
         await delay(getRetryDelay(policy, attempt));
       }
     }
 
-    throw new ExchangeRequestError(this.owner, 500, url, 'Unexpected exchange request failure');
+    throw new ExchangeRequestError(this.owner, 500, logUrl, 'Unexpected exchange request failure');
   }
 }

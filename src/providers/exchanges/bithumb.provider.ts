@@ -1,6 +1,7 @@
 import { COINS } from '../../config/constants';
 import { getExchangeConfig } from '../../config/exchange.config';
 import { JwtHmacSigner } from '../../core/exchange/auth/jwt-hmac.signer';
+import { ExchangeUnsupportedSymbolError } from '../../core/exchange/errors';
 import type {
   AssetHistoryRecord,
   CancelOrderRequest,
@@ -11,6 +12,8 @@ import type {
   CanonicalTickerSnapshot,
   CanonicalTrade,
   CreateOrderRequest,
+  ExchangeMarketDescriptor,
+  MarketCapabilitySnapshot,
   OrderChance,
   PortfolioSnapshot,
   StreamSubscription,
@@ -23,14 +26,35 @@ import type {
   MarketStreamSink,
   ProviderContext,
 } from '../../core/exchange/provider.interfaces';
+import { buildStreamSubscriptionPlan } from '../../core/exchange/stream-subscription.plan';
 import { toCanonicalMarket, toCanonicalSymbol, toExchangeSymbol } from '../../core/exchange/symbol.mapper';
-import { WebSocketClientManager } from '../../core/exchange/websocket.client-manager';
+import { WebSocketClientManager, type WebSocketReconnectMetadata } from '../../core/exchange/websocket.client-manager';
 import { BithumbAdapter } from '../../exchanges/BithumbAdapter';
 import { logger } from '../../utils/logger';
 import { BaseExchangeProvider } from './base-exchange.provider';
-import { safeNumber, sortAsks, sortBids } from './provider-utils';
+import {
+  normalizeExchangeTimestampFromCandidates,
+  requireCredentials,
+  safeNumber,
+  sortAsks,
+  sortBids,
+  toHistoricalCandleWindow,
+  toIsoTimestamp,
+} from './provider-utils';
 
 const DEFAULT_SYMBOLS = COINS.map((coin) => coin.symbol);
+const MARKET_CACHE_TTL_MS = 60_000;
+const MARKET_STALE_TTL_MS = 5 * 60_000;
+const TICKER_CACHE_TTL_MS = 1_000;
+const TICKER_STALE_TTL_MS = 20_000;
+
+function normalizeRequestedSymbols(symbols?: string[]) {
+  return Array.from(new Set((symbols ?? []).map(toCanonicalSymbol)));
+}
+
+function toSortedSymbols(symbols: Iterable<string>) {
+  return Array.from(new Set(symbols)).sort((left, right) => left.localeCompare(right));
+}
 
 export class BithumbProvider
   extends BaseExchangeProvider
@@ -41,77 +65,185 @@ export class BithumbProvider
   private streamManager: WebSocketClientManager | null = null;
   private readonly books = new Map<string, { asks: Map<number, number>; bids: Map<number, number> }>();
   private activeSubscriptions: StreamSubscription[] = [];
+  private supportedStreamSymbols = new Set<string>();
+  private readonly capabilityExcludedSymbols = {
+    orderbook: new Map<string, string>(),
+    trades: new Map<string, string>(),
+    candles: new Map<string, string>(),
+  };
 
   constructor() {
     super('bithumb');
   }
 
   async listMarkets() {
-    const response = await this.restClient.request<Array<{ market: string }>>('/v1/market/all', {
-      query: { isDetails: false },
-    });
+    return this.withRequestCache({
+      operation: 'markets',
+      key: 'krw',
+      ttlMs: MARKET_CACHE_TTL_MS,
+      staleTtlMs: MARKET_STALE_TTL_MS,
+      loader: async () => {
+        const response = await this.restClient.request<Array<{ market: string }>>('/v1/market/all', {
+          query: { isDetails: false },
+        });
 
-    return response
-      .filter((item) => item.market.startsWith('KRW-'))
-      .map((item) => ({
-        symbol: item.market.replace('KRW-', ''),
-        market: item.market.replace('KRW-', '') + '/KRW',
-        rawSymbol: item.market,
-      }));
+        return response
+          .filter((item) => item.market.startsWith('KRW-'))
+          .map<ExchangeMarketDescriptor>((item) => {
+            const symbol = item.market.replace('KRW-', '');
+            return {
+              symbol,
+              exchangeSymbol: item.market,
+              market: `${symbol}/KRW`,
+              baseCurrency: symbol,
+              quoteCurrency: 'KRW',
+              rawSymbol: item.market,
+              tradable: true,
+            };
+          });
+      },
+      responseItemCount: (items) => items.length,
+    });
   }
 
-  async getTickerSnapshot(symbols = DEFAULT_SYMBOLS): Promise<CanonicalTickerSnapshot[]> {
-    const tickers = await this.adapter.fetchTickers(symbols.map(toCanonicalSymbol));
-    return tickers.map((ticker) => ({
-      ...toCanonicalMarket(this.exchange, ticker.symbol),
-      price: ticker.price,
-      change24h: ticker.change24h,
-      volume24h: ticker.volume24h,
-      high24h: ticker.high24h,
-      low24h: ticker.low24h,
-      timestamp: ticker.timestamp,
-    }));
+  async getMarketCapabilitySnapshot(markets?: ExchangeMarketDescriptor[]): Promise<MarketCapabilitySnapshot> {
+    const marketUniverse = toSortedSymbols((markets ?? await this.listMarkets()).map((market) => market.symbol));
+    return {
+      websocketTickerSymbols: this.supportedStreamSymbols.size > 0 ? toSortedSymbols(this.supportedStreamSymbols) : marketUniverse,
+      capabilitySymbols: {
+        tickers: marketUniverse,
+        orderbook: marketUniverse.filter((symbol) => !this.capabilityExcludedSymbols.orderbook.has(symbol)),
+        trades: marketUniverse.filter((symbol) => !this.capabilityExcludedSymbols.trades.has(symbol)),
+        candles: marketUniverse.filter((symbol) => !this.capabilityExcludedSymbols.candles.has(symbol)),
+      },
+      capabilityExcludedSymbols: {
+        orderbook: toSortedSymbols(this.capabilityExcludedSymbols.orderbook.keys()).map((symbol) => ({
+          symbol,
+          reason: this.capabilityExcludedSymbols.orderbook.get(symbol) ?? 'capability_not_supported',
+        })),
+        trades: toSortedSymbols(this.capabilityExcludedSymbols.trades.keys()).map((symbol) => ({
+          symbol,
+          reason: this.capabilityExcludedSymbols.trades.get(symbol) ?? 'capability_not_supported',
+        })),
+        candles: toSortedSymbols(this.capabilityExcludedSymbols.candles.keys()).map((symbol) => ({
+          symbol,
+          reason: this.capabilityExcludedSymbols.candles.get(symbol) ?? 'capability_not_supported',
+        })),
+      },
+    };
+  }
+
+  async getTickerSnapshot(symbols?: string[]): Promise<CanonicalTickerSnapshot[]> {
+    const listedMarkets = await this.listMarkets();
+    const marketUniverse = toSortedSymbols(listedMarkets.map((market) => market.symbol));
+    const requestedSymbols = normalizeRequestedSymbols(symbols);
+    const effectiveRequestedSymbols = requestedSymbols.length > 0 ? requestedSymbols : marketUniverse;
+    const requestedSet = new Set(effectiveRequestedSymbols);
+    const marketSymbols = new Set(marketUniverse);
+    const snapshots = await this.withRequestCache({
+      operation: 'tickers',
+      key: 'krw:all',
+      ttlMs: TICKER_CACHE_TTL_MS,
+      staleTtlMs: TICKER_STALE_TTL_MS,
+      staleWhileRevalidate: true,
+      requestedMarketCount: effectiveRequestedSymbols.length,
+      normalizedSymbolCount: effectiveRequestedSymbols.length,
+      loader: async () => {
+        const tickers = await this.adapter.fetchTickers(Array.from(marketSymbols));
+        return tickers.map((ticker) => ({
+          ...toCanonicalMarket(this.exchange, ticker.symbol),
+          price: ticker.price,
+          change24h: ticker.change24h,
+          volume24h: ticker.volume24h,
+          high24h: ticker.high24h,
+          low24h: ticker.low24h,
+          timestamp: ticker.timestamp,
+        }));
+      },
+      responseItemCount: (items) => items.length,
+      symbolDiff: {
+        requestedSymbols: effectiveRequestedSymbols,
+        resolvedSymbols: (items) => items.map((item) => item.symbol),
+        droppedReason: (symbol) =>
+          marketSymbols.has(symbol) ? 'missing_from_exchange_ticker_response' : 'not_listed_on_exchange_market_universe',
+      },
+    });
+    const filtered = snapshots.filter((ticker) => requestedSet.has(ticker.symbol));
+    const capabilitySnapshot = await this.getMarketCapabilitySnapshot(listedMarkets);
+    this.logResolvedMarketUniverse({
+      operation: 'tickers',
+      requestedSymbols: effectiveRequestedSymbols,
+      returnedSymbols: toSortedSymbols(filtered.map((ticker) => ticker.symbol)),
+      droppedReason: (symbol) => (marketSymbols.has(symbol) ? 'missing_upstream_ticker' : 'unsupported_on_exchange'),
+      universe: {
+        registrySymbols: DEFAULT_SYMBOLS,
+        marketSymbols: marketUniverse,
+        ...capabilitySnapshot,
+      },
+    });
+    return filtered;
   }
 
   async getOrderbookSnapshot(symbol: string, depth = 15): Promise<CanonicalOrderbookSnapshot> {
     const canonical = toCanonicalSymbol(symbol);
-    const snapshot = await this.adapter.fetchOrderbook(canonical, depth);
-    const market = toCanonicalMarket(this.exchange, canonical);
-    const asks = sortAsks(snapshot.asks.map((level) => ({ price: level.price, quantity: level.qty })), depth);
-    const bids = sortBids(snapshot.bids.map((level) => ({ price: level.price, quantity: level.qty })), depth);
+    try {
+      const snapshot = await this.adapter.fetchOrderbook(canonical, depth);
+      const market = toCanonicalMarket(this.exchange, canonical);
+      const asks = sortAsks(snapshot.asks.map((level) => ({ price: level.price, quantity: level.qty })), depth);
+      const bids = sortBids(snapshot.bids.map((level) => ({ price: level.price, quantity: level.qty })), depth);
 
-    return {
-      ...market,
-      asks,
-      bids,
-      bestAsk: asks[0]?.price ?? 0,
-      bestBid: bids[0]?.price ?? 0,
-      spread: Math.max((asks[0]?.price ?? 0) - (bids[0]?.price ?? 0), 0),
-      timestamp: Date.now(),
-    };
+      return {
+        ...market,
+        asks,
+        bids,
+        bestAsk: asks[0]?.price ?? 0,
+        bestBid: bids[0]?.price ?? 0,
+        spread: Math.max((asks[0]?.price ?? 0) - (bids[0]?.price ?? 0), 0),
+        timestamp: Date.now(),
+      };
+    } catch (error) {
+      this.noteCapabilitySymbolUnsupported('orderbook', canonical, error);
+      throw error;
+    }
   }
 
   async getRecentTrades(symbol: string, limit = 50): Promise<CanonicalTrade[]> {
     const canonical = toCanonicalSymbol(symbol);
-    const response = await this.restClient.request<any>(`/public/transaction_history/${canonical}_KRW`, {
-      query: { count: limit },
-    });
-    const trades = response.data ?? [];
-    const market = toCanonicalMarket(this.exchange, canonical);
+    try {
+      const response = await this.restClient.request<any>(`/public/transaction_history/${canonical}_KRW`, {
+        query: { count: limit },
+      });
+      const trades = response.data ?? [];
+      const market = toCanonicalMarket(this.exchange, canonical);
 
-    return trades.map((trade: any) => {
-      const price = safeNumber(trade.price ?? trade.contPrice);
-      const quantity = safeNumber(trade.units_traded ?? trade.contQty);
-      return {
-        ...market,
-        tradeId: String(trade.transaction_date ?? `${canonical}:${price}:${quantity}`),
-        side: String(trade.type ?? '').toLowerCase() === 'ask' ? 'sell' : 'buy',
-        price,
-        quantity,
-        notional: price * quantity,
-        timestamp: Date.now(),
-      };
-    });
+      return trades.map((trade: any) => {
+        const price = safeNumber(trade.price ?? trade.contPrice);
+        const quantity = safeNumber(trade.units_traded ?? trade.contQty);
+        const normalizedTimestamp = normalizeExchangeTimestampFromCandidates(
+          [trade.contDtm, trade.transaction_date, trade.datetime],
+          { assumeTimezone: 'KST' },
+        );
+        if (normalizedTimestamp.timestamp === null) {
+          logger.warn(
+            { domain: 'market-routes', exchange: this.exchange, rawTimestamp: normalizedTimestamp.raw, reason: normalizedTimestamp.reason },
+            `[TradeTimestampAPI] exchange=${this.exchange} invalidTimestamp raw=${String(normalizedTimestamp.raw)} reason=${normalizedTimestamp.reason ?? 'unknown'}`,
+          );
+        }
+        return {
+          ...market,
+          tradeId: String(trade.transaction_date ?? `${canonical}:${price}:${quantity}`),
+          side: String(trade.type ?? '').toLowerCase() === 'ask' ? 'sell' : 'buy',
+          price,
+          quantity,
+          notional: price * quantity,
+          timestamp: normalizedTimestamp.timestamp,
+          executedAt: toIsoTimestamp(normalizedTimestamp.timestamp),
+        };
+      });
+    } catch (error) {
+      this.noteCapabilitySymbolUnsupported('trades', canonical, error);
+      throw error;
+    }
   }
 
   async getCandles(symbol: string, interval: string, limit = 60): Promise<CanonicalCandle[]> {
@@ -120,10 +252,14 @@ export class BithumbProvider
     const market = toCanonicalMarket(this.exchange, canonical);
 
     return candles.map((candle, index) => ({
+      ...toHistoricalCandleWindow({
+        interval,
+        timestamp: candle.time,
+        index,
+        total: candles.length,
+      }),
       ...market,
       interval,
-      openTime: safeNumber(candle.time) || Date.now() - (limit - index) * 60_000,
-      closeTime: safeNumber(candle.time) || Date.now() - (limit - index - 1) * 60_000,
       open: candle.open,
       high: candle.high,
       low: candle.low,
@@ -133,25 +269,39 @@ export class BithumbProvider
   }
 
   async startPublicStream(subscriptions: StreamSubscription[], sink: MarketStreamSink) {
-    this.activeSubscriptions = subscriptions;
-    const symbols = Array.from(
-      new Set(
-        subscriptions
-          .filter((subscription) => subscription.exchange === this.exchange)
-          .flatMap((subscription) => subscription.symbols.map(toCanonicalSymbol)),
-      ),
-    );
-    if (symbols.length === 0) return;
+    this.activeSubscriptions = subscriptions.filter((subscription) => subscription.exchange === this.exchange);
+    if (this.activeSubscriptions.length === 0) return;
 
-    const socketSymbols = symbols.map((symbol) => `${symbol}_KRW`);
+    await this.refreshSupportedStreamSymbols();
+    const initialPlan = await this.buildActiveStreamPlan();
+    this.logStreamPlan('start', initialPlan);
+    if (initialPlan.totalResolvedSymbols === 0) {
+      logger.warn(
+        { domain: 'market-streaming', exchange: this.exchange, skippedResyncSymbols: initialPlan.skippedSymbols },
+        'Skipping Bithumb public stream start because no symbols resolved',
+      );
+      return;
+    }
+
     this.streamManager = new WebSocketClientManager({
       name: 'bithumb-public',
       url: getExchangeConfig(this.exchange).publicWebSocketUrl,
       onOpen: async (ctx) => {
-        ctx.sendJson({ type: 'ticker', symbols: socketSymbols, tickTypes: ['24H'], isOnlyRealtime: true });
-        ctx.sendJson({ type: 'orderbooksnapshot', symbols: socketSymbols });
-        ctx.sendJson({ type: 'orderbookdepth', symbols: socketSymbols, isOnlyRealtime: true });
-        ctx.sendJson({ type: 'transaction', symbols: socketSymbols, isOnlyRealtime: true });
+        const plan = await this.buildActiveStreamPlan();
+        const tickerSymbols = plan.resolvedByChannel.tickers.map((symbol) => toExchangeSymbol(this.exchange, symbol));
+        const orderbookSymbols = plan.resolvedByChannel.orderbook.map((symbol) => toExchangeSymbol(this.exchange, symbol));
+        const tradeSymbols = plan.resolvedByChannel.trades.map((symbol) => toExchangeSymbol(this.exchange, symbol));
+
+        if (tickerSymbols.length > 0) {
+          ctx.sendJson({ type: 'ticker', symbols: tickerSymbols, tickTypes: ['24H'], isOnlyRealtime: true });
+        }
+        if (orderbookSymbols.length > 0) {
+          ctx.sendJson({ type: 'orderbooksnapshot', symbols: orderbookSymbols });
+          ctx.sendJson({ type: 'orderbookdepth', symbols: orderbookSymbols, isOnlyRealtime: true });
+        }
+        if (tradeSymbols.length > 0) {
+          ctx.sendJson({ type: 'transaction', symbols: tradeSymbols, isOnlyRealtime: true });
+        }
       },
       onMessage: async (raw) => {
         const payload = JSON.parse(raw.toString());
@@ -226,25 +376,37 @@ export class BithumbProvider
             const market = toCanonicalMarket(this.exchange, symbol);
             const price = safeNumber(trade.contPrice ?? trade.price);
             const quantity = safeNumber(trade.contQty ?? trade.quantity);
+            const normalizedTimestamp = normalizeExchangeTimestampFromCandidates(
+              [trade.contDtm, trade.transaction_date, trade.datetime, content.datetime],
+              { assumeTimezone: 'KST' },
+            );
+            if (normalizedTimestamp.timestamp === null) {
+              logger.warn(
+                { domain: 'market-streaming', exchange: this.exchange, rawTimestamp: normalizedTimestamp.raw, reason: normalizedTimestamp.reason },
+                `[TradeTimestampAPI] exchange=${this.exchange} invalidTimestamp raw=${String(normalizedTimestamp.raw)} reason=${normalizedTimestamp.reason ?? 'unknown'}`,
+              );
+              continue;
+            }
             await sink.onTrade({
               ...market,
-              tradeId: String(trade.contNo ?? trade.transaction_date ?? `${symbol}:${Date.now()}`),
+              tradeId: String(trade.contNo ?? trade.transaction_date ?? `${symbol}:${normalizedTimestamp.timestamp}`),
               side: String(trade.buySellGb ?? '') === '1' ? 'sell' : 'buy',
               price,
               quantity,
               notional: price * quantity,
-              timestamp: Date.now(),
+              timestamp: normalizedTimestamp.timestamp,
+              executedAt: toIsoTimestamp(normalizedTimestamp.timestamp),
             });
           }
         }
       },
-      onReconnect: async () => {
-        await this.resyncSnapshots(sink, symbols);
+      onReconnect: async (ctx) => {
+        await this.resyncSnapshots(sink, 'reconnect', ctx.getReconnectMetadata() ?? undefined);
       },
     });
 
     await this.streamManager.start();
-    await this.resyncSnapshots(sink, symbols);
+    await this.resyncSnapshots(sink, 'initial');
   }
 
   async stopPublicStream() {
@@ -514,22 +676,103 @@ export class BithumbProvider
     });
   }
 
-  private async resyncSnapshots(sink: MarketStreamSink, symbols: string[]) {
-    if (sink.onReconnect) {
-      for (const subscription of this.activeSubscriptions.filter((item) => item.exchange === this.exchange)) {
+  private async refreshSupportedStreamSymbols() {
+    this.supportedStreamSymbols = new Set((await this.listMarkets()).map((market) => market.symbol));
+  }
+
+  private async buildActiveStreamPlan() {
+    if (this.supportedStreamSymbols.size === 0) {
+      await this.refreshSupportedStreamSymbols();
+    }
+
+    return buildStreamSubscriptionPlan({
+      subscriptions: this.activeSubscriptions,
+      supportedSymbolsByChannel: {
+        tickers: this.supportedStreamSymbols,
+        orderbook: this.supportedStreamSymbols,
+        trades: this.supportedStreamSymbols,
+        candles: this.supportedStreamSymbols,
+      },
+      capabilityExclusionsByChannel: {
+        orderbook: this.capabilityExcludedSymbols.orderbook,
+        trades: this.capabilityExcludedSymbols.trades,
+        candles: this.capabilityExcludedSymbols.candles,
+      },
+    });
+  }
+
+  private logStreamPlan(
+    phase: 'start' | 'initial' | 'reconnect',
+    plan: Awaited<ReturnType<BithumbProvider['buildActiveStreamPlan']>>,
+    reconnectMetadata?: WebSocketReconnectMetadata,
+  ) {
+    logger.info(
+      {
+        domain: 'market-streaming',
+        exchange: this.exchange,
+        phase,
+        reconnectReason: reconnectMetadata,
+        activeSubscriptionCount: plan.activeSubscriptionCount,
+        resyncScope: plan.activeChannels.map((channel) => ({
+          channel,
+          symbolCount: plan.resolvedByChannel[channel].length,
+        })),
+        skippedResyncSymbols: plan.skippedSymbols,
+      },
+      phase === 'start' ? 'Prepared Bithumb public stream plan' : 'Prepared Bithumb public resync plan',
+    );
+  }
+
+  private noteCapabilitySymbolUnsupported(
+    channel: 'orderbook' | 'trades' | 'candles',
+    symbol: string,
+    error: unknown,
+  ) {
+    if (!(error instanceof ExchangeUnsupportedSymbolError)) {
+      return;
+    }
+
+    this.capabilityExcludedSymbols[channel].set(symbol, error.message);
+    logger.warn(
+      {
+        domain: 'market-streaming',
+        exchange: this.exchange,
+        capability: channel,
+        symbol,
+        reason: error.message,
+      },
+      'Bithumb capability symbol downgraded to unsupported',
+    );
+  }
+
+  private async resyncSnapshots(
+    sink: MarketStreamSink,
+    phase: 'initial' | 'reconnect',
+    reconnectMetadata?: WebSocketReconnectMetadata,
+  ) {
+    const plan = await this.buildActiveStreamPlan();
+    this.logStreamPlan(phase, plan, reconnectMetadata);
+
+    if (phase === 'reconnect' && sink.onReconnect) {
+      for (const channel of plan.activeChannels) {
         try {
-          await sink.onReconnect(subscription);
+          await sink.onReconnect({
+            exchange: this.exchange,
+            channel,
+            symbols: plan.resolvedByChannel[channel],
+          });
         } catch (error) {
           logger.warn(
-            { domain: 'market-streaming', exchange: this.exchange, capability: 'reconnect', err: error },
+            { domain: 'market-streaming', exchange: this.exchange, capability: 'reconnect', channel, err: error },
             'Bithumb reconnect notification failed',
           );
         }
       }
     }
-    if (sink.onTicker) {
+
+    if (sink.onTicker && plan.resolvedByChannel.tickers.length > 0) {
       try {
-        const tickers = await this.getTickerSnapshot(symbols);
+        const tickers = await this.getTickerSnapshot(plan.resolvedByChannel.tickers);
         for (const ticker of tickers) {
           try {
             await sink.onTicker(ticker);
@@ -553,8 +796,9 @@ export class BithumbProvider
         );
       }
     }
-    if (sink.onOrderbook) {
-      for (const symbol of symbols) {
+
+    if (sink.onOrderbook && plan.resolvedByChannel.orderbook.length > 0) {
+      for (const symbol of plan.resolvedByChannel.orderbook) {
         try {
           await sink.onOrderbook(await this.getOrderbookSnapshot(symbol));
         } catch (error) {
@@ -565,8 +809,9 @@ export class BithumbProvider
         }
       }
     }
-    if (sink.onTrade) {
-      for (const symbol of symbols) {
+
+    if (sink.onTrade && plan.resolvedByChannel.trades.length > 0) {
+      for (const symbol of plan.resolvedByChannel.trades) {
         try {
           const trades = await this.getRecentTrades(symbol, 20);
           for (const trade of trades.reverse()) {
@@ -596,11 +841,7 @@ export class BithumbProvider
   }
 
   private requireCredentials(context: ProviderContext) {
-    if (!context.credentials) {
-      throw new Error('Bithumb credentials are required');
-    }
-
-    return context.credentials;
+    return requireCredentials(this.exchange, context);
   }
 
   private mapPrivateOrder(order: any, symbol?: string): CanonicalOrder {

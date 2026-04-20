@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import type {
+  NormalizedMarketCandle,
   NormalizedMarketOrderbook,
   NormalizedMarketTicker,
   NormalizedMarketTrade,
@@ -10,6 +11,7 @@ type MarketEventMap = {
   ticker: NormalizedMarketTicker;
   orderbook: NormalizedMarketOrderbook;
   trade: NormalizedMarketTrade;
+  candle: NormalizedMarketCandle;
   status: PublicMarketCollectorStatus;
 };
 
@@ -26,6 +28,10 @@ class MarketEventBus extends EventEmitter {
     this.emit('trade', data);
   }
 
+  emitCandle(data: NormalizedMarketCandle) {
+    this.emit('candle', data);
+  }
+
   emitStatus(data: PublicMarketCollectorStatus) {
     this.emit('status', data);
   }
@@ -40,6 +46,10 @@ class MarketEventBus extends EventEmitter {
 
   onTrade(listener: (data: NormalizedMarketTrade) => void) {
     this.on('trade', listener);
+  }
+
+  onCandle(listener: (data: NormalizedMarketCandle) => void) {
+    this.on('candle', listener);
   }
 
   onStatus(listener: (data: PublicMarketCollectorStatus) => void) {

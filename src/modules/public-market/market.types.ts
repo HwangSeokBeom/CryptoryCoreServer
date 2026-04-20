@@ -1,10 +1,12 @@
 import type { OrderEntry } from '../../generators/orderbookGenerator';
 
-export type MarketChannel = 'tickers' | 'orderbook' | 'trades';
+export type MarketChannel = 'tickers' | 'orderbook' | 'trades' | 'candles';
 
 export interface NormalizedMarketBase {
   exchange: string;
   symbol: string;
+  canonicalAssetKey?: string | null;
+  assetImageUrl?: string | null;
   market: string;
   baseCurrency: string;
   quoteCurrency: string;
@@ -35,6 +37,23 @@ export interface NormalizedMarketTrade extends NormalizedMarketBase {
   price: number;
   quantity: number;
   side: 'buy' | 'sell';
+  executedAt: string | null;
+}
+
+export interface NormalizedMarketCandle extends NormalizedMarketBase {
+  channel: 'candles';
+  interval: string;
+  openTime: number;
+  closeTime: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  asOf: number;
+  confirmed: boolean;
+  candleStatus: 'live' | 'stale';
+  sourceEvent: 'seed' | 'trade' | 'ticker';
 }
 
 export interface PublicMarketCollectorStatus {
@@ -53,7 +72,15 @@ export interface PublicMarketCollectorStatus {
 }
 
 export interface PublicMarketCapabilityState {
-  state: 'active' | 'retryable' | 'blocked' | 'unsupported' | 'malformed' | 'cancelled';
+  state:
+    | 'active'
+    | 'retryable'
+    | 'blocked'
+    | 'unsupported'
+    | 'malformed'
+    | 'temporarily_unavailable'
+    | 'rate_limited'
+    | 'cancelled';
   failureCount: number;
   lastSuccessAt: number | null;
   lastFailureAt: number | null;

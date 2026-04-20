@@ -2,8 +2,9 @@ import { ExchangeAuthError, ExchangeCapabilityError, ExchangeRequestError } from
 import type { ExchangeId } from '../../core/exchange/exchange.types';
 import { exchangeProviderRegistry } from '../../core/exchange/registry.bootstrap';
 import { AppError } from '../../utils/errors';
-import { getUserExchangeCredentials } from '../exchange-connections/user-exchange-credentials.service';
+import { resolveRuntimeExchangeCredentials } from '../exchange-connections/user-exchange-credentials.service';
 import { markExchangeConnectionSync } from '../../modules/private-account/exchange-connections.service';
+import { logger } from '../../utils/logger';
 
 function resolveTradingProvider(exchange: ExchangeId) {
   try {
@@ -53,6 +54,15 @@ async function executeTradingOperation<T>(
   }
 }
 
+async function getTradingContext(userId: string, exchange: ExchangeId) {
+  const resolved = await resolveRuntimeExchangeCredentials(userId, exchange);
+  logger.debug(
+    { domain: 'credentials', exchange, userId, source: resolved.source, capabilityGroup: 'trading' },
+    'Resolved private exchange credentials',
+  );
+  return { credentials: resolved.credentials };
+}
+
 export async function getOrderChance(userId: string, exchange: ExchangeId, symbol: string) {
   const provider = resolveTradingProvider(exchange);
   if (!provider.getOrderChance) {
@@ -60,7 +70,7 @@ export async function getOrderChance(userId: string, exchange: ExchangeId, symbo
   }
 
   return executeTradingOperation(userId, exchange, async () => provider.getOrderChance!(symbol, {
-    credentials: await getUserExchangeCredentials(userId, exchange),
+    ...(await getTradingContext(userId, exchange)),
   }));
 }
 
@@ -75,7 +85,7 @@ export async function createTradingOrder(userId: string, input: any) {
   }
 
   return executeTradingOperation(userId, input.exchange, async () => provider.createOrder!(input, {
-    credentials: await getUserExchangeCredentials(userId, input.exchange),
+    ...(await getTradingContext(userId, input.exchange)),
   }));
 }
 
@@ -88,7 +98,7 @@ export async function cancelTradingOrder(userId: string, exchange: ExchangeId, o
 
   return executeTradingOperation(userId, exchange, async () => provider.cancelOrder!(
     { exchange, orderId, symbol },
-    { credentials: await getUserExchangeCredentials(userId, exchange) },
+    await getTradingContext(userId, exchange),
   ));
 }
 
@@ -102,9 +112,7 @@ export async function getTradingOrder(userId: string, exchange: ExchangeId, orde
   return executeTradingOperation(userId, exchange, async () => provider.getOrder!(
     orderId,
     symbol,
-    {
-      credentials: await getUserExchangeCredentials(userId, exchange),
-    },
+    await getTradingContext(userId, exchange),
   ));
 }
 
@@ -115,7 +123,7 @@ export async function getOpenOrders(userId: string, exchange: ExchangeId, symbol
   }
 
   return executeTradingOperation(userId, exchange, async () => provider.listOpenOrders!(symbol, {
-    credentials: await getUserExchangeCredentials(userId, exchange),
+    ...(await getTradingContext(userId, exchange)),
   }));
 }
 
@@ -126,6 +134,6 @@ export async function getRecentFills(userId: string, exchange: ExchangeId, symbo
   }
 
   return executeTradingOperation(userId, exchange, async () => provider.listFills!(symbol, limit, {
-    credentials: await getUserExchangeCredentials(userId, exchange),
+    ...(await getTradingContext(userId, exchange)),
   }));
 }

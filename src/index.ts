@@ -1,6 +1,7 @@
 import 'dotenv/config';
 
 import { buildApp } from './app';
+import { getServerExchangeCredentialAvailability } from './config/exchange.credentials';
 import { env } from './config/env';
 import { logger } from './utils/logger';
 import { prisma } from './config/database';
@@ -10,6 +11,15 @@ import { startTickerCollector, stopTickerCollector } from './jobs/tickerCollecto
 
 async function main() {
   const app = await buildApp();
+
+  logger.info(
+    {
+      domain: 'config',
+      privateCredentialResolutionOrder: ['user_connection', 'server_env'],
+      exchangeCredentialEnv: getServerExchangeCredentialAvailability(),
+    },
+    'Loaded exchange credential availability',
+  );
 
   await app.listen({ port: env.PORT, host: '0.0.0.0' });
   logger.info(`Server listening on port ${env.PORT}`);

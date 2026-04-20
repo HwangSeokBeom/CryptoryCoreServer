@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { EXCHANGE_MAP } from '../../config/constants';
 import type {
+  NormalizedMarketCandle,
   NormalizedMarketOrderbook,
   NormalizedMarketTicker,
   NormalizedMarketTrade,
@@ -19,6 +20,8 @@ export const tickerDtoSchema = z.object({
   exchange: exchangeIdSchema,
   exchangeName: z.string(),
   symbol: z.string(),
+  canonicalAssetKey: z.string().nullable().optional(),
+  assetImageUrl: z.string().url().nullable().optional(),
   market: z.string(),
   baseCurrency: z.string(),
   quoteCurrency: z.string(),
@@ -60,10 +63,34 @@ export const tradeDtoSchema = z.object({
   price: z.number(),
   quantity: z.number(),
   notional: z.number(),
-  timestamp: z.number(),
+  timestamp: z.number().nullable(),
+  executedAt: z.string().datetime().nullable(),
 });
 
 export const candleDtoSchema = z.object({
+  timestamp: z.number(),
+  open: z.number(),
+  high: z.number(),
+  low: z.number(),
+  close: z.number(),
+  volume: z.number(),
+});
+
+export const liveCandleDtoSchema = z.object({
+  exchange: exchangeIdSchema,
+  exchangeName: z.string(),
+  symbol: z.string(),
+  market: z.string(),
+  baseCurrency: z.string(),
+  quoteCurrency: z.string(),
+  rawSymbol: z.string(),
+  interval: z.string(),
+  openTime: z.number(),
+  closeTime: z.number(),
+  asOf: z.number(),
+  confirmed: z.boolean(),
+  candleStatus: z.enum(['live', 'stale']),
+  sourceEvent: z.enum(['seed', 'trade', 'ticker']),
   timestamp: z.number(),
   open: z.number(),
   high: z.number(),
@@ -98,6 +125,18 @@ export const candlesResponseDtoSchema = z.object({
   interval: z.string(),
   items: z.array(candleDtoSchema),
   total: z.number().int().nonnegative(),
+  meta: z.object({
+    isRenderable: z.boolean(),
+    freshnessState: z.enum(['live', 'stale', 'unavailable']),
+    lastSuccessfulAt: z.number().nullable(),
+    source: z.enum(['memory', 'redis', 'refreshed', 'fallback']),
+    fallbackReason: z.string().nullable(),
+    pointCount: z.number().int().nonnegative(),
+    retryAfterMs: z.number().optional(),
+    renderPriority: z.enum(['live', 'cached', 'stale', 'unavailable']),
+    refreshPriority: z.enum(['visible', 'normal', 'background']),
+    recommendedClientBehavior: z.enum(['keep_existing', 'first_paint_ok', 'cold_placeholder_only']),
+  }).optional(),
 });
 
 export const kimchiPremiumItemDtoSchema = z.object({
@@ -105,7 +144,8 @@ export const kimchiPremiumItemDtoSchema = z.object({
   exchangeName: z.string(),
   market: z.string(),
   priceKrw: z.number(),
-  premiumPercent: z.number(),
+  premiumPercent: z.number().nullable(),
+  reason: z.string().nullable().optional(),
 });
 
 export const kimchiPremiumResponseDtoSchema = z.object({
@@ -113,9 +153,59 @@ export const kimchiPremiumResponseDtoSchema = z.object({
   items: z.array(
     z.object({
       symbol: z.string(),
+      canonicalAssetKey: z.string().nullable().optional(),
+      assetImageUrl: z.string().url().nullable().optional(),
       nameKo: z.string(),
       nameEn: z.string(),
-      binanceKrwPrice: z.number(),
+      status: z.enum(['loaded', 'stale', 'partial', 'unavailable', 'failed']),
+      selectedExchange: exchangeIdSchema.optional(),
+      sourceExchange: exchangeIdSchema.nullable().optional(),
+      freshnessState: z.enum(['fresh', 'slightly_stale', 'stale', 'partial', 'unavailable']).optional(),
+      freshnessReason: z.string().nullable().optional(),
+      displayMeta: z.object({
+        status: z.enum(['ready', 'stale', 'partial', 'unavailable']),
+        hasUsableDomesticPrice: z.boolean(),
+        hasUsableReferencePrice: z.boolean(),
+        hasUsableFxRate: z.boolean(),
+        lastSuccessfulDomesticAt: z.number().nullable(),
+        lastSuccessfulReferenceAt: z.number().nullable(),
+        lastSuccessfulFxAt: z.number().nullable(),
+        delayBucket: z.enum(['none', 'slight', 'moderate', 'severe']),
+        displayHint: z.enum(['keep_last_good', 'loading_initial', 'unavailable_cold']),
+      }).optional(),
+      stableStatus: z.enum(['ready', 'stale', 'partial', 'unavailable']).optional(),
+      hasUsableDomesticPrice: z.boolean().optional(),
+      hasUsableReferencePrice: z.boolean().optional(),
+      hasUsableFxRate: z.boolean().optional(),
+      lastSuccessfulDomesticAt: z.number().nullable().optional(),
+      lastSuccessfulReferenceAt: z.number().nullable().optional(),
+      lastSuccessfulFxAt: z.number().nullable().optional(),
+      delayBucket: z.enum(['none', 'slight', 'moderate', 'severe']).optional(),
+      displayHint: z.enum(['keep_last_good', 'loading_initial', 'unavailable_cold']).optional(),
+      updatedAt: z.number().nullable().optional(),
+      computedAt: z.number().optional(),
+      domesticPriceTimestamp: z.number().nullable().optional(),
+      globalPriceTimestamp: z.number().nullable().optional(),
+      fxRateTimestamp: z.number().nullable().optional(),
+      freshnessMs: z.number().nullable().optional(),
+      missingFields: z.array(z.string()),
+      failureStage: z.enum(['reference_ticker', 'domestic_ticker', 'fx_rate', 'premium_compute', 'settlement']).nullable(),
+      binanceKrwPrice: z.number().nullable(),
+      convertedReferencePrice: z.number().nullable(),
+      domesticPrice: z.number().nullable(),
+      premiumPercent: z.number().nullable(),
+      sparkline: z.array(z.number()).optional(),
+      sparklinePoints: z.array(z.object({
+        price: z.number(),
+        timestamp: z.number(),
+        premiumPercent: z.number().optional(),
+      })).optional(),
+      sparklinePointCount: z.number().int().nonnegative().optional(),
+      sparklineStatus: z.enum(['ok', 'insufficientData', 'empty']).optional(),
+      pointCount: z.number().int().nonnegative().optional(),
+      rangeMin: z.number().nullable().optional(),
+      rangeMax: z.number().nullable().optional(),
+      lastUpdatedAt: z.number().nullable().optional(),
       domestic: z.array(kimchiPremiumItemDtoSchema),
     }),
   ),
@@ -141,6 +231,14 @@ export const wsMarketRequestSchema = z.union([
     exchange: exchangeIdSchema,
     symbols: z.array(z.string()).min(1),
   }),
+  z.object({
+    requestId: z.string().optional(),
+    action: z.enum(['subscribe', 'unsubscribe']),
+    channel: z.literal('candles'),
+    exchange: exchangeIdSchema,
+    symbols: z.array(z.string()).min(1),
+    interval: z.string().optional(),
+  }),
 ]);
 
 export const wsMarketWelcomeSchema = z.object({
@@ -148,7 +246,7 @@ export const wsMarketWelcomeSchema = z.object({
   protocolVersion: z.literal(MARKET_WS_PROTOCOL_VERSION),
   path: z.literal('/ws/market'),
   authRequired: z.literal(false),
-  channels: z.array(z.enum(['tickers', 'orderbook', 'trades'])),
+  channels: z.array(z.enum(['tickers', 'orderbook', 'trades', 'candles'])),
   timestamp: z.number(),
 });
 
@@ -156,7 +254,7 @@ export const wsMarketAckSchema = z.object({
   type: z.literal('ack'),
   requestId: z.string().optional(),
   action: z.enum(['subscribe', 'unsubscribe']),
-  channel: z.enum(['tickers', 'orderbook', 'trades']),
+  channel: z.enum(['tickers', 'orderbook', 'trades', 'candles']),
   filters: z.record(z.unknown()),
   snapshotSent: z.boolean(),
   timestamp: z.number(),
@@ -197,6 +295,13 @@ export const wsMarketTradeEventSchema = z.object({
   timestamp: z.number(),
 });
 
+export const wsMarketCandleEventSchema = z.object({
+  type: z.literal('event'),
+  channel: z.literal('candles'),
+  data: liveCandleDtoSchema,
+  timestamp: z.number(),
+});
+
 export type TickerDto = z.infer<typeof tickerDtoSchema>;
 export type OrderbookDto = z.infer<typeof orderbookDtoSchema>;
 export type TradeDto = z.infer<typeof tradeDtoSchema>;
@@ -214,6 +319,7 @@ export type WsMarketPong = z.infer<typeof wsMarketPongSchema>;
 export type WsMarketTickerEvent = z.infer<typeof wsMarketTickerEventSchema>;
 export type WsMarketOrderbookEvent = z.infer<typeof wsMarketOrderbookEventSchema>;
 export type WsMarketTradeEvent = z.infer<typeof wsMarketTradeEventSchema>;
+export type WsMarketCandleEvent = z.infer<typeof wsMarketCandleEventSchema>;
 
 function exchangeName(exchange: string) {
   return EXCHANGE_MAP.get(exchange)?.name ?? exchange;
@@ -224,6 +330,8 @@ export function serializeTickerDto(ticker: NormalizedMarketTicker) {
     exchange: ticker.exchange,
     exchangeName: exchangeName(ticker.exchange),
     symbol: ticker.symbol,
+    canonicalAssetKey: ticker.canonicalAssetKey ?? ticker.symbol,
+    assetImageUrl: ticker.assetImageUrl ?? null,
     market: ticker.market,
     baseCurrency: ticker.baseCurrency,
     quoteCurrency: ticker.quoteCurrency,
@@ -280,6 +388,7 @@ export function serializeTradeDto(trade: NormalizedMarketTrade) {
     quantity: trade.quantity,
     notional: trade.price * trade.quantity,
     timestamp: trade.timestamp,
+    executedAt: trade.executedAt ?? (trade.timestamp ? new Date(trade.timestamp).toISOString() : null),
   });
 }
 
@@ -314,6 +423,18 @@ export function serializeCandlesResponse(params: {
   market: string;
   interval: string;
   items: Array<{ time: number; open: number; high: number; low: number; close: number; volume: number }>;
+  meta?: {
+    isRenderable: boolean;
+    freshnessState: 'live' | 'stale' | 'unavailable';
+    lastSuccessfulAt: number | null;
+    source: 'memory' | 'redis' | 'refreshed' | 'fallback';
+    fallbackReason: string | null;
+    pointCount: number;
+    retryAfterMs?: number;
+    renderPriority: 'live' | 'cached' | 'stale' | 'unavailable';
+    refreshPriority: 'visible' | 'normal' | 'background';
+    recommendedClientBehavior: 'keep_existing' | 'first_paint_ok' | 'cold_placeholder_only';
+  };
 }) {
   return candlesResponseDtoSchema.parse({
     exchange: params.exchange,
@@ -330,34 +451,119 @@ export function serializeCandlesResponse(params: {
       volume: item.volume,
     })),
     total: params.items.length,
+    meta: params.meta,
   });
 }
 
 export function serializeKimchiPremiumResponse(items: Array<{
   symbol: string;
+  canonicalAssetKey?: string | null;
+  assetImageUrl?: string | null;
   nameKo: string;
   nameEn: string;
-  binanceKrwPrice: number;
+  status?: 'loaded' | 'stale' | 'partial' | 'unavailable' | 'failed';
+  selectedExchange?: string;
+  sourceExchange?: string | null;
+  freshnessState?: 'fresh' | 'slightly_stale' | 'stale' | 'partial' | 'unavailable';
+  freshnessReason?: string | null;
+  displayMeta?: {
+    status: 'ready' | 'stale' | 'partial' | 'unavailable';
+    hasUsableDomesticPrice: boolean;
+    hasUsableReferencePrice: boolean;
+    hasUsableFxRate: boolean;
+    lastSuccessfulDomesticAt: number | null;
+    lastSuccessfulReferenceAt: number | null;
+    lastSuccessfulFxAt: number | null;
+    delayBucket: 'none' | 'slight' | 'moderate' | 'severe';
+    displayHint: 'keep_last_good' | 'loading_initial' | 'unavailable_cold';
+  };
+  stableStatus?: 'ready' | 'stale' | 'partial' | 'unavailable';
+  hasUsableDomesticPrice?: boolean;
+  hasUsableReferencePrice?: boolean;
+  hasUsableFxRate?: boolean;
+  lastSuccessfulDomesticAt?: number | null;
+  lastSuccessfulReferenceAt?: number | null;
+  lastSuccessfulFxAt?: number | null;
+  delayBucket?: 'none' | 'slight' | 'moderate' | 'severe';
+  displayHint?: 'keep_last_good' | 'loading_initial' | 'unavailable_cold';
+  updatedAt?: number | null;
+  computedAt?: number;
+  domesticPriceTimestamp?: number | null;
+  globalPriceTimestamp?: number | null;
+  fxRateTimestamp?: number | null;
+  freshnessMs?: number | null;
+  missingFields?: string[];
+  failureStage?: 'reference_ticker' | 'domestic_ticker' | 'fx_rate' | 'premium_compute' | 'settlement' | null;
+  binanceKrwPrice: number | null;
+  convertedReferencePrice?: number | null;
+  domesticPrice?: number | null;
+  premiumPercent?: number | null;
+  sparkline?: number[];
+  sparklinePoints?: Array<{ price: number; timestamp: number; premiumPercent?: number }>;
+  sparklinePointCount?: number;
+  sparklineStatus?: 'ok' | 'insufficientData' | 'empty';
+  pointCount?: number;
+  rangeMin?: number | null;
+  rangeMax?: number | null;
+  lastUpdatedAt?: number | null;
   premiums: Array<{
     exchange: string;
     exchangeName: string;
     domesticPrice: number;
-    premiumPercent: number;
+    premiumPercent: number | null;
+    reason?: string | null;
   }>;
 }>) {
   return kimchiPremiumResponseDtoSchema.parse({
     baseExchange: 'binance',
     items: items.map((item) => ({
       symbol: item.symbol,
+      canonicalAssetKey: item.canonicalAssetKey ?? item.symbol,
+      assetImageUrl: item.assetImageUrl ?? null,
       nameKo: item.nameKo,
       nameEn: item.nameEn,
+      status: item.status ?? 'loaded',
+      selectedExchange: item.selectedExchange as z.infer<typeof exchangeIdSchema> | undefined,
+      sourceExchange: item.sourceExchange as z.infer<typeof exchangeIdSchema> | null | undefined,
+      freshnessState: item.freshnessState,
+      freshnessReason: item.freshnessReason ?? null,
+      displayMeta: item.displayMeta,
+      stableStatus: item.stableStatus ?? item.displayMeta?.status,
+      hasUsableDomesticPrice: item.hasUsableDomesticPrice ?? item.displayMeta?.hasUsableDomesticPrice,
+      hasUsableReferencePrice: item.hasUsableReferencePrice ?? item.displayMeta?.hasUsableReferencePrice,
+      hasUsableFxRate: item.hasUsableFxRate ?? item.displayMeta?.hasUsableFxRate,
+      lastSuccessfulDomesticAt: item.lastSuccessfulDomesticAt ?? item.displayMeta?.lastSuccessfulDomesticAt,
+      lastSuccessfulReferenceAt: item.lastSuccessfulReferenceAt ?? item.displayMeta?.lastSuccessfulReferenceAt,
+      lastSuccessfulFxAt: item.lastSuccessfulFxAt ?? item.displayMeta?.lastSuccessfulFxAt,
+      delayBucket: item.delayBucket ?? item.displayMeta?.delayBucket,
+      displayHint: item.displayHint ?? item.displayMeta?.displayHint,
+      updatedAt: item.updatedAt,
+      computedAt: item.computedAt,
+      domesticPriceTimestamp: item.domesticPriceTimestamp,
+      globalPriceTimestamp: item.globalPriceTimestamp,
+      fxRateTimestamp: item.fxRateTimestamp,
+      freshnessMs: item.freshnessMs,
+      missingFields: item.missingFields ?? [],
+      failureStage: item.failureStage ?? null,
       binanceKrwPrice: item.binanceKrwPrice,
+      convertedReferencePrice: item.convertedReferencePrice ?? item.binanceKrwPrice,
+      domesticPrice: item.domesticPrice ?? item.premiums[0]?.domesticPrice ?? null,
+      premiumPercent: item.premiumPercent ?? item.premiums[0]?.premiumPercent ?? null,
+      sparkline: item.sparkline,
+      sparklinePoints: item.sparklinePoints,
+      sparklinePointCount: item.sparklinePointCount,
+      sparklineStatus: item.sparklineStatus,
+      pointCount: item.pointCount,
+      rangeMin: item.rangeMin,
+      rangeMax: item.rangeMax,
+      lastUpdatedAt: item.lastUpdatedAt,
       domestic: item.premiums.map((premium) => ({
         exchange: premium.exchange as z.infer<typeof exchangeIdSchema>,
         exchangeName: premium.exchangeName,
         market: `${item.symbol}/KRW`,
         priceKrw: premium.domesticPrice,
         premiumPercent: premium.premiumPercent,
+        reason: premium.reason ?? null,
       })),
     })),
     snapshotAt: Date.now(),
@@ -370,7 +576,7 @@ export function serializeWsWelcomePayload() {
     protocolVersion: MARKET_WS_PROTOCOL_VERSION,
     path: '/ws/market',
     authRequired: false,
-    channels: ['tickers', 'orderbook', 'trades'],
+    channels: ['tickers', 'orderbook', 'trades', 'candles'],
     timestamp: Date.now(),
   });
 }
@@ -378,7 +584,7 @@ export function serializeWsWelcomePayload() {
 export function serializeWsAckPayload(params: {
   requestId?: string;
   action: 'subscribe' | 'unsubscribe';
-  channel: 'tickers' | 'orderbook' | 'trades';
+  channel: 'tickers' | 'orderbook' | 'trades' | 'candles';
   filters: Record<string, unknown>;
   snapshotSent: boolean;
 }) {
@@ -438,6 +644,40 @@ export function serializeWsTradeEvent(trade: NormalizedMarketTrade) {
     type: 'event',
     channel: 'trades',
     data: serializeTradeDto(trade),
+    timestamp: Date.now(),
+  });
+}
+
+export function serializeCandleDto(candle: NormalizedMarketCandle) {
+  return liveCandleDtoSchema.parse({
+    exchange: candle.exchange,
+    exchangeName: exchangeName(candle.exchange),
+    symbol: candle.symbol,
+    market: candle.market,
+    baseCurrency: candle.baseCurrency,
+    quoteCurrency: candle.quoteCurrency,
+    rawSymbol: candle.rawSymbol,
+    interval: candle.interval,
+    openTime: candle.openTime,
+    closeTime: candle.closeTime,
+    asOf: candle.asOf,
+    confirmed: candle.confirmed,
+    candleStatus: candle.candleStatus,
+    sourceEvent: candle.sourceEvent,
+    timestamp: candle.asOf,
+    open: candle.open,
+    high: candle.high,
+    low: candle.low,
+    close: candle.close,
+    volume: candle.volume,
+  });
+}
+
+export function serializeWsCandleEvent(candle: NormalizedMarketCandle) {
+  return wsMarketCandleEventSchema.parse({
+    type: 'event',
+    channel: 'candles',
+    data: serializeCandleDto(candle),
     timestamp: Date.now(),
   });
 }

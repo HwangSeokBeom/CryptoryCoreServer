@@ -21,8 +21,8 @@ Errors use:
 ## Security
 
 - User exchange credentials are stored only through DB encrypted fields backed by `EXCHANGE_CREDENTIAL_ENCRYPTION_KEY`.
+- Runtime private credential resolution order is `user exchange connection -> formal server env variables`.
 - Provider auth/signing is handled only inside provider or validator code.
-- Developer fallback keys in `.env` are manual smoke-test placeholders only and must never proxy user trading or portfolio requests.
 - Binance is public-reference-only. Private trading and private portfolio are intentionally unsupported.
 
 ## Exchange Status
@@ -40,11 +40,19 @@ Errors use:
 Base paths:
 
 - `GET /market/markets`
+- `GET /market/symbols`
 - `GET /market/tickers`
+- `GET /market/base-snapshot`
+- `GET /market/snapshot`
+- `GET /market/sparkline`
 - `GET /market/orderbook`
 - `GET /market/trades`
 - `GET /market/candles`
+- `GET /charts/candles`
 - `GET /kimchi-premium`
+- `GET /kimchi-premium/comparable-symbols`
+- `GET /kimchi-premium/snapshot`
+- `GET /kimchi-premium/batch`
 
 ### `GET /market/markets`
 
@@ -52,23 +60,57 @@ Query:
 
 - `exchange?: upbit | bithumb | coinone | korbit | binance`
 
+Behavior:
+
+- Returns the exchange's full tradable provider market universe.
+- Registry metadata is used only for canonical naming and display metadata.
+- `kimchiComparable` is metadata on each market row. It does not filter the market universe.
+
 Example response:
 
 ```json
 {
   "success": true,
-  "data": [
-    {
-      "exchange": "upbit",
-      "exchangeName": "업비트",
-      "symbol": "BTC",
-      "market": "BTC/KRW",
-      "rawSymbol": "KRW-BTC",
-      "quoteCurrency": "KRW",
-      "nameKo": "비트코인",
-      "nameEn": "Bitcoin"
+  "data": {
+    "items": [
+      {
+        "exchange": "upbit",
+        "exchangeName": "업비트",
+        "symbol": "BTC",
+        "exchangeSymbol": "KRW-BTC",
+        "market": "BTC/KRW",
+        "baseCurrency": "BTC",
+        "quoteCurrency": "KRW",
+        "rawSymbol": "KRW-BTC",
+        "tradable": true,
+        "capabilities": {
+          "tickers": true,
+          "orderbook": true,
+          "trades": true,
+          "candles": true
+        },
+        "kimchiComparable": true,
+        "kimchiComparisonReason": "COMPARABLE",
+        "registryMapped": true,
+        "nameKo": "비트코인",
+        "nameEn": "Bitcoin"
+      }
+    ],
+    "meta": {
+      "exchanges": ["upbit"],
+      "requestedMarketCount": 237,
+      "providerMarketCount": 237,
+      "normalizedSymbolCount": 237,
+      "returnedCount": 237,
+      "registryMappedCount": 15,
+      "registryUnmappedCount": 222,
+      "droppedSymbols": [],
+      "droppedReasonsSummary": {},
+      "sourceOfTruth": "provider_market_universe",
+      "appliedLimit": null,
+      "totalAvailableCount": 237
     }
-  ]
+  }
 }
 ```
 
@@ -78,31 +120,381 @@ Query:
 
 - `exchange?: upbit | bithumb | coinone | korbit | binance`
 - `symbol?: BTC | ETH | ...`
+- `limit?: number`
 
 Freshness fields are attached to every item.
+`current`, `percent`, `sparkline`, `sparklinePoints`, and `sparklineSource` are included so the client can render the row without waiting for a second chart join.
+By default the endpoint resolves the provider's full tradable market universe. If `limit` is used, the response keeps `meta.appliedLimit` and `meta.totalAvailableCount` so the truncation is explicit.
 
 ```json
 {
   "success": true,
-  "data": [
-    {
-      "exchange": "upbit",
-      "symbol": "BTC",
-      "market": "BTC/KRW",
-      "baseCurrency": "BTC",
-      "quoteCurrency": "KRW",
-      "rawSymbol": "KRW-BTC",
-      "price": 100000000,
-      "change24h": 1.25,
-      "volume24h": 1234,
-      "high24h": 101000000,
-      "low24h": 98000000,
-      "timestamp": 1712345678000,
-      "sourceTimestamp": 1712345678000,
-      "stale": false,
-      "staleAgeMs": 420
+  "data": {
+    "items": [
+      {
+        "exchange": "upbit",
+        "exchangeName": "업비트",
+        "symbol": "BTC",
+        "exchangeSymbol": "KRW-BTC",
+        "market": "BTC/KRW",
+        "baseCurrency": "BTC",
+        "quoteCurrency": "KRW",
+        "rawSymbol": "KRW-BTC",
+        "tradable": true,
+        "capabilities": {
+          "tickers": true,
+          "orderbook": true,
+          "trades": true,
+          "candles": true
+        },
+        "kimchiComparable": true,
+        "kimchiComparisonReason": "COMPARABLE",
+        "registryMapped": true,
+        "price": 100000000,
+        "change24h": 1.25,
+        "volume24h": 1234,
+        "high24h": 101000000,
+        "low24h": 98000000,
+        "timestamp": 1712345678000,
+        "current": 100000000,
+        "percent": 1.25,
+        "previousPrice24h": 98765432.1,
+        "sparkline": [98765432.1, 100000000],
+        "sparklinePoints": [
+          { "price": 98765432.1, "timestamp": 1712259278000 },
+          { "price": 100000000, "timestamp": 1712345678000 }
+        ],
+        "sparklineSource": "derived_change24h",
+        "sourceTimestamp": 1712345678000,
+        "stale": false,
+        "staleAgeMs": 420
+      }
+    ],
+    "meta": {
+      "exchanges": ["upbit"],
+      "requestedMarketCount": 237,
+      "providerMarketCount": 237,
+      "normalizedSymbolCount": 237,
+      "returnedCount": 100,
+      "registryMappedCount": 15,
+      "registryUnmappedCount": 222,
+      "droppedSymbols": [
+        { "exchange": "upbit", "symbol": "SOME", "reason": "missing_from_provider_snapshot" }
+      ],
+      "droppedReasonsSummary": {
+        "missing_from_provider_snapshot": 1
+      },
+      "sourceOfTruth": "provider_market_universe",
+      "appliedLimit": 100,
+      "totalAvailableCount": 236
     }
-  ]
+  }
+}
+```
+
+### `GET /market/base-snapshot`
+
+Query:
+
+- `exchange`: required, `upbit | bithumb | coinone | korbit | binance`
+- `scope?`: `full | visible | top | symbols`, defaults to `full` unless `symbols` is present
+- `symbols?`: comma-separated symbols. Exchange-form aliases such as `KRW-BTC` are normalized to canonical symbols.
+- `limit?`: optional response limit for non-symbol scopes
+
+Policy:
+
+- This is the fastest market first-paint endpoint. It returns base row fields only and never waits for graph or kimchi hydration.
+- It reads the prepared exchange market snapshot and public ticker projection. Cold-cache requests may load the market universe, but they do not fetch sparkline or kimchi data.
+- `rejectedSymbols` are malformed or wildcard-like inputs. `unsupportedSymbols` are canonical symbols that are not in the selected exchange universe.
+- Clients should render rows from this response immediately, then call `/market/sparkline` and `/kimchi-premium/batch` for visible or representative symbols.
+
+```json
+{
+  "success": true,
+  "data": {
+    "selectedExchange": "upbit",
+    "sourceExchange": "upbit",
+    "scope": "symbols",
+    "requestedSymbols": ["BTC", "ETH"],
+    "acceptedSymbols": ["BTC", "ETH"],
+    "rejectedSymbols": [],
+    "unsupportedSymbols": [],
+    "items": [
+      {
+        "selectedExchange": "upbit",
+        "sourceExchange": "upbit",
+        "symbol": "BTC",
+        "displaySymbol": "BTC",
+        "displayName": "비트코인",
+        "currentPrice": 100000000,
+        "change24h": 1.25,
+        "volume24h": 1234,
+        "updatedAt": 1712345678000,
+        "freshnessMs": 220,
+        "marketStatus": "live",
+        "status": "success",
+        "representative": true,
+        "kimchiComparable": true
+      }
+    ],
+    "status": "success",
+    "partial": false,
+    "cacheHit": true,
+    "total": 1,
+    "elapsedMs": 42
+  }
+}
+```
+
+### `GET /market/snapshot`
+
+Query:
+
+- `exchange`: required, `upbit | bithumb | coinone | korbit | binance`
+- `scope?`: `full | top | symbols`, defaults to `top`
+- `symbols?`: comma-separated canonical symbols. When present, only listed symbols are returned in `items`; unlisted symbols move into `partialFailures`.
+- `limit?`: optional. On `top`, defaults to a light first-screen window. On `full`, omitting `limit` returns the full listed universe.
+
+Policy:
+
+- The endpoint is snapshot-cache-first and optimized for first paint / polling fallback.
+- The server refreshes exchange listing universes and market rows in the background. Request-time reads do not fan out to exchange APIs unless the cache is still cold.
+- `items` are always scoped to the exchange's canonical listed market universe. Unlisted symbols are excluded from `items`.
+- The response never promotes one bad symbol into a route-level `500`.
+- `status` is one of `success | partial_success | failure`.
+- `partialFailures` uses stable codes such as `UNSUPPORTED_SYMBOL`, `SYMBOL_MAPPING_NOT_FOUND`, `PARTIAL_DATA`, `SNAPSHOT_STALE`, and `ALL_PROVIDERS_FAILED`.
+- Item shape keeps the websocket-aligned canonical fields and adds first-paint row data such as `displayName`, `signedChangeRate`, `sparkline`, `trend`, and `marketStatus`.
+- Snapshot items also include `kimchiComparable` and `kimchiComparisonReason`.
+
+```json
+{
+  "success": true,
+  "data": {
+    "exchange": "upbit",
+    "scope": "symbols",
+    "requestedSymbols": ["BTC", "ETH", "OG"],
+    "items": [
+      {
+        "exchange": "upbit",
+        "exchangeName": "업비트",
+        "symbol": "BTC",
+        "displaySymbol": "BTC",
+        "displayName": "비트코인",
+        "exchangeSymbol": "KRW-BTC",
+        "market": "BTC/KRW",
+        "baseCurrency": "BTC",
+        "quoteCurrency": "KRW",
+        "rawSymbol": "KRW-BTC",
+        "price": 100000000,
+        "change24h": 1.25,
+        "signedChangeRate": 1.25,
+        "volume24h": 1234,
+        "sparkline": [98765432.1, 100000000],
+        "sparklinePoints": [
+          { "price": 98765432.1, "timestamp": 1712259278000 },
+          { "price": 100000000, "timestamp": 1712345678000 }
+        ],
+        "sparklineSource": "derived_change24h",
+        "trend": "up",
+        "timestamp": 1712345678000,
+        "asOf": 1712345678000,
+        "source": "snapshot",
+        "freshnessMs": 220,
+        "stale": false,
+        "status": "success",
+        "marketStatus": "live",
+        "errorCode": null,
+        "errorMessage": null,
+        "registryMapped": true,
+        "tradable": true
+      },
+      {
+        "exchange": "upbit",
+        "exchangeName": "업비트",
+        "symbol": "ETH",
+        "displaySymbol": "ETH",
+        "displayName": "이더리움",
+        "exchangeSymbol": "KRW-ETH",
+        "market": "ETH/KRW",
+        "baseCurrency": "ETH",
+        "quoteCurrency": "KRW",
+        "rawSymbol": "KRW-ETH",
+        "price": null,
+        "change24h": null,
+        "signedChangeRate": null,
+        "volume24h": null,
+        "sparkline": [],
+        "sparklinePoints": [],
+        "sparklineSource": "unavailable",
+        "trend": "unknown",
+        "timestamp": null,
+        "asOf": null,
+        "source": "cache",
+        "freshnessMs": null,
+        "stale": false,
+        "status": "partial",
+        "marketStatus": "pending",
+        "errorCode": "PARTIAL_DATA",
+        "errorMessage": "missing_from_provider_snapshot",
+        "registryMapped": true,
+        "tradable": true
+      }
+    ],
+    "partialFailures": [
+      {
+        "symbol": "ETH",
+        "exchange": "upbit",
+        "code": "PARTIAL_DATA",
+        "message": "missing_from_provider_snapshot",
+        "stage": "snapshot_cache",
+        "source": "cache",
+        "retryable": true
+      },
+      {
+        "symbol": "OG",
+        "exchange": "upbit",
+        "code": "SYMBOL_MAPPING_NOT_FOUND",
+        "message": "canonical mapping for OG could not be resolved on upbit",
+        "stage": "symbol_mapping",
+        "source": "cache",
+        "retryable": false
+      }
+    ],
+    "status": "partial_success",
+    "source": "mixed",
+    "freshnessMs": 220,
+    "asOf": 1712345678000,
+    "stale": false,
+    "total": 2,
+    "listedCount": 2,
+    "staleItemCount": 0,
+    "pendingItemCount": 1,
+    "excludedUnlistedCount": 1
+  }
+}
+```
+
+### `GET /market/sparkline`
+
+Query:
+
+- `exchange`: required, `upbit | bithumb | coinone | korbit | binance`
+- `symbols`: required, comma-separated symbols
+- `batchIndex?`: optional non-negative client batch index for logs/debugging
+- `allowStale?`: optional, defaults to allowing short stale sparkline cache reuse
+- `debug?`: optional
+
+Policy:
+
+- Optimized for visible-first graph hydration. 5 to 20 symbols should be requested for the first viewport; larger lists should be split into 10 to 50 symbol batches.
+- The server checks an `exchange + symbol + visible window` sparkline cache first, then hydrates only cache misses or pending rows.
+- If a fresh row is unavailable but a renderable stale sparkline is still usable, the server returns the stale row instead of a blank graph. `symbolMeta`, `usableSymbols`, and `usableStaleSymbols` distinguish usable stale data from true no-data states, and `isRenderable` plus `renderPriority` let the client keep drawing without waiting for a retry.
+- One bad symbol does not fail the route. `rejectedSymbols`, `unsupportedSymbols`, and `unavailableSymbols` let the client patch successful rows and retry only failures.
+
+```json
+{
+  "success": true,
+  "data": {
+    "selectedExchange": "upbit",
+    "partial": true,
+    "requestedSymbols": ["BTC", "ETH", "BAD"],
+    "acceptedSymbols": ["BTC", "ETH"],
+    "rejectedSymbols": [],
+    "unsupportedSymbols": [
+      { "symbol": "BAD", "reason": "symbol_mapping_not_found", "retryable": false }
+    ],
+    "unavailableSymbols": [],
+    "source": "mixed",
+    "freshness": "slightly_delayed",
+    "generatedAt": 1712345679000,
+    "missingSymbols": ["BAD"],
+    "usableSymbols": ["BTC", "ETH"],
+    "usableStaleSymbols": ["ETH"],
+    "symbolMeta": [
+      {
+        "symbol": "BTC",
+        "source": "fresh_cache",
+        "isRenderable": true,
+        "usable": true,
+        "renderPriority": "cached",
+        "pointCount": 20,
+        "lastSuccessfulGraphAt": "2024-04-05T19:34:38.000Z",
+        "graphLatencyBucket": "fast",
+        "freshnessBucket": "fresh",
+        "generatedAt": 1712345678000
+      },
+      {
+        "symbol": "ETH",
+        "source": "stale_cache",
+        "isRenderable": true,
+        "usable": true,
+        "renderPriority": "stale",
+        "pointCount": 12,
+        "lastSuccessfulGraphAt": "2024-04-05T19:34:30.000Z",
+        "graphLatencyBucket": "delayed",
+        "freshnessBucket": "slightly_delayed",
+        "generatedAt": 1712345670000,
+        "fallbackReason": "stale_cache"
+      }
+    ],
+    "cache": { "hit": 1, "miss": 1, "stale": 1 },
+    "batch": { "index": 0, "requestedCount": 3, "success": 2, "failed": 1 },
+    "items": [
+      {
+        "symbol": "BTC",
+        "displayName": "비트코인",
+        "sparkline": [99000000, 100000000],
+        "sparklinePointCount": 20,
+        "displayStatus": "fresh",
+        "partial": false
+      }
+    ]
+  }
+}
+```
+
+### `GET /market/symbols`
+
+Query:
+
+- `exchange: upbit | bithumb | coinone | korbit | binance`
+
+This endpoint returns the canonical symbol universe for one exchange so clients can expand `all` locally.
+It follows the provider market universe, not the curated registry subset.
+
+```json
+{
+  "success": true,
+  "data": {
+    "exchange": "upbit",
+    "quoteCurrency": "KRW",
+    "baseExchange": "binance",
+    "total": 3,
+    "items": [
+      {
+        "exchange": "upbit",
+        "symbol": "BTC",
+        "exchangeSymbol": "KRW-BTC",
+        "market": "BTC/KRW",
+        "baseCurrency": "BTC",
+        "quoteCurrency": "KRW",
+        "tradable": true,
+        "kimchiComparable": true,
+        "kimchiComparisonReason": "COMPARABLE"
+      },
+      {
+        "exchange": "upbit",
+        "symbol": "ETH",
+        "exchangeSymbol": "KRW-ETH",
+        "market": "ETH/KRW",
+        "baseCurrency": "ETH",
+        "quoteCurrency": "KRW",
+        "tradable": true,
+        "kimchiComparable": false,
+        "kimchiComparisonReason": "BINANCE_REFERENCE_MISSING"
+      }
+    ]
+  }
 }
 ```
 
@@ -148,6 +540,12 @@ Query:
 - `symbol: BTC | ETH | ...`
 - `limit?: number`
 
+Policy:
+
+- `timestamp` is the normalized raw exchange execution timestamp in epoch milliseconds and may be `null` when the provider did not supply a valid executable time.
+- `executedAt` is the ISO8601 form of the same normalized timestamp and may be `null`.
+- The server does not synthesize fake display times. Invalid or date-only provider timestamps are preserved as `null` instead of being coerced to midnight or a local default.
+
 ```json
 {
   "success": true,
@@ -165,6 +563,7 @@ Query:
       "quantity": 0.01,
       "notional": 1000000,
       "timestamp": 1712345678000,
+      "executedAt": "2024-04-05T19:34:38.000Z",
       "sourceTimestamp": 1712345678000,
       "stale": false,
       "staleAgeMs": 210
@@ -183,6 +582,8 @@ Query:
 - `limit?: number`
 
 If the requested interval is unsupported by the exchange, the server resolves to the next supported canonical interval before calling the provider.
+
+The `data` array shape is unchanged. New clients should also read the additive top-level `meta` object to distinguish a renderable stale graph from true no-data. When last-known-good candles exist, upstream timeout/rate-limit/5xx failures return `200` with `meta.freshnessState: "stale"` instead of `503`. `503` is reserved for the cold case where no usable candle payload exists.
 
 ```json
 {
@@ -207,17 +608,305 @@ If the requested interval is unsupported by the exchange, the server resolves to
       "stale": false,
       "staleAgeMs": 2000
     }
-  ]
+  ],
+  "meta": {
+    "isRenderable": true,
+    "freshnessState": "stale",
+    "lastSuccessfulAt": 1712345699000,
+    "source": "fallback",
+    "fallbackReason": "timeout",
+    "pointCount": 12,
+    "retryAfterMs": 3000,
+    "renderPriority": "stale",
+    "refreshPriority": "visible"
+  }
 }
 ```
+
+### `GET /charts/candles`
+
+Query:
+
+- `exchange: upbit | bithumb | coinone | korbit | binance`
+- `symbol: BTC | ETH | ...`
+- `interval?: 1m | 3m | 5m | 10m | 15m | 30m | 1h | 4h | 1d | 1w`
+- `limit?: number`
+
+Policy:
+
+- `items` contains settled historical candles only.
+- `live` contains the current in-progress candle when the server has enough information to build it.
+- `meta` mirrors `/market/candles` freshness fields so the client can keep a stale usable graph mounted while a background refresh runs.
+- `liveStatus` is `live | stale | pending`.
+- The live candle is server-normalized from provider candle history plus canonical public trade/ticker updates.
+
+### `GET /kimchi-premium/comparable-symbols`
+
+Query:
+
+- `exchange: upbit | bithumb | coinone | korbit`
+- `limit?: number`
+
+Policy:
+
+- Returns the domestic exchange's canonical symbols that are comparable with Binance.
+- The response is ordered from the prepared market snapshot so the client can request a representative first-screen kimchi set first.
 
 ### `GET /kimchi-premium`
 
 Query:
 
-- `symbols=BTC,ETH,...`
+- `symbols`: required, comma-separated canonical symbols such as `BTC,ETH,XRP`
+- `venue?`: `upbit | bithumb | coinone | korbit`
+- `exchange?`: alias of `venue`
+- `quoteCurrency?`: optional, currently only `KRW`
 
-Unknown symbols return `400 unsupported symbol: <SYMBOL>`.
+Policy:
+
+- `symbols` is normalized by trim + uppercase + alias-to-canonical conversion + empty removal + de-duplication.
+- Raw exchange symbols such as `KRW-BTC` and `BTCUSDT` are accepted as aliases and normalized to `BTC`.
+- `all`, `*`, `null`, `undefined` and similar wildcard/null-like values are rejected only when no explicit canonical symbol remains. Mixed requests keep valid symbols and expose rejected values on batch-style endpoints.
+- Every row is terminal with `status: loaded | stale | partial | unavailable | failed`.
+- Rows also expose additive display stability fields: `displayMeta.status: ready | stale | partial | unavailable`, component booleans (`hasUsableDomesticPrice`, `hasUsableReferencePrice`, `hasUsableFxRate`), per-component last-success timestamps, `delayBucket`, and `displayHint`.
+- Unsupported or unmapped symbols stay inside the payload with per-row `errorCode` instead of failing the whole request.
+- This legacy endpoint keeps its array response shape. New clients that need patch-friendly metadata should use `/kimchi-premium/batch`.
+
+Invalid request example:
+
+```json
+{
+  "success": false,
+  "error": "symbols query parameter is required",
+  "details": {
+    "code": "INVALID_REQUEST",
+    "field": "symbols",
+    "reason": "REQUIRED",
+    "acceptedFormat": "comma-separated canonical symbols",
+    "example": "BTC,ETH,XRP"
+  }
+}
+```
+
+### `GET /kimchi-premium/snapshot`
+
+Query:
+
+- `symbols`: required, comma-separated canonical symbols
+- `domesticExchange?`: `upbit | bithumb | coinone | korbit`
+- `venue?` / `exchange?`: legacy aliases of `domesticExchange`
+- `quoteCurrency?`: optional, currently only `KRW`
+
+Policy:
+
+- The endpoint returns one canonical payload for first render, websocket fallback, and polling fallback.
+- `status` is one of `success | partial_success | failure`.
+- `partialFailures` surfaces pair-level issues without failing the route when at least one pair is usable.
+- `supportedPairs` lists symbols that are supported by both the requested domestic exchange and Binance even if a live ticker or FX value is temporarily unavailable.
+- FX fallback is explicit via `FX_RATE_UNAVAILABLE` and row-level `errorCode`.
+
+```json
+{
+  "success": true,
+  "data": {
+    "domesticExchange": "upbit",
+    "globalExchange": "binance",
+    "items": [
+      {
+        "symbol": "BTC",
+        "nameKo": "비트코인",
+        "nameEn": "Bitcoin",
+        "status": "partial",
+        "displayMeta": {
+          "status": "partial",
+          "hasUsableDomesticPrice": true,
+          "hasUsableReferencePrice": true,
+          "hasUsableFxRate": false,
+          "lastSuccessfulDomesticAt": 1712345679000,
+          "lastSuccessfulReferenceAt": 1712345678000,
+          "lastSuccessfulFxAt": null,
+          "delayBucket": "none",
+          "displayHint": "keep_last_good"
+        },
+        "errorCode": "FX_RATE_UNAVAILABLE",
+        "errorMessage": "USD/KRW rate is unavailable",
+        "source": "derived",
+        "asOf": 1712345679000,
+        "freshnessMs": 300,
+        "binanceUsdtPrice": 70000,
+        "domesticExchange": "upbit",
+        "domesticPrice": 100000000,
+        "usdKrwRate": null,
+        "binanceKrwPrice": null,
+        "premiumPercent": null,
+        "premiumAmountKRW": null
+      },
+      {
+        "symbol": "OG",
+        "nameKo": "OG",
+        "nameEn": "OG",
+        "status": "unavailable",
+        "errorCode": "SYMBOL_MAPPING_NOT_FOUND",
+        "errorMessage": "canonical mapping for OG is missing",
+        "source": "derived",
+        "asOf": null,
+        "freshnessMs": null,
+        "binanceUsdtPrice": null,
+        "domesticExchange": "upbit",
+        "domesticPrice": null,
+        "usdKrwRate": null,
+        "binanceKrwPrice": null,
+        "premiumPercent": null,
+        "premiumAmountKRW": null
+      }
+    ],
+    "partialFailures": [
+      {
+        "symbol": "BTC",
+        "exchange": "fx",
+        "code": "FX_RATE_UNAVAILABLE",
+        "message": "USD/KRW rate is unavailable",
+        "stage": "fx_rate",
+        "source": "derived",
+        "retryable": true
+      },
+      {
+        "symbol": "OG",
+        "exchange": "upbit",
+        "code": "SYMBOL_MAPPING_NOT_FOUND",
+        "message": "canonical mapping for OG is missing",
+        "stage": "premium_compute",
+        "source": "derived",
+        "retryable": false
+      }
+    ],
+    "supportedPairs": ["BTC"],
+    "status": "partial_success",
+    "source": "derived",
+    "asOf": 1712345679000,
+    "freshnessMs": 300,
+    "stale": false,
+    "total": 2
+  }
+}
+```
+
+### `GET /kimchi-premium/representatives`
+
+Query:
+
+- `exchange`: `upbit | bithumb | coinone | korbit`
+- `limit?`: representative row count for first paint
+- `debug?`: optional
+
+Policy:
+
+- This endpoint is optimized for first-click readiness. Representative rows use the representative cache and can be returned while full hydration remains pending.
+- If at least one representative row has usable premium, domestic, or global data, `representativeReady` and `hasUsableRepresentativeData` stay true even when the full batch is still hydrating.
+- `recommendedInitialBadge` is `ready` or `delayed` when representative data is usable; `sync` is reserved for no usable representative data.
+
+```json
+{
+  "success": true,
+  "data": {
+    "selectedExchange": "coinone",
+    "sourceExchange": "coinone",
+    "displayStatus": "delayed",
+    "partial": false,
+    "items": [],
+    "meta": {
+      "representativeReady": true,
+      "hasUsableRepresentativeData": true,
+      "representativeSource": "stale_cache",
+      "representativeFreshnessBucket": "delayed",
+      "recommendedInitialBadge": "delayed",
+      "fullHydrationPending": true,
+      "representative": {
+        "ready": true,
+        "hasUsableData": true,
+        "source": "stale_cache",
+        "freshnessBucket": "delayed",
+        "recommendedInitialBadge": "delayed"
+      },
+      "fullHydration": {
+        "pending": true,
+        "phase": "background_batch",
+        "freshnessBucket": "delayed",
+        "uiHint": "background_hydration_only"
+      }
+    }
+  }
+}
+```
+
+### `GET /kimchi-premium/batch`
+
+Query:
+
+- `symbols`: required, comma-separated symbols
+- `domesticExchange?`: `upbit | bithumb | coinone | korbit`
+- `venue?` / `exchange?`: legacy aliases of `domesticExchange`
+- `quoteCurrency?`: optional, currently only `KRW`
+
+Policy:
+
+- Designed for representative-first and batch hydration. It preserves all snapshot fields and adds request classification metadata.
+- Representative readiness is independent from full batch hydration. A stale but usable representative row can return `representativeReady: true` with `recommendedInitialBadge: "ready"` or `"delayed"` while `fullHydrationPending` remains true.
+- Domestic price, Binance reference price, and FX rate are retained independently as last-known-good components. A component failure degrades the row to `stale` or `partial` with `displayHint: "keep_last_good"` when any usable value remains; cold-start no-data uses `displayHint: "unavailable_cold"`.
+- `rejectedSymbols` are malformed or wildcard-like request tokens.
+- `unsupportedSymbols` are canonical symbols that cannot be compared for the selected domestic exchange and Binance.
+- `unavailableSymbols` are retryable data issues such as missing FX, missing provider snapshots, or stale/incomplete source data.
+
+```json
+{
+  "success": true,
+  "data": {
+    "domesticExchange": "bithumb",
+    "globalExchange": "binance",
+    "requestedSymbols": ["BTC", "HOME", "FI"],
+    "acceptedSymbols": ["BTC", "HOME", "FI"],
+    "rejectedSymbols": [],
+    "unsupportedSymbols": [
+      { "symbol": "HOME", "reason": "symbol_mapping", "retryable": false }
+    ],
+    "unavailableSymbols": [
+      { "symbol": "FI", "reason": "domestic_support", "retryable": true }
+    ],
+    "partial": true,
+    "meta": {
+      "requestedCount": 3,
+      "normalizedCount": 3,
+      "acceptedCount": 3,
+      "rejectedCount": 0,
+      "unsupportedCount": 1,
+      "unavailableCount": 1,
+      "representativeReady": true,
+      "hasUsableRepresentativeData": true,
+      "representativeSource": "stale_cache",
+      "representativeFreshnessBucket": "slightly_delayed",
+      "recommendedInitialBadge": "ready",
+      "fullHydrationPending": true,
+      "batchFreshnessBucket": "delayed",
+      "uiHint": "background_hydration_only",
+      "representative": {
+        "ready": true,
+        "hasUsableData": true,
+        "source": "stale_cache",
+        "freshnessBucket": "slightly_delayed",
+        "recommendedInitialBadge": "ready"
+      },
+      "fullHydration": {
+        "pending": true,
+        "phase": "background_batch",
+        "freshnessBucket": "delayed",
+        "hydratedCount": 2,
+        "unavailableCount": 1,
+        "uiHint": "background_hydration_only"
+      }
+    },
+    "items": []
+  }
+}
+```
 
 ```json
 {
@@ -227,19 +916,37 @@ Unknown symbols return `400 unsupported symbol: <SYMBOL>`.
       "symbol": "BTC",
       "nameKo": "비트코인",
       "nameEn": "Bitcoin",
+      "quoteCurrency": "KRW",
+      "status": "loaded",
+      "statusReason": "READY",
+      "missingFields": [],
+      "failureStage": null,
       "referenceExchange": "binance",
       "referenceMarket": "BTC/USDT",
       "referenceTimestamp": 1712345678000,
       "referenceStale": false,
       "referenceStaleAgeMs": 500,
+      "binancePrice": 70000,
       "binanceUsdtPrice": 70000,
       "usdKrwRate": 1350,
       "binanceKrwPrice": 94500000,
       "krwConvertedReference": 94500000,
+      "domesticVenue": "upbit",
+      "domesticExchange": "upbit",
+      "domesticMarket": "BTC/KRW",
+      "domesticPrice": 100000000,
+      "premiumPercent": 5.82010582010582,
+      "premiumAmountKRW": 5500000,
       "fxProvider": "exchangerate.host",
       "fxTimestamp": 1712345677000,
       "fxStale": false,
       "fxStaleAgeMs": 600,
+      "sparkline": [100000000, 100000000],
+      "sparklinePoints": [
+        { "price": 100000000, "timestamp": 1712345619000 },
+        { "price": 100000000, "timestamp": 1712345679000 }
+      ],
+      "sparklineSource": "flat_current",
       "domestic": [
         {
           "exchange": "upbit",
@@ -251,9 +958,11 @@ Unknown symbols return `400 unsupported symbol: <SYMBOL>`.
           "sourceTimestamp": 1712345679000,
           "stale": false,
           "staleAgeMs": 300,
-          "krwConvertedReference": 94500000
+          "krwConvertedReference": 94500000,
+          "reason": null
         }
       ],
+      "updatedAt": 1712345679000,
       "stale": false,
       "timestampSkewMs": 2000
     }

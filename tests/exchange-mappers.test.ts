@@ -20,12 +20,14 @@ describe('Exchange Mappers', () => {
   it('falls back to the next supported interval when needed', () => {
     expect(resolveExchangeInterval('coinone', '10m')).toEqual({
       requestedInterval: '10m',
+      normalizedInterval: '10m',
       resolvedInterval: '15m',
       exchangeInterval: '15m',
       fallbackApplied: true,
     });
     expect(resolveExchangeInterval('upbit', '1h')).toEqual({
       requestedInterval: '1h',
+      normalizedInterval: '1h',
       resolvedInterval: '1h',
       exchangeInterval: '60',
       fallbackApplied: false,

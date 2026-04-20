@@ -1,7 +1,7 @@
 {
   "name": "crypto-mts-server",
   "version": "1.0.0",
-  "description": "Crypto MTS Backend - Node.js + TypeScript + Fastify",
+  "description": "Cryptory Backend - Node.js + TypeScript + Fastify",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
