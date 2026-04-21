@@ -128,6 +128,9 @@ describe('Public REST Contracts', () => {
     expect(body.success).toBe(true);
     expect(body.data.items[0].exchange).toBe('upbit');
     expect(body.data.items[0].exchangeName).toBe('업비트');
+    expect(body.data.items[0].marketId).toBe('KRW-BTC');
+    expect(body.data.items[0].canonicalSymbol).toBe('BTC');
+    expect(body.data.items[0].displaySymbol).toBe('BTC/KRW');
     expect(body.data.items[0].canonicalAssetKey).toBe('BTC');
     expect(body.data.items[0].assetImageUrl).toBe('https://assets.example.com/btc.png');
     expect(body.data.total).toBe(1);
@@ -144,6 +147,8 @@ describe('Public REST Contracts', () => {
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
     expect(body.success).toBe(true);
+    expect(body.data.marketId).toBe('KRW-BTC');
+    expect(body.data.displaySymbol).toBe('BTC/KRW');
     expect(body.data.bestAsk).toBe(100010000);
     expect(body.data.asks[0].quantity).toBe(0.2);
     await app.close();
@@ -159,6 +164,8 @@ describe('Public REST Contracts', () => {
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
     expect(body.success).toBe(true);
+    expect(body.data.marketId).toBe('KRW-BTC');
+    expect(body.data.displaySymbol).toBe('BTC/KRW');
     expect(body.data.items[0].notional).toBe(1000000);
     expect(body.data.market).toBe('BTC/KRW');
     await app.close();
@@ -174,6 +181,9 @@ describe('Public REST Contracts', () => {
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
     expect(body.success).toBe(true);
+    expect(body.data.marketId).toBe('KRW-BTC');
+    expect(body.data.canonicalSymbol).toBe('BTC');
+    expect(body.data.displaySymbol).toBe('BTC/KRW');
     expect(body.data.interval).toBe('1h');
     expect(body.data.items[0].close).toBe(100000000);
     expect(body.data.meta.freshnessState).toBe('live');

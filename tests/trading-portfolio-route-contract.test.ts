@@ -76,10 +76,85 @@ vi.mock('../src/domains/portfolio/portfolio.service', () => ({
       description: 'BUY 0.01 @ 100000000',
     },
   ]),
+  getAggregatedPortfolioSummary: vi.fn(async () => ({
+    requestedExchanges: ['upbit', 'bithumb'],
+    connectedExchanges: ['upbit'],
+    partialSuccess: true,
+    failures: [
+      {
+        exchange: 'bithumb',
+        code: 'exchange_unavailable',
+        message: '거래소 응답이 일시적으로 불안정합니다.',
+        details: { upstreamStatus: 503 },
+      },
+    ],
+    totals: {
+      estimatedTotalAssetValueKrw: 2000000,
+      estimatedTotalPnlValueKrw: 50000,
+      estimatedTotalPnlPercent: 2.56,
+    },
+    exchangeGroups: [
+      {
+        exchange: 'upbit',
+        exchangeName: '업비트',
+        quoteCurrency: 'KRW',
+        assetCount: 2,
+        totalAssetValue: 2000000,
+        totalAssetValueKrw: 2000000,
+        totalPnlValue: 50000,
+        totalPnlValueKrw: 50000,
+        fetchedAt: '2026-04-21T00:00:00.000Z',
+        assets: [
+          {
+            exchange: 'upbit',
+            exchangeName: '업비트',
+            quoteCurrency: 'KRW',
+            asset: 'BTC',
+            quantity: 0.01,
+            availableQuantity: 0.01,
+            lockedQuantity: 0,
+            averageBuyPrice: 95000000,
+            averageBuyPriceKrw: 95000000,
+            currentPrice: 100000000,
+            currentPriceKrw: 100000000,
+            marketValue: 1000000,
+            marketValueKrw: 1000000,
+            pnlValue: 50000,
+            pnlValueKrw: 50000,
+            pnlPercent: 5.26,
+            isCashAsset: false,
+            timestamp: 1712345678000,
+          },
+        ],
+      },
+    ],
+    assets: [
+      {
+        exchange: 'upbit',
+        exchangeName: '업비트',
+        quoteCurrency: 'KRW',
+        asset: 'BTC',
+        quantity: 0.01,
+        availableQuantity: 0.01,
+        lockedQuantity: 0,
+        averageBuyPrice: 95000000,
+        averageBuyPriceKrw: 95000000,
+        currentPrice: 100000000,
+        currentPriceKrw: 100000000,
+        marketValue: 1000000,
+        marketValueKrw: 1000000,
+        pnlValue: 50000,
+        pnlValueKrw: 50000,
+        pnlPercent: 5.26,
+        isCashAsset: false,
+        timestamp: 1712345678000,
+      },
+    ],
+    generatedAt: '2026-04-21T00:00:00.000Z',
+  })),
 }));
 
 async function createAppWithToken() {
-  vi.resetModules();
   const { buildApp } = await import('../src/app');
   const app = await buildApp();
   const token = app.jwt.sign({ id: 'user-1', email: 'user@example.com' });
@@ -135,6 +210,23 @@ describe('Trading and Portfolio Route Contracts', () => {
     expect(body.success).toBe(true);
     expect(body.data.exchange).toBe('upbit');
     expect(body.data.totalAssetValue).toBe(2000000);
+    await app.close();
+  });
+
+  it('GET /portfolio/assets returns aggregated asset summary with partial failures', async () => {
+    const { app, token } = await createAppWithToken();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/portfolio/assets',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(true);
+    expect(body.data.partialSuccess).toBe(true);
+    expect(body.data.failures[0].exchange).toBe('bithumb');
+    expect(body.data.assets[0].asset).toBe('BTC');
     await app.close();
   });
 });

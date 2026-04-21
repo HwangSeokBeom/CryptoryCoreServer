@@ -41,6 +41,18 @@ export async function getUserExchangeConnectionRecord(userId: string, exchange: 
   return connection;
 }
 
+export async function requireUserOwnedExchangeCredentials(
+  userId: string,
+  exchange: ExchangeId,
+): Promise<UserExchangeCredentials> {
+  const connection = await getUserExchangeConnectionRecord(userId, exchange);
+  if (!connection.canUsePrivateApi) {
+    throw new AppError(400, `${exchange} exchange connection must be verified before using private APIs`);
+  }
+
+  return toUserExchangeCredentials(connection, exchange);
+}
+
 export async function getStoredUserExchangeCredentials(
   userId: string,
   exchange: ExchangeId,
@@ -108,4 +120,16 @@ export async function listUserConnectedExchanges(userId: string) {
   });
 
   return connections.map((connection) => connection.exchange as ExchangeId);
+}
+
+export async function listUserVerifiedExchangeConnections(userId: string) {
+  return prisma.exchangeConnection.findMany({
+    where: {
+      userId,
+      canUsePrivateApi: true,
+    },
+    orderBy: {
+      createdAt: 'asc',
+    },
+  });
 }

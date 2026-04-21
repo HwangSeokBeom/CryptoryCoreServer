@@ -4,9 +4,33 @@ export type MarketChannel = 'tickers' | 'orderbook' | 'trades' | 'candles';
 
 export interface NormalizedMarketBase {
   exchange: string;
+  marketId?: string;
+  canonicalSymbol?: string;
+  baseAsset?: string;
+  quoteAsset?: string;
+  displaySymbol?: string;
+  koreanName?: string | null;
+  englishName?: string | null;
+  iconUrl?: string | null;
+  isActive?: boolean;
+  capabilities?: {
+    supportsCandles: boolean;
+    supportsOrderBook: boolean;
+    supportsTrades: boolean;
+  };
   symbol: string;
   canonicalAssetKey?: string | null;
   assetImageUrl?: string | null;
+  imageUrl?: string | null;
+  imageURL?: string | null;
+  hasImage?: boolean;
+  imageAvailability?: 'available' | 'fallback' | 'pending' | 'lookup_failed' | 'unavailable';
+  imageFailureReason?: string | null;
+  fallbackType?: string | null;
+  assetType?: string | null;
+  canonicalName?: string | null;
+  fallbackColor?: string | null;
+  fallbackInitials?: string | null;
   market: string;
   baseCurrency: string;
   quoteCurrency: string;
@@ -91,11 +115,25 @@ export interface PublicMarketCapabilityState {
 export interface MarketCatalogEntry {
   exchange: string;
   exchangeName: string;
+  marketId: string;
+  rawSymbol: string;
+  canonicalSymbol: string;
+  baseAsset: string;
+  quoteAsset: string;
+  displaySymbol: string;
+  koreanName: string | null;
+  englishName: string | null;
+  iconUrl: string | null;
+  isActive: boolean;
+  capabilities: {
+    supportsCandles: boolean;
+    supportsOrderBook: boolean;
+    supportsTrades: boolean;
+  };
   symbol: string;
   market: string;
   baseCurrency: string;
   quoteCurrency: string;
   nameKo: string;
   nameEn: string;
-  rawSymbol: string;
 }

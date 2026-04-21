@@ -131,7 +131,7 @@ describe('chart service', () => {
       limit: 2,
     });
 
-    expect(provider.getCandles).toHaveBeenCalledWith('BTC', '1h', 3);
+    expect(provider.getCandles).toHaveBeenCalledWith('BTC', '1h', 60);
     expect(response.interval).toBe('1h');
     expect(response.support).toBe('supported');
   });

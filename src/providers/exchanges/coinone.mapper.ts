@@ -65,6 +65,7 @@ export function parseCoinoneMarketsResponse(
       return {
         symbol,
         exchangeSymbol: symbol,
+        marketId: symbol,
         market: `${symbol}/KRW`,
         baseCurrency: symbol,
         quoteCurrency: 'KRW',

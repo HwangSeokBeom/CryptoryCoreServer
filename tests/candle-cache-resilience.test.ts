@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const provider = {
+  exchange: 'upbit',
+  metadata: {
+    displayName: '업비트',
+    quoteCurrency: 'KRW',
+  },
+  listMarkets: vi.fn(),
+  getMarketCapabilitySnapshot: vi.fn(),
   getCandles: vi.fn(),
 };
 
@@ -44,6 +51,27 @@ describe('candle cache resilience', () => {
     vi.resetModules();
     vi.clearAllMocks();
     vi.spyOn(Date, 'now').mockReturnValue(1_712_345_000_000);
+    provider.listMarkets.mockResolvedValue([
+      {
+        symbol: 'BTC',
+        exchangeSymbol: 'KRW-BTC',
+        marketId: 'KRW-BTC',
+        market: 'BTC/KRW',
+        baseCurrency: 'BTC',
+        quoteCurrency: 'KRW',
+        rawSymbol: 'KRW-BTC',
+        tradable: true,
+      },
+    ]);
+    provider.getMarketCapabilitySnapshot.mockResolvedValue({
+      websocketTickerSymbols: ['BTC'],
+      capabilitySymbols: {
+        tickers: ['BTC'],
+        orderbook: ['BTC'],
+        trades: ['BTC'],
+        candles: ['BTC'],
+      },
+    });
   });
 
   afterEach(() => {
@@ -69,6 +97,22 @@ describe('candle cache resilience', () => {
     expect(secondResult.items).toHaveLength(12);
     expect(firstResult.meta.freshnessState).toBe('live');
     expect(secondResult.meta.isRenderable).toBe(true);
+  });
+
+  it('fetches a stable minimum point set so smaller sparkline requests do not starve later detailed requests', async () => {
+    provider.getCandles.mockResolvedValueOnce(makeCandles(60));
+
+    const { resolveCandleSnapshot, resetCandleSnapshotCachesForTest } = await import('../src/domains/charts/candle.snapshot');
+    resetCandleSnapshotCachesForTest();
+
+    const compact = await resolveCandleSnapshot({ exchange: 'upbit', symbol: 'BTC', interval: '1m', limit: 12 });
+    const detailed = await resolveCandleSnapshot({ exchange: 'upbit', symbol: 'BTC', interval: '1m', limit: 60 });
+
+    expect(provider.getCandles).toHaveBeenCalledTimes(1);
+    expect(provider.getCandles).toHaveBeenCalledWith('BTC', '1m', 60);
+    expect(compact.items).toHaveLength(12);
+    expect(detailed.items).toHaveLength(60);
+    expect(detailed.meta.source).toBe('memory');
   });
 
   it('returns stale usable candles after an upstream failure instead of collapsing to unavailable', async () => {
@@ -136,7 +180,13 @@ describe('candle cache resilience', () => {
     const response = await getCandlesWithMeta('upbit', 'BTC', '1m', 12);
 
     expect(response.items).toHaveLength(12);
+    expect(response.items[0]).toHaveProperty('marketId', 'KRW-BTC');
     expect(response.items[0]).toHaveProperty('sourceTimestamp');
+    expect(response.metadata).toMatchObject({
+      marketId: 'KRW-BTC',
+      canonicalSymbol: 'BTC',
+      displaySymbol: 'BTC/KRW',
+    });
     expect(response.meta).toMatchObject({
       isRenderable: true,
       freshnessState: 'live',
@@ -162,6 +212,7 @@ describe('candle cache resilience', () => {
     const response = await getCandlesWithMeta('upbit', 'BTC', '1m', 12);
 
     expect(response.items).toHaveLength(12);
+    expect(response.metadata.marketId).toBe('KRW-BTC');
     expect(response.meta).toMatchObject({
       isRenderable: true,
       freshnessState: 'stale',

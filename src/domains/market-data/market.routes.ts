@@ -5,16 +5,18 @@ import {
   getCandlesWithMeta,
   getMarketList,
   getMarketOverview,
+  getMarketSummary,
   getMarketSparkline,
   getMarketSnapshot,
   getOrderbook,
   getTickers,
-  getTrades,
+  getTradesWithMeta,
   listMarkets,
   listSymbolSupport,
 } from './market-data.service';
 import type { ExchangeId } from '../../core/exchange/exchange.types';
 import { logger } from '../../utils/logger';
+import { createMarketDataErrorBody, MarketDataAvailabilityError } from './market-data.errors';
 
 const VALID_EXCHANGES = new Set<ExchangeId>(['upbit', 'bithumb', 'coinone', 'korbit', 'binance']);
 
@@ -390,15 +392,24 @@ export async function marketRoutes(app: FastifyInstance) {
   });
 
   app.get('/tickers', async (request, reply) => {
-    const { exchange, symbol, limit } = request.query as { exchange?: string; symbol?: string; limit?: string };
+    const { exchange, symbol, marketId, limit } = request.query as {
+      exchange?: string;
+      symbol?: string;
+      marketId?: string;
+      limit?: string;
+    };
     if (exchange && !parseExchange(exchange)) {
       return reply.status(400).send(createErrorResponse('unsupported exchange'));
+    }
+    if (marketId && !exchange) {
+      return reply.status(400).send(createErrorResponse('exchange is required when marketId is provided'));
     }
 
     try {
       return createSuccessResponse(await getTickers({
         exchange: parseExchange(exchange) ?? undefined,
         symbol,
+        marketId,
         limit: limit ? parseInt(limit, 10) : undefined,
       }));
     } catch (error) {
@@ -442,9 +453,9 @@ export async function marketRoutes(app: FastifyInstance) {
   });
 
   app.get('/orderbook', async (request, reply) => {
-    const { exchange, symbol } = request.query as { exchange?: string; symbol?: string };
-    if (!exchange || !symbol) {
-      return reply.status(400).send(createErrorResponse('exchange and symbol are required'));
+    const { exchange, symbol, marketId } = request.query as { exchange?: string; symbol?: string; marketId?: string };
+    if (!exchange || (!symbol && !marketId)) {
+      return reply.status(400).send(createErrorResponse('exchange and symbol or marketId are required'));
     }
     const parsedExchange = parseExchange(exchange);
     if (!parsedExchange) {
@@ -452,8 +463,11 @@ export async function marketRoutes(app: FastifyInstance) {
     }
 
     try {
-      return createSuccessResponse(await getOrderbook(parsedExchange, symbol));
+      return createSuccessResponse(await getOrderbook(parsedExchange, { symbol, marketId }));
     } catch (error) {
+      if (error instanceof MarketDataAvailabilityError) {
+        return reply.status(error.statusCode).send(createMarketDataErrorBody(error));
+      }
       if (error instanceof AppError) {
         return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
       }
@@ -462,9 +476,14 @@ export async function marketRoutes(app: FastifyInstance) {
   });
 
   app.get('/trades', async (request, reply) => {
-    const { exchange, symbol, limit } = request.query as { exchange?: string; symbol?: string; limit?: string };
-    if (!exchange || !symbol) {
-      return reply.status(400).send(createErrorResponse('exchange and symbol are required'));
+    const { exchange, symbol, marketId, limit } = request.query as {
+      exchange?: string;
+      symbol?: string;
+      marketId?: string;
+      limit?: string;
+    };
+    if (!exchange || (!symbol && !marketId)) {
+      return reply.status(400).send(createErrorResponse('exchange and symbol or marketId are required'));
     }
     const parsedExchange = parseExchange(exchange);
     if (!parsedExchange) {
@@ -472,8 +491,16 @@ export async function marketRoutes(app: FastifyInstance) {
     }
 
     try {
-      return createSuccessResponse(await getTrades(parsedExchange, symbol, limit ? parseInt(limit, 10) : 50));
+      const response = await getTradesWithMeta(parsedExchange, { symbol, marketId }, limit ? parseInt(limit, 10) : 50);
+      return {
+        ...createSuccessResponse(response.items),
+        total: response.total,
+        metadata: response.metadata,
+      };
     } catch (error) {
+      if (error instanceof MarketDataAvailabilityError) {
+        return reply.status(error.statusCode).send(createMarketDataErrorBody(error));
+      }
       if (error instanceof AppError) {
         return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
       }
@@ -482,15 +509,16 @@ export async function marketRoutes(app: FastifyInstance) {
   });
 
   app.get('/candles', async (request, reply) => {
-    const { exchange, symbol, interval, limit, range } = request.query as {
+    const { exchange, symbol, marketId, interval, limit, range } = request.query as {
       exchange?: string;
       symbol?: string;
+      marketId?: string;
       interval?: string;
       limit?: string;
       range?: string;
     };
-    if (!exchange || !symbol) {
-      return reply.status(400).send(createErrorResponse('exchange and symbol are required'));
+    if (!exchange || (!symbol && !marketId)) {
+      return reply.status(400).send(createErrorResponse('exchange and symbol or marketId are required'));
     }
     const parsedExchange = parseExchange(exchange);
     if (!parsedExchange) {
@@ -500,7 +528,7 @@ export async function marketRoutes(app: FastifyInstance) {
     try {
       const response = await getCandlesWithMeta(
         parsedExchange,
-        symbol,
+        { symbol, marketId },
         interval ?? '1h',
         resolveCandleLimit(interval ?? '1h', limit, range),
       );
@@ -509,7 +537,8 @@ export async function marketRoutes(app: FastifyInstance) {
           domain: 'market-routes',
           route: '/market/candles',
           exchange: parsedExchange,
-          symbol,
+          symbol: response.metadata.canonicalSymbol,
+          marketId: response.metadata.marketId,
           staleCount: response.meta.freshnessState === 'stale' ? 1 : 0,
           unavailableCount: response.meta.freshnessState === 'unavailable' ? 1 : 0,
           meta: response.meta,
@@ -519,8 +548,40 @@ export async function marketRoutes(app: FastifyInstance) {
       return {
         ...createSuccessResponse(response.items),
         meta: response.meta,
+        metadata: response.metadata,
+        total: response.items.length,
       };
     } catch (error) {
+      if (error instanceof MarketDataAvailabilityError) {
+        return reply.status(error.statusCode).send(createMarketDataErrorBody(error));
+      }
+      if (error instanceof AppError) {
+        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
+      }
+      throw error;
+    }
+  });
+
+  app.get('/summary', async (request, reply) => {
+    const { exchange, symbol, marketId } = request.query as {
+      exchange?: string;
+      symbol?: string;
+      marketId?: string;
+    };
+    if (!exchange || (!symbol && !marketId)) {
+      return reply.status(400).send(createErrorResponse('exchange and symbol or marketId are required'));
+    }
+    const parsedExchange = parseExchange(exchange);
+    if (!parsedExchange) {
+      return reply.status(400).send(createErrorResponse('unsupported exchange'));
+    }
+
+    try {
+      return createSuccessResponse(await getMarketSummary({ exchange: parsedExchange, symbol, marketId }));
+    } catch (error) {
+      if (error instanceof MarketDataAvailabilityError) {
+        return reply.status(error.statusCode).send(createMarketDataErrorBody(error));
+      }
       if (error instanceof AppError) {
         return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
       }

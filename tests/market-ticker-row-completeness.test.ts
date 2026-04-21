@@ -114,4 +114,100 @@ describe('market ticker row completeness', () => {
       totalAvailableCount: 2,
     });
   });
+
+  it('returns canonicalAssetKey, hasImage, and imageUrl consistently for aliased assets', async () => {
+    provider.listMarkets.mockResolvedValue([{ symbol: 'RNDR', market: 'RNDR/KRW', rawSymbol: 'KRW-RNDR' }]);
+    provider.getTickerSnapshot.mockResolvedValue([
+      {
+        exchange: 'upbit',
+        symbol: 'RNDR',
+        market: 'RNDR/KRW',
+        baseCurrency: 'RNDR',
+        quoteCurrency: 'KRW',
+        rawSymbol: 'KRW-RNDR',
+        price: 10,
+        change24h: 1.5,
+        volume24h: 9876,
+        high24h: 11,
+        low24h: 9,
+        timestamp: 1712345678000,
+      },
+    ]);
+
+    const { getTickers } = await import('../src/domains/market-data/market-data.service');
+    const response = await getTickers({ exchange: 'upbit', symbol: 'RNDR' });
+    const [ticker] = response.items;
+
+    expect(ticker.canonicalAssetKey).toBe('RENDER');
+    expect(ticker.hasImage).toBe(true);
+    expect(ticker.imageAvailability).toBe('fallback');
+    expect(ticker.fallbackType).toBe('symbol_alias');
+    expect(ticker.imageUrl).toBeTruthy();
+    expect(ticker.imageURL).toBe(ticker.imageUrl);
+    expect(ticker.assetImageUrl).toBe(ticker.imageUrl);
+  });
+
+  it('keeps unresolved default placeholders as image misses with client-aligned log keys', async () => {
+    provider.listMarkets.mockResolvedValue([{ symbol: 'FAKE', market: 'FAKE/KRW', rawSymbol: 'KRW-FAKE' }]);
+    provider.getTickerSnapshot.mockResolvedValue([
+      {
+        exchange: 'upbit',
+        symbol: 'FAKE',
+        market: 'FAKE/KRW',
+        baseCurrency: 'FAKE',
+        quoteCurrency: 'KRW',
+        rawSymbol: 'KRW-FAKE',
+        price: 10,
+        change24h: 1.5,
+        volume24h: 9876,
+        high24h: 11,
+        low24h: 9,
+        timestamp: 1712345678000,
+      },
+    ]);
+    const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => logger);
+
+    const { getTickers } = await import('../src/domains/market-data/market-data.service');
+    const response = await getTickers({ exchange: 'upbit', symbol: 'FAKE' });
+    const [ticker] = response.items;
+
+    expect(ticker.canonicalAssetKey).toBe('FAKE');
+    expect(ticker.hasImage).toBe(false);
+    expect(ticker.imageAvailability).toBe('pending');
+    expect(ticker.imageFailureReason).toBe('missing_metadata');
+    expect(ticker.imageUrl).toBeNull();
+    expect(ticker.imageURL).toBeNull();
+    expect(ticker.assetImageUrl).toBeNull();
+
+    const imageMissLog = infoSpy.mock.calls.find(([payload]) =>
+      typeof payload === 'object'
+      && payload !== null
+      && 'action' in payload
+      && payload.action === 'image_miss'
+      && 'symbol' in payload
+      && payload.symbol === 'FAKE');
+    expect(imageMissLog?.[0]).toMatchObject({
+      exchange: 'upbit',
+      symbol: 'FAKE',
+      clientSymbolKey: 'upbit:FAKE',
+      canonicalAssetKey: 'FAKE',
+      reason: 'metadata_missing',
+    });
+
+    const coverageLog = infoSpy.mock.calls.find(([payload]) =>
+      typeof payload === 'object'
+      && payload !== null
+      && 'action' in payload
+      && payload.action === 'coverage_summary'
+      && 'exchange' in payload
+      && payload.exchange === 'upbit');
+    expect(coverageLog?.[0]).toMatchObject({
+      totalCount: 1,
+      withImageCount: 0,
+      coverage: 0,
+      falseReasonStats: {
+        metadata_missing: 1,
+      },
+    });
+  });
 });

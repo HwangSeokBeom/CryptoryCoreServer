@@ -45,13 +45,44 @@ export interface ExchangeMetadata {
 
 export interface CanonicalMarket {
   exchange: ExchangeId;
+  marketId: string;
+  rawSymbol: string;
+  canonicalSymbol: string;
+  baseAsset: string;
+  quoteAsset: QuoteCurrency;
+  displaySymbol: string;
+  koreanName: string | null;
+  englishName: string | null;
+  iconUrl: string | null;
+  isActive: boolean;
+  capabilities: CanonicalMarketCapabilities;
   symbol: string;
   market: string;
   baseCurrency: string;
   quoteCurrency: QuoteCurrency;
-  rawSymbol: string;
   nameKo?: string;
   nameEn?: string;
+}
+
+export interface CanonicalMarketCapabilities {
+  supportsCandles: boolean;
+  supportsOrderBook: boolean;
+  supportsTrades: boolean;
+}
+
+export interface CanonicalMarketMetadata {
+  exchange: ExchangeId;
+  marketId: string;
+  rawSymbol: string;
+  canonicalSymbol: string;
+  baseAsset: string;
+  quoteAsset: QuoteCurrency;
+  displaySymbol: string;
+  koreanName: string | null;
+  englishName: string | null;
+  iconUrl: string | null;
+  isActive: boolean;
+  capabilities: CanonicalMarketCapabilities;
 }
 
 export interface CanonicalTickerSnapshot extends CanonicalMarket {
@@ -398,6 +429,17 @@ export interface KimchiPremiumEntry {
 
 export interface MarketSymbolSupportEntry {
   exchange: ExchangeId;
+  marketId: string;
+  rawSymbol: string;
+  canonicalSymbol: string;
+  baseAsset: string;
+  quoteAsset: QuoteCurrency;
+  displaySymbol: string;
+  koreanName: string | null;
+  englishName: string | null;
+  iconUrl: string | null;
+  isActive: boolean;
+  capabilities: CanonicalMarketCapabilities;
   symbol: string;
   exchangeSymbol: string;
   market: string;
@@ -415,6 +457,7 @@ export interface MarketSymbolSupportEntry {
 export interface ExchangeMarketDescriptor {
   symbol: string;
   exchangeSymbol: string;
+  marketId?: string;
   market: string;
   baseCurrency: string;
   quoteCurrency: QuoteCurrency;

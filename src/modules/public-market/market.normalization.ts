@@ -1,7 +1,16 @@
 import { COINS, COIN_MAP, EXCHANGES, EXCHANGE_MAP } from '../../config/constants';
+import {
+  buildCanonicalMarketMetadata,
+  type MarketCapabilityFlags,
+} from '../../core/exchange/market-metadata';
+import type { ExchangeId } from '../../core/exchange/exchange.types';
 import type { MarketCatalogEntry } from './market.types';
 
 const DOMESTIC_EXCHANGE_IDS = new Set(['upbit', 'bithumb', 'coinone', 'korbit']);
+
+function normalizeMarketIdentity(value: string) {
+  return value.trim().toLowerCase();
+}
 
 export function toUnifiedSymbol(symbol: string): string {
   return symbol.trim().toUpperCase();
@@ -70,17 +79,44 @@ export function isSupportedSymbol(symbol: string): boolean {
 
 export function getMarketCatalog(): MarketCatalogEntry[] {
   return EXCHANGES.flatMap((exchange) =>
-    COINS.map((coin) => ({
-      exchange: exchange.id,
-      exchangeName: exchange.name,
-      symbol: coin.symbol,
-      market: buildUnifiedMarketName(exchange.id, coin.symbol),
-      baseCurrency: coin.symbol,
-      quoteCurrency: exchange.quoteCurrency,
-      nameKo: coin.nameKo,
-      nameEn: coin.nameEn,
-      rawSymbol: toExchangeMarketSymbol(exchange.id, coin.symbol),
-    })),
+    COINS.map((coin) => {
+      const rawSymbol = toExchangeMarketSymbol(exchange.id, coin.symbol);
+      const metadata = buildCanonicalMarketMetadata({
+        exchange: exchange.id as ExchangeId,
+        symbol: coin.symbol,
+        marketId: rawSymbol,
+        rawSymbol,
+        baseAsset: coin.symbol,
+        quoteAsset: exchange.quoteCurrency,
+        isActive: true,
+        capabilities: {
+          candles: true,
+          orderbook: true,
+          trades: true,
+        } satisfies MarketCapabilityFlags,
+      });
+      return {
+        exchange: exchange.id,
+        exchangeName: exchange.name,
+        marketId: metadata.marketId,
+        rawSymbol: metadata.rawSymbol,
+        canonicalSymbol: metadata.canonicalSymbol,
+        baseAsset: metadata.baseAsset,
+        quoteAsset: metadata.quoteAsset,
+        displaySymbol: metadata.displaySymbol,
+        koreanName: metadata.koreanName,
+        englishName: metadata.englishName,
+        iconUrl: metadata.iconUrl,
+        isActive: metadata.isActive,
+        capabilities: metadata.capabilities,
+        symbol: coin.symbol,
+        market: buildUnifiedMarketName(exchange.id, coin.symbol),
+        baseCurrency: coin.symbol,
+        quoteCurrency: exchange.quoteCurrency,
+        nameKo: coin.nameKo,
+        nameEn: coin.nameEn,
+      };
+    }),
   );
 }
 
@@ -101,4 +137,29 @@ export function searchMarketCatalog(query: string): MarketCatalogEntry[] {
       entry.rawSymbol,
     ].some((value) => value.toLowerCase().includes(normalizedQuery));
   });
+}
+
+export function resolveMarketCatalogEntry(params: {
+  exchange: string;
+  symbol?: string;
+  marketId?: string;
+}): MarketCatalogEntry | null {
+  const catalog = getMarketCatalog().filter((entry) => entry.exchange === params.exchange);
+
+  if (params.marketId?.trim()) {
+    const normalizedMarketId = normalizeMarketIdentity(params.marketId);
+    return catalog.find((entry) =>
+      [
+        entry.marketId,
+        entry.rawSymbol,
+        entry.market,
+      ].some((value) => normalizeMarketIdentity(value) === normalizedMarketId)) ?? null;
+  }
+
+  if (!params.symbol?.trim()) {
+    return null;
+  }
+
+  const normalizedSymbol = toUnifiedSymbol(params.symbol);
+  return catalog.find((entry) => entry.symbol === normalizedSymbol) ?? null;
 }

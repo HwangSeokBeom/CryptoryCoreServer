@@ -11,18 +11,79 @@ export interface RestRequestOptions extends Omit<RequestInit, 'body'> {
   timeoutMs?: number;
 }
 
-function buildUrl(baseUrl: string, path: string, query?: RestRequestOptions['query']) {
-  const url = new URL(path, baseUrl);
-  if (query) {
-    for (const [key, value] of Object.entries(query)) {
-      if (value === undefined) continue;
-      if (Array.isArray(value)) {
-        value.forEach((item) => url.searchParams.append(key, String(item)));
-        continue;
-      }
-      url.searchParams.set(key, String(value));
-    }
+export type RestResponseMeta = {
+  owner: ExchangeId | 'fx' | 'coingecko';
+  path: string;
+  requestUrl: string;
+  statusCode: number;
+  responseSnippet: string | null;
+};
+
+export type RestResponseWithMeta<T> = {
+  data: T;
+  meta: RestResponseMeta;
+};
+
+function isAbsoluteUrl(path: string) {
+  try {
+    const parsed = new URL(path);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
   }
+}
+
+function applyQuery(url: URL, query?: RestRequestOptions['query']) {
+  if (!query) {
+    return;
+  }
+
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined) continue;
+    if (Array.isArray(value)) {
+      url.searchParams.delete(key);
+      value.forEach((item) => url.searchParams.append(key, String(item)));
+      continue;
+    }
+    url.searchParams.set(key, String(value));
+  }
+}
+
+function joinPathname(basePathname: string, requestPathname: string) {
+  const normalizedBase = basePathname.replace(/\/+$/g, '');
+  const normalizedRequest = requestPathname.replace(/^\/+/g, '');
+  if (!normalizedBase && !normalizedRequest) {
+    return '/';
+  }
+  if (!normalizedBase) {
+    return `/${normalizedRequest}`;
+  }
+  if (!normalizedRequest) {
+    return normalizedBase.startsWith('/') ? normalizedBase : `/${normalizedBase}`;
+  }
+  const combined = `${normalizedBase}/${normalizedRequest}`.replace(/\/{2,}/g, '/');
+  return combined.startsWith('/') ? combined : `/${combined}`;
+}
+
+function toRelativeUrl(path: string) {
+  const normalizedPath = path.trim();
+  const relativeBase = normalizedPath.startsWith('/') ? 'https://relative.local' : 'https://relative.local/';
+  return new URL(normalizedPath || '.', relativeBase);
+}
+
+function buildUrl(baseUrl: string, path: string, query?: RestRequestOptions['query']) {
+  if (isAbsoluteUrl(path)) {
+    const url = new URL(path);
+    applyQuery(url, query);
+    return url.toString();
+  }
+
+  const url = new URL(baseUrl);
+  const relativeUrl = toRelativeUrl(path);
+  url.pathname = joinPathname(url.pathname, relativeUrl.pathname);
+  url.search = relativeUrl.search;
+  url.hash = relativeUrl.hash;
+  applyQuery(url, query);
   return url.toString();
 }
 
@@ -83,6 +144,19 @@ async function parseResponseBody<T>(response: Response): Promise<T> {
   }
 }
 
+function buildResponseSnippet(body: unknown) {
+  if (body === undefined || body === null) {
+    return null;
+  }
+
+  const raw =
+    typeof body === 'string'
+      ? body
+      : JSON.stringify(Array.isArray(body) ? body.slice(0, 2) : body);
+
+  return raw.length > 240 ? `${raw.slice(0, 240)}...` : raw;
+}
+
 export class RestClient {
   constructor(
     private readonly owner: ExchangeId | 'fx' | 'coingecko',
@@ -90,6 +164,11 @@ export class RestClient {
   ) {}
 
   async request<T>(path: string, options: RestRequestOptions = {}): Promise<T> {
+    const response = await this.requestDetailed<T>(path, options);
+    return response.data;
+  }
+
+  async requestDetailed<T>(path: string, options: RestRequestOptions = {}): Promise<RestResponseWithMeta<T>> {
     const policy: RetryPolicy = {
       ...DEFAULT_RETRY_POLICY,
       ...options.retryPolicy,
@@ -146,7 +225,17 @@ export class RestClient {
           );
         }
 
-        return await parseResponseBody<T>(response);
+        const data = await parseResponseBody<T>(response);
+        return {
+          data,
+          meta: {
+            owner: this.owner,
+            path,
+            requestUrl: logUrl,
+            statusCode: response.status,
+            responseSnippet: buildResponseSnippet(data),
+          },
+        };
       } catch (error) {
         clearTimeout(timeout);
         if (attempt >= policy.maxAttempts) {

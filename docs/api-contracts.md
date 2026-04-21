@@ -14,9 +14,13 @@ Errors use:
 ```json
 {
   "success": false,
-  "error": "message"
+  "error": "message",
+  "code": "MACHINE_READABLE_CODE",
+  "details": {}
 }
 ```
+
+`code` and `details` are optional, but auth endpoints return them for validation and duplicate-resource cases.
 
 ## Security
 
@@ -53,6 +57,15 @@ Base paths:
 - `GET /kimchi-premium/comparable-symbols`
 - `GET /kimchi-premium/snapshot`
 - `GET /kimchi-premium/batch`
+
+### Market Identity Contract
+
+- Every market, ticker, and candle response must expose enough data to distinguish `symbol` from exchange market identity.
+- `unique identity = exchange + marketId`
+- `canonicalSymbol` is for icon/asset metadata mapping only.
+- `symbol` is a helper display/code field and is not unique.
+- Detail requests should prefer `marketId` when available. Active detail/ticker routes accept `marketId` together with `exchange`.
+- The canonical examples and client integration rules live in [market-api-contract.md](./market-api-contract.md).
 
 ### `GET /market/markets`
 
@@ -224,7 +237,7 @@ Policy:
         "selectedExchange": "upbit",
         "sourceExchange": "upbit",
         "symbol": "BTC",
-        "displaySymbol": "BTC",
+        "displaySymbol": "BTC/KRW",
         "displayName": "비트코인",
         "currentPrice": 100000000,
         "change24h": 1.25,
@@ -278,7 +291,7 @@ Policy:
         "exchange": "upbit",
         "exchangeName": "업비트",
         "symbol": "BTC",
-        "displaySymbol": "BTC",
+        "displaySymbol": "BTC/KRW",
         "displayName": "비트코인",
         "exchangeSymbol": "KRW-BTC",
         "market": "BTC/KRW",
@@ -312,7 +325,7 @@ Policy:
         "exchange": "upbit",
         "exchangeName": "업비트",
         "symbol": "ETH",
-        "displaySymbol": "ETH",
+        "displaySymbol": "ETH/KRW",
         "displayName": "이더리움",
         "exchangeSymbol": "KRW-ETH",
         "market": "ETH/KRW",
@@ -1062,36 +1075,102 @@ All portfolio routes require `Authorization: Bearer <jwt>`.
 
 Query:
 
-- `exchange`
+- `exchange?`
+
+Behavior:
+
+- `exchange`가 있으면 단일 거래소 canonical portfolio snapshot을 반환합니다.
+- `exchange`가 없으면 검증 완료된 사용자 연결 전체를 집계한 `PortfolioSummary`를 반환합니다.
+
+### `GET /portfolio/assets`
+
+Query:
+
+- `exchange?`
+
+Behavior:
+
+- 연결된 거래소 전체 자산을 `AssetPosition[]` + `exchangeGroups[]` + `failures[]` 구조로 반환합니다.
+- 일부 거래소만 실패하면 `partialSuccess=true` 로 응답하고 성공 거래소 데이터는 유지합니다.
 
 ```json
 {
   "success": true,
   "data": {
-    "exchange": "upbit",
-    "balances": [
-      { "asset": "KRW", "free": 1000000, "locked": 0, "averageBuyPrice": 0 },
-      { "asset": "BTC", "free": 0.01, "locked": 0, "averageBuyPrice": 95000000 }
+    "requestedExchanges": ["upbit", "bithumb"],
+    "connectedExchanges": ["upbit"],
+    "partialSuccess": true,
+    "failures": [
+      {
+        "exchange": "bithumb",
+        "code": "exchange_unavailable",
+        "message": "거래소 응답이 일시적으로 불안정합니다.",
+        "details": { "upstreamStatus": 503 }
+      }
     ],
-    "positions": [
+    "totals": {
+      "estimatedTotalAssetValueKrw": 2000000,
+      "estimatedTotalPnlValueKrw": 50000,
+      "estimatedTotalPnlPercent": 2.56
+    },
+    "exchangeGroups": [
       {
         "exchange": "upbit",
-        "symbol": "BTC",
+        "exchangeName": "업비트",
+        "quoteCurrency": "KRW",
+        "assetCount": 2,
+        "totalAssetValue": 2000000,
+        "totalAssetValueKrw": 2000000,
+        "totalPnlValue": 50000,
+        "totalPnlValueKrw": 50000,
+        "fetchedAt": "2026-04-21T00:00:00.000Z",
+        "assets": [
+          {
+            "exchange": "upbit",
+            "exchangeName": "업비트",
+            "quoteCurrency": "KRW",
+            "asset": "BTC",
+            "quantity": 0.01,
+            "availableQuantity": 0.01,
+            "lockedQuantity": 0,
+            "averageBuyPrice": 95000000,
+            "averageBuyPriceKrw": 95000000,
+            "currentPrice": 100000000,
+            "currentPriceKrw": 100000000,
+            "marketValue": 1000000,
+            "marketValueKrw": 1000000,
+            "pnlValue": 50000,
+            "pnlValueKrw": 50000,
+            "pnlPercent": 5.26,
+            "isCashAsset": false,
+            "timestamp": 1712345678000
+          }
+        ]
+      }
+    ],
+    "assets": [
+      {
+        "exchange": "upbit",
+        "exchangeName": "업비트",
+        "quoteCurrency": "KRW",
+        "asset": "BTC",
         "quantity": 0.01,
-        "free": 0.01,
-        "locked": 0,
+        "availableQuantity": 0.01,
+        "lockedQuantity": 0,
         "averageBuyPrice": 95000000,
+        "averageBuyPriceKrw": 95000000,
         "currentPrice": 100000000,
+        "currentPriceKrw": 100000000,
         "marketValue": 1000000,
+        "marketValueKrw": 1000000,
         "pnlValue": 50000,
+        "pnlValueKrw": 50000,
         "pnlPercent": 5.26,
+        "isCashAsset": false,
         "timestamp": 1712345678000
       }
     ],
-    "totalAssetValue": 2000000,
-    "totalPnlValue": 50000,
-    "totalPnlPercent": 2.56,
-    "timestamp": 1712345678000
+    "generatedAt": "2026-04-21T00:00:00.000Z"
   }
 }
 ```
@@ -1111,7 +1190,11 @@ Current history is trade-driven canonical history produced from private fills/co
 All routes require `Authorization: Bearer <jwt>`.
 
 - `GET /exchange-connections`
+- `GET /exchange-connections/:id`
+- `GET /exchange-connections/:id/status`
+- `POST /exchange-connections/test`
 - `POST /exchange-connections`
+- `POST /exchange-connections/:id/revalidate`
 - `POST /exchange-connections/:id/validate`
 - `PATCH /exchange-connections/:id`
 - `DELETE /exchange-connections/:id`
@@ -1131,16 +1214,40 @@ Example `GET /exchange-connections` response:
         "apiKeyMasked": "abc*****xyz",
         "hasSecretKey": true,
         "hasPassphrase": false,
+        "credentialFields": [
+          { "key": "apiKey", "label": "Access Key", "required": true, "masked": true },
+          { "key": "secretKey", "label": "Secret Key", "required": true, "masked": true }
+        ],
+        "capabilities": {
+          "canTestConnection": true,
+          "canReadPortfolio": true,
+          "canPlaceOrder": true,
+          "canCancelOrder": true,
+          "canReadOpenOrders": true,
+          "canReadFills": true
+        },
         "validation": {
           "status": "verified",
           "mode": "live_api",
           "canUsePrivateApi": true,
-          "message": "upbit private API credentials verified successfully.",
+          "code": "verified",
+          "message": "업비트 연결이 확인되었습니다.",
+          "checkedAt": "2026-04-17T06:00:00.000Z"
+        },
+        "lastTestResult": {
+          "exchange": "upbit",
+          "success": true,
+          "status": "verified",
+          "mode": "live_api",
+          "code": "verified",
+          "message": "업비트 연결이 확인되었습니다.",
           "checkedAt": "2026-04-17T06:00:00.000Z"
         },
         "operational": {
           "connectionStatus": "active",
           "lastSyncAt": "2026-04-17T06:05:00.000Z",
+          "lastErrorCode": null,
+          "lastErrorSummary": null,
           "failureReason": null,
           "isTestConnectionResult": true
         },
@@ -1152,6 +1259,146 @@ Example `GET /exchange-connections` response:
   }
 }
 ```
+
+Example `POST /exchange-connections/test` response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "exchange": "upbit",
+    "success": false,
+    "status": "invalid",
+    "mode": "live_api",
+    "code": "insufficient_permissions",
+    "message": "API 키 권한이 부족합니다.",
+    "details": {
+      "upstreamStatus": 403
+    },
+    "checkedAt": "2026-04-21T00:00:00.000Z"
+  }
+}
+```
+
+## Auth Routes
+
+- `POST /auth/register`
+- `POST /api/v1/auth/register`
+- `POST /api/v1/auth/login`
+- `GET /api/v1/auth/me`
+
+`/api/v1/auth/register` is the existing server path. `/auth/register` is a compatibility alias for the iOS client and uses the same handler and response contract.
+
+There is no Swagger/OpenAPI generator configured in this server; this document is the maintained API contract.
+
+### `POST /auth/register`
+
+Request:
+
+```json
+{
+  "nickname": "tester",
+  "email": "user@example.com",
+  "password": "password123"
+}
+```
+
+Validation:
+
+- `nickname`: required, 1-20 characters. Nicknames are not unique in the current DB schema.
+- `email`: required, valid email format, normalized to lowercase before storage.
+- `password`: required, 8-72 characters, stored only as a bcrypt hash.
+
+Success response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "user": {
+      "id": "user-1",
+      "email": "user@example.com",
+      "nickname": "tester",
+      "authProvider": "email",
+      "createdAt": "2026-04-21T00:00:00.000Z",
+      "updatedAt": "2026-04-21T00:00:00.000Z"
+    },
+    "token": "jwt"
+  }
+}
+```
+
+Error responses:
+
+```json
+{
+  "success": false,
+  "error": "이메일 형식이 올바르지 않습니다.",
+  "code": "INVALID_EMAIL_FORMAT",
+  "details": {
+    "issues": [
+      {
+        "field": "email",
+        "code": "INVALID_EMAIL_FORMAT",
+        "message": "이메일 형식이 올바르지 않습니다."
+      }
+    ]
+  }
+}
+```
+
+```json
+{
+  "success": false,
+  "error": "비밀번호는 8자 이상 72자 이하로 입력해야 합니다.",
+  "code": "INVALID_PASSWORD_LENGTH",
+  "details": {
+    "issues": [
+      {
+        "field": "password",
+        "code": "INVALID_PASSWORD_LENGTH",
+        "message": "비밀번호는 8자 이상 72자 이하로 입력해야 합니다."
+      }
+    ]
+  }
+}
+```
+
+```json
+{
+  "success": false,
+  "error": "요청 값을 확인해주세요.",
+  "code": "INVALID_REQUEST",
+  "details": {
+    "issues": [
+      {
+        "field": "nickname",
+        "code": "INVALID_REQUEST",
+        "message": "요청 값을 확인해주세요."
+      }
+    ]
+  }
+}
+```
+
+```json
+{
+  "success": false,
+  "error": "이미 가입된 이메일입니다",
+  "code": "EMAIL_ALREADY_EXISTS",
+  "details": {
+    "field": "email",
+    "resource": "user"
+  }
+}
+```
+
+Unexpected registration failures return HTTP 500 with `code: "INTERNAL_SERVER_ERROR"` and do not expose passwords or secrets in logs.
+
+## Exchange Metadata Routes
+
+- `GET /exchange-metadata`
+- `GET /exchange-metadata/:exchange`
 
 ## Unsupported Cases
 

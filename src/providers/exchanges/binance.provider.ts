@@ -71,6 +71,7 @@ export class BinanceProvider
             return {
               symbol,
               exchangeSymbol: String(item.symbol),
+              marketId: String(item.symbol),
               market: `${symbol}/USDT`,
               baseCurrency: symbol,
               quoteCurrency: 'USDT',

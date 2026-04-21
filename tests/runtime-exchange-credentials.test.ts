@@ -114,12 +114,19 @@ describe('runtime exchange credential resolution', () => {
 });
 
 describe('trading service credential wiring', () => {
-  it('passes formal env credentials into private trading providers when no stored connection exists', async () => {
+  it('passes stored user credentials into private trading providers', async () => {
     resetRuntimeEnv();
     process.env.UPBIT_ACCESS_KEY = 'env-upbit-key';
     process.env.UPBIT_SECRET_KEY = 'env-upbit-secret';
 
-    const prisma = createPrismaMock(null);
+    const { encryptSecret } = await import('../src/modules/private-account/exchange-connections.crypto');
+    const prisma = createPrismaMock({
+      id: 'connection-1',
+      canUsePrivateApi: true,
+      apiKeyEncrypted: encryptSecret('user-upbit-key'),
+      secretKeyEncrypted: encryptSecret('user-upbit-secret'),
+      passphraseEncrypted: null,
+    });
     const orderChanceSpy = vi.fn(async (_symbol: string, context: any) => ({
       exchange: 'upbit',
       market: 'BTC/KRW',
@@ -151,8 +158,8 @@ describe('trading service credential wiring', () => {
     expect(orderChanceSpy).toHaveBeenCalledTimes(1);
     expect(orderChanceSpy.mock.calls[0]?.[1]?.credentials).toMatchObject({
       exchange: 'upbit',
-      apiKey: 'env-upbit-key',
-      secretKey: 'env-upbit-secret',
+      apiKey: 'user-upbit-key',
+      secretKey: 'user-upbit-secret',
     });
     expect(response).toMatchObject({
       exchange: 'upbit',
@@ -161,7 +168,7 @@ describe('trading service credential wiring', () => {
     });
   });
 
-  it('maps missing private credentials to a clear 400-level application error', async () => {
+  it('rejects trading when the user has no verified exchange connection', async () => {
     resetRuntimeEnv();
 
     vi.doMock('../src/config/database', () => ({ prisma: createPrismaMock(null) }));
@@ -184,8 +191,8 @@ describe('trading service credential wiring', () => {
     const { getOrderChance } = await import('../src/domains/trading/trading.service');
 
     await expect(getOrderChance('user-1', 'upbit', 'BTC')).rejects.toMatchObject({
-      statusCode: 400,
-      message: expect.stringContaining('UPBIT_ACCESS_KEY'),
+      statusCode: 404,
+      message: expect.stringContaining('not connected'),
     });
   });
 });

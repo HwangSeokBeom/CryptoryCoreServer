@@ -1,7 +1,13 @@
 import { COINS, COIN_MAP, EXCHANGES } from '../../config/constants';
-import { assetMetadataService } from '../../domains/assets/asset-metadata.service';
+import {
+  assetMetadataService,
+  type AssetImageAvailability,
+  type AssetMetadataLookup,
+  type AssetMetadataView,
+} from '../../domains/assets/asset-metadata.service';
 import { getKimchiPremium as getCanonicalKimchiPremium } from '../../domains/kimchi-premium/kimchi-premium.service';
-import type { DomesticExchangeId, ExchangeId } from '../../core/exchange/exchange.types';
+import type { DomesticExchangeId, ExchangeId, QuoteCurrency } from '../../core/exchange/exchange.types';
+import { buildCanonicalMarketMetadata } from '../../core/exchange/market-metadata';
 import { getAdapter } from '../../exchanges/ExchangeManager';
 import type { NormalizedCandle } from '../../exchanges/ExchangeAdapter';
 import { logger } from '../../utils/logger';
@@ -40,6 +46,9 @@ function logAssetImageProjection(params: {
   symbol: string;
   canonicalAssetKey: string | null | undefined;
   assetImageUrl: string | null | undefined;
+  imageAvailability?: AssetImageAvailability;
+  imageFailureReason?: string | null;
+  fallbackType?: string | null;
 }) {
   logger.info(
     {
@@ -49,9 +58,72 @@ function logAssetImageProjection(params: {
       symbol: params.symbol,
       canonicalAssetKey: params.canonicalAssetKey ?? null,
       hasImage: Boolean(params.assetImageUrl),
+      imageAvailability: params.imageAvailability ?? null,
+      imageFailureReason: params.imageFailureReason ?? null,
+      fallbackType: params.fallbackType ?? null,
     },
-    `[AssetImageDebug] action=projection_included route=${params.route} symbol=${params.symbol} canonicalAssetKey=${params.canonicalAssetKey ?? 'null'} hasImage=${Boolean(params.assetImageUrl)}`,
+    `[AssetImageDebug] action=projection_included route=${params.route} symbol=${params.symbol} canonicalAssetKey=${params.canonicalAssetKey ?? 'null'} hasImage=${Boolean(params.assetImageUrl)} availability=${params.imageAvailability ?? 'null'}`,
   );
+}
+
+function isDefaultPlaceholderAssetImage(view: AssetMetadataView | undefined, imageUrl: string | null | undefined) {
+  return Boolean(imageUrl)
+    && (view?.fallbackType === 'default_placeholder'
+      || view?.source === 'placeholder');
+}
+
+function toUsableAssetImageUrl(view: AssetMetadataView | undefined, fallbackUrl: string | null | undefined) {
+  const imageUrl = view?.assetImageUrl ?? fallbackUrl ?? null;
+  return isDefaultPlaceholderAssetImage(view, imageUrl) ? null : imageUrl;
+}
+
+function buildAssetImageFields(view: AssetMetadataView | undefined, assetImageUrl: string | null, canonicalAssetKey?: string | null) {
+  const imageAvailability = assetImageUrl
+    ? view?.fallbackHit ? 'fallback' as const : 'available' as const
+    : view?.imageAvailability ?? (canonicalAssetKey ? 'pending' as const : 'unavailable' as const);
+  return {
+    imageUrl: assetImageUrl,
+    imageURL: assetImageUrl,
+    hasImage: Boolean(assetImageUrl),
+    imageAvailability,
+    imageFailureReason: view?.failureReason ?? null,
+    fallbackType: view?.fallbackType ?? null,
+    assetType: view?.assetType ?? null,
+    canonicalName: view?.canonicalName ?? null,
+    fallbackColor: view?.fallbackColor ?? null,
+    fallbackInitials: view?.fallbackInitials ?? null,
+  };
+}
+
+async function getAssetViewsForProjection(
+  lookups: AssetMetadataLookup[],
+  context: string,
+): Promise<Map<string, AssetMetadataView>> {
+  const service = assetMetadataService as typeof assetMetadataService & {
+    getAssetViewsSafely?: (
+      lookups: AssetMetadataLookup[],
+      context: string,
+    ) => Promise<Map<string, AssetMetadataView>>;
+  };
+
+  if (typeof service.getAssetViewsSafely === 'function') {
+    return service.getAssetViewsSafely(lookups, context);
+  }
+
+  try {
+    return await service.getAssetViews(lookups);
+  } catch (error) {
+    logger.warn(
+      {
+        domain: 'asset-image',
+        action: 'asset_view_lookup_failed',
+        context,
+        err: error,
+      },
+      `[AssetImageDebug] action=asset_view_lookup_failed context=${context}`,
+    );
+    return new Map<string, AssetMetadataView>();
+  }
 }
 
 function mapRestTicker(exchange: string, ticker: {
@@ -64,16 +136,41 @@ function mapRestTicker(exchange: string, ticker: {
   timestamp: number;
 }): NormalizedMarketTicker {
   const symbol = toUnifiedSymbol(ticker.symbol);
+  const rawSymbol = toExchangeMarketSymbol(exchange, symbol);
+  const metadata = buildCanonicalMarketMetadata({
+    exchange: exchange as ExchangeId,
+    symbol,
+    marketId: rawSymbol,
+    rawSymbol,
+    baseAsset: symbol,
+    quoteAsset: EXCHANGES.find((item) => item.id === exchange)?.quoteCurrency ?? 'KRW',
+    isActive: true,
+    capabilities: {
+      candles: true,
+      orderbook: true,
+      trades: true,
+    },
+  });
   return {
     channel: 'tickers',
     exchange,
+    marketId: metadata.marketId,
+    canonicalSymbol: metadata.canonicalSymbol,
+    baseAsset: metadata.baseAsset,
+    quoteAsset: metadata.quoteAsset,
+    displaySymbol: metadata.displaySymbol,
+    koreanName: metadata.koreanName,
+    englishName: metadata.englishName,
+    iconUrl: metadata.iconUrl,
+    isActive: metadata.isActive,
+    capabilities: metadata.capabilities,
     symbol,
     canonicalAssetKey: symbol,
-    assetImageUrl: null,
+    assetImageUrl: metadata.iconUrl,
     market: buildUnifiedMarketName(exchange, symbol),
     baseCurrency: symbol,
     quoteCurrency: EXCHANGES.find((item) => item.id === exchange)?.quoteCurrency ?? 'KRW',
-    rawSymbol: toExchangeMarketSymbol(exchange, symbol),
+    rawSymbol,
     timestamp: ticker.timestamp,
     price: ticker.price,
     change24h: ticker.change24h,
@@ -122,26 +219,53 @@ async function decoratePublicTickers(tickers: NormalizedMarketTicker[]) {
     return tickers;
   }
 
-  const views = await assetMetadataService.getAssetViews(tickers.map((ticker) => ({
+  const views = await getAssetViewsForProjection(tickers.map((ticker) => ({
     symbol: ticker.symbol,
     exchangeSymbol: ticker.rawSymbol,
     exchange: ticker.exchange as ExchangeId,
     displayName: COIN_MAP.get(ticker.symbol)?.nameKo ?? COIN_MAP.get(ticker.symbol)?.nameEn ?? ticker.symbol,
     canonicalAssetKey: ticker.canonicalAssetKey ?? ticker.symbol,
-  })));
+  })), '/api/v1/public/tickers');
 
   return tickers.map((ticker) => {
     const view = views.get(ticker.canonicalAssetKey ?? ticker.symbol);
+    const canonicalAssetKey = view?.canonicalAssetKey ?? ticker.canonicalAssetKey ?? ticker.symbol;
+    const assetImageUrl = toUsableAssetImageUrl(view, ticker.assetImageUrl ?? ticker.iconUrl ?? null);
+    const imageFields = buildAssetImageFields(view, assetImageUrl, canonicalAssetKey);
+    const metadata = buildCanonicalMarketMetadata({
+      exchange: ticker.exchange as ExchangeId,
+      symbol: ticker.canonicalSymbol ?? ticker.symbol,
+      marketId: ticker.marketId ?? ticker.rawSymbol,
+      rawSymbol: ticker.rawSymbol,
+      baseAsset: ticker.baseAsset ?? ticker.baseCurrency,
+      quoteAsset: (ticker.quoteAsset ?? ticker.quoteCurrency) as QuoteCurrency,
+      isActive: ticker.isActive,
+      capabilities: ticker.capabilities,
+    });
     const projected = {
       ...ticker,
-      canonicalAssetKey: view?.canonicalAssetKey ?? ticker.canonicalAssetKey ?? ticker.symbol,
-      assetImageUrl: view?.assetImageUrl ?? ticker.assetImageUrl ?? null,
+      marketId: ticker.marketId ?? metadata.marketId,
+      canonicalSymbol: ticker.canonicalSymbol ?? metadata.canonicalSymbol,
+      baseAsset: ticker.baseAsset ?? metadata.baseAsset,
+      quoteAsset: ticker.quoteAsset ?? metadata.quoteAsset,
+      displaySymbol: ticker.displaySymbol ?? metadata.displaySymbol,
+      koreanName: ticker.koreanName ?? metadata.koreanName,
+      englishName: ticker.englishName ?? metadata.englishName,
+      isActive: ticker.isActive ?? metadata.isActive,
+      capabilities: ticker.capabilities ?? metadata.capabilities,
+      canonicalAssetKey,
+      iconUrl: assetImageUrl ?? ticker.iconUrl ?? metadata.iconUrl,
+      assetImageUrl,
+      ...imageFields,
     };
     logAssetImageProjection({
       route: '/api/v1/public/tickers',
       symbol: projected.symbol,
       canonicalAssetKey: projected.canonicalAssetKey,
       assetImageUrl: projected.assetImageUrl,
+      imageAvailability: projected.imageAvailability,
+      imageFailureReason: projected.imageFailureReason,
+      fallbackType: projected.fallbackType,
     });
     return projected;
   });
@@ -158,15 +282,40 @@ export async function getPublicOrderbook(
   const adapter = getAdapter(exchange);
   if (!adapter) return null;
   const orderbook = await adapter.fetchOrderbook(unifiedSymbol, 15);
+  const rawSymbol = toExchangeMarketSymbol(exchange, unifiedSymbol);
+  const metadata = buildCanonicalMarketMetadata({
+    exchange: exchange as ExchangeId,
+    symbol: unifiedSymbol,
+    marketId: rawSymbol,
+    rawSymbol,
+    baseAsset: unifiedSymbol,
+    quoteAsset: EXCHANGES.find((item) => item.id === exchange)?.quoteCurrency ?? 'KRW',
+    isActive: true,
+    capabilities: {
+      candles: true,
+      orderbook: true,
+      trades: true,
+    },
+  });
 
   return {
     channel: 'orderbook',
     exchange,
+    marketId: metadata.marketId,
+    canonicalSymbol: metadata.canonicalSymbol,
+    baseAsset: metadata.baseAsset,
+    quoteAsset: metadata.quoteAsset,
+    displaySymbol: metadata.displaySymbol,
+    koreanName: metadata.koreanName,
+    englishName: metadata.englishName,
+    iconUrl: metadata.iconUrl,
+    isActive: metadata.isActive,
+    capabilities: metadata.capabilities,
     symbol: unifiedSymbol,
     market: buildUnifiedMarketName(exchange, unifiedSymbol),
     baseCurrency: unifiedSymbol,
     quoteCurrency: EXCHANGES.find((item) => item.id === exchange)?.quoteCurrency ?? 'KRW',
-    rawSymbol: toExchangeMarketSymbol(exchange, unifiedSymbol),
+    rawSymbol,
     timestamp: Date.now(),
     asks: orderbook.asks,
     bids: orderbook.bids,
@@ -300,24 +449,32 @@ export async function getPublicKimchiPremium(symbols: string[], options?: { venu
     return rows;
   }
 
-  const views = await assetMetadataService.getAssetViews(rows.map((row) => ({
+  const views = await getAssetViewsForProjection(rows.map((row) => ({
     symbol: row.symbol,
     displayName: row.nameKo ?? row.nameEn ?? row.symbol,
     canonicalAssetKey: row.canonicalAssetKey,
-  })));
+  })), '/api/v1/public/kimchi-premium');
 
   return rows.map((row) => {
     const view = views.get(row.canonicalAssetKey ?? row.symbol);
+    const canonicalAssetKey = view?.canonicalAssetKey ?? row.canonicalAssetKey ?? row.symbol;
+    const assetImageUrl = toUsableAssetImageUrl(view, row.assetImageUrl ?? null);
+    const imageFields = buildAssetImageFields(view, assetImageUrl, canonicalAssetKey);
     const projected = {
       ...row,
-      canonicalAssetKey: view?.canonicalAssetKey ?? row.canonicalAssetKey ?? row.symbol,
-      assetImageUrl: view?.assetImageUrl ?? row.assetImageUrl ?? null,
+      canonicalAssetKey,
+      iconUrl: assetImageUrl,
+      assetImageUrl,
+      ...imageFields,
     };
     logAssetImageProjection({
       route: '/api/v1/public/kimchi-premium',
       symbol: projected.symbol,
       canonicalAssetKey: projected.canonicalAssetKey,
       assetImageUrl: projected.assetImageUrl,
+      imageAvailability: projected.imageAvailability,
+      imageFailureReason: projected.imageFailureReason,
+      fallbackType: projected.fallbackType,
     });
     return projected;
   });

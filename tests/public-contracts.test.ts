@@ -52,22 +52,27 @@ describe('Public Market Contracts', () => {
       bids: [{ price: 99990000, qty: 0.3 }],
       timestamp: 1_712_345_678_000,
     });
-    const trades = serializeTradesResponse('upbit', 'BTC', 'BTC/KRW', [
-      {
-        channel: 'trades',
-        exchange: 'upbit',
-        symbol: 'BTC',
-        market: 'BTC/KRW',
-        baseCurrency: 'BTC',
-        quoteCurrency: 'KRW',
-        rawSymbol: 'KRW-BTC',
-        tradeId: 'trade-1',
-        side: 'buy',
-        price: 100000000,
-        quantity: 0.01,
-        timestamp: 1_712_345_678_000,
-      },
-    ]);
+    const trades = serializeTradesResponse({
+      exchange: 'upbit',
+      symbol: 'BTC',
+      market: 'BTC/KRW',
+      items: [
+        {
+          channel: 'trades',
+          exchange: 'upbit',
+          symbol: 'BTC',
+          market: 'BTC/KRW',
+          baseCurrency: 'BTC',
+          quoteCurrency: 'KRW',
+          rawSymbol: 'KRW-BTC',
+          tradeId: 'trade-1',
+          side: 'buy',
+          price: 100000000,
+          quantity: 0.01,
+          timestamp: 1_712_345_678_000,
+        },
+      ],
+    });
     const candles = serializeCandlesResponse({
       exchange: 'upbit',
       symbol: 'BTC',
@@ -130,8 +135,12 @@ describe('Public Market Contracts', () => {
     expect(tickers.items[0].canonicalAssetKey).toBe('BTC');
     expect(tickers.items[0].assetImageUrl).toBe('https://assets.example.com/btc.png');
     expect(orderbook.spread).toBe(20000);
+    expect(orderbook.marketId).toBe('KRW-BTC');
     expect(trades.items[0].notional).toBe(1000000);
+    expect(trades.marketId).toBe('KRW-BTC');
     expect(candles.items[0].close).toBe(100000000);
+    expect(candles.marketId).toBe('KRW-BTC');
+    expect(candles.displaySymbol).toBe('BTC/KRW');
     expect(candles.meta?.freshnessState).toBe('live');
     expect(candles.meta?.recommendedClientBehavior).toBe('first_paint_ok');
     expect(kimchi.items[0].domestic[0].market).toBe('BTC/KRW');

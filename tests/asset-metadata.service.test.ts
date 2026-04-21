@@ -7,6 +7,9 @@ const setMock = vi.fn(async (key: string, value: string) => {
   return 'OK';
 });
 const requestMock = vi.fn();
+const DEFAULT_PLACEHOLDER_IMAGE_URL = 'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/128/color/generic.png';
+const BTC_ICON_URL = 'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/128/color/btc.png';
+const POL_ICON_URL = 'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/128/color/matic.png';
 
 vi.mock('../src/config/redis', () => ({
   redis: {
@@ -24,8 +27,22 @@ vi.mock('../src/config/env', () => ({
 
 vi.mock('../src/core/exchange/rest.client', () => ({
   RestClient: class {
-    async request<T>(path: string) {
-      return requestMock(path) as Promise<T>;
+    async request<T>(path: string, options?: unknown) {
+      return requestMock(path, options) as Promise<T>;
+    }
+
+    async requestDetailed<T>(path: string, options?: unknown) {
+      const data = await requestMock(path, options) as T;
+      return {
+        data,
+        meta: {
+          owner: 'coingecko',
+          path,
+          requestUrl: `https://api.coingecko.com/api/v3${path}`,
+          statusCode: 200,
+          responseSnippet: JSON.stringify(Array.isArray(data) ? data.slice(0, 2) : data).slice(0, 240),
+        },
+      };
     }
   },
 }));
@@ -102,8 +119,9 @@ describe('asset metadata service', () => {
     ]);
     expect(first.get('BTC')).toMatchObject({
       canonicalAssetKey: 'BTC',
-      assetImageUrl: null,
-      coingeckoId: null,
+      assetImageUrl: BTC_ICON_URL,
+      coingeckoId: 'bitcoin',
+      fallbackHit: true,
     });
 
     await vi.advanceTimersByTimeAsync(100);
@@ -116,10 +134,10 @@ describe('asset metadata service', () => {
       assetImageUrl: 'https://assets.example.com/btc.png',
       coingeckoId: 'bitcoin',
     });
-    expect(requestMock).toHaveBeenCalledWith('/coins/markets');
+    expect(requestMock).toHaveBeenCalledWith('/coins/markets', expect.any(Object));
   });
 
-  it('stores a negative cache for ambiguous or missing mappings and avoids repeated market lookups', async () => {
+  it('stores a placeholder fallback for ambiguous or missing mappings and avoids repeated market lookups', async () => {
     requestMock.mockResolvedValue([
       { id: 'bitcoin', symbol: 'btc', name: 'Bitcoin' },
       { id: 'ethereum', symbol: 'eth', name: 'Ethereum' },
@@ -133,7 +151,8 @@ describe('asset metadata service', () => {
     ]);
     expect(first.get('FAKE')).toMatchObject({
       canonicalAssetKey: 'FAKE',
-      assetImageUrl: null,
+      assetImageUrl: DEFAULT_PLACEHOLDER_IMAGE_URL,
+      fallbackType: 'default_placeholder',
     });
 
     await vi.advanceTimersByTimeAsync(100);
@@ -143,11 +162,12 @@ describe('asset metadata service', () => {
     ]);
     expect(second.get('FAKE')).toMatchObject({
       canonicalAssetKey: 'FAKE',
-      assetImageUrl: null,
+      assetImageUrl: DEFAULT_PLACEHOLDER_IMAGE_URL,
       coingeckoId: null,
+      failureReason: 'alias_not_found',
     });
     expect(requestMock).toHaveBeenCalledTimes(1);
-    expect(requestMock).toHaveBeenLastCalledWith('/coins/list');
+    expect(requestMock).toHaveBeenLastCalledWith('/coins/list', expect.any(Object));
   });
 
   it('resolves representative assets through curated CoinGecko ids without a coin list lookup', async () => {
@@ -198,7 +218,7 @@ describe('asset metadata service', () => {
     expect(views.get('SOL')?.assetImageUrl).toBe('https://assets.example.com/sol.png');
     expect(views.get('DOGE')?.assetImageUrl).toBe('https://assets.example.com/doge.png');
     expect(views.get('USDT')?.assetImageUrl).toBe('https://assets.example.com/usdt.png');
-    expect(requestMock).not.toHaveBeenCalledWith('/coins/list');
+    expect(requestMock.mock.calls.some(([path]) => path === '/coins/list')).toBe(false);
   });
 
   it('does not let an incoming null image overwrite an existing resolved image', async () => {
@@ -262,10 +282,80 @@ describe('asset metadata service', () => {
 
     expect(view.get('ABC')).toMatchObject({
       canonicalAssetKey: 'ABC',
-      assetImageUrl: null,
+      assetImageUrl: DEFAULT_PLACEHOLDER_IMAGE_URL,
       coingeckoId: null,
+      failureReason: 'alias_not_found',
     });
     expect(requestMock).toHaveBeenCalledTimes(1);
-    expect(requestMock).toHaveBeenLastCalledWith('/coins/list');
+    expect(requestMock).toHaveBeenLastCalledWith('/coins/list', expect.any(Object));
+  });
+
+  it('falls back to a placeholder image when CoinGecko coin list fetch fails', async () => {
+    requestMock.mockImplementation(async (path: string) => {
+      if (path === '/coins/list') {
+        const error = new Error('coingecko request failed with HTTP 404');
+        Object.assign(error, {
+          exchange: 'coingecko',
+          statusCode: 404,
+          requestUrl: 'https://api.coingecko.com/api/v3/coins/list',
+          responseBody: 'not found',
+        });
+        throw error;
+      }
+      throw new Error(`Unexpected path ${path}`);
+    });
+
+    const { assetMetadataService } = await import('../src/domains/assets/asset-metadata.service');
+    assetMetadataService.start();
+
+    const first = await assetMetadataService.getAssetViews([{ symbol: 'NEWT', displayName: 'New Token' }]);
+    expect(first.get('NEWT')).toMatchObject({
+      canonicalAssetKey: 'NEWT',
+      assetImageUrl: DEFAULT_PLACEHOLDER_IMAGE_URL,
+      fallbackType: 'default_placeholder',
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    const second = await assetMetadataService.getAssetViews([{ symbol: 'NEWT', displayName: 'New Token' }]);
+    expect(second.get('NEWT')).toMatchObject({
+      canonicalAssetKey: 'NEWT',
+      assetImageUrl: DEFAULT_PLACEHOLDER_IMAGE_URL,
+      failureReason: 'coingecko_fetch_failed',
+    });
+  });
+
+  it('uses the local alias table for POL before remote market enrichment completes', async () => {
+    requestMock.mockImplementation(async (path: string) => {
+      if (path === '/coins/markets') {
+        return [{
+          id: 'polygon-ecosystem-token',
+          symbol: 'pol',
+          name: 'POL (ex-MATIC)',
+          image: 'https://assets.example.com/pol.png',
+        }];
+      }
+      throw new Error(`Unexpected path ${path}`);
+    });
+
+    const { assetMetadataService } = await import('../src/domains/assets/asset-metadata.service');
+    assetMetadataService.start();
+
+    const first = await assetMetadataService.getAssetViews([{ symbol: 'POL', displayName: 'POL (ex-MATIC)' }]);
+    expect(first.get('POL')).toMatchObject({
+      canonicalAssetKey: 'POL',
+      assetImageUrl: POL_ICON_URL,
+      coingeckoId: 'polygon-ecosystem-token',
+      fallbackType: 'symbol_alias',
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    const second = await assetMetadataService.getAssetViews([{ symbol: 'POL', displayName: 'POL (ex-MATIC)' }]);
+    expect(second.get('POL')).toMatchObject({
+      canonicalAssetKey: 'POL',
+      assetImageUrl: 'https://assets.example.com/pol.png',
+      coingeckoId: 'polygon-ecosystem-token',
+    });
   });
 });

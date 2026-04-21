@@ -1,7 +1,11 @@
 import bcrypt from 'bcrypt';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../../config/database';
 import { AppError } from '../../utils/errors';
-import type { RegisterInputType, LoginInputType } from './auth.schema';
+import type { LoginInputType, RegisterInputType } from './auth.schema';
+
+const EMAIL_AUTH_PROVIDER = 'email';
+const EMAIL_ALREADY_EXISTS = 'EMAIL_ALREADY_EXISTS';
 
 const INITIAL_HOLDINGS = [
   { coinId: 'BTC', quantity: 0.15, avgPrice: 138000000 },
@@ -11,45 +15,120 @@ const INITIAL_HOLDINGS = [
   { coinId: 'DOGE', quantity: 50000, avgPrice: 480 },
 ];
 
+function normalizeEmail(email: string) {
+  return email.trim().toLowerCase();
+}
+
+function createEmailAlreadyExistsError() {
+  return new AppError(
+    409,
+    '이미 가입된 이메일입니다',
+    {
+      field: 'email',
+      resource: 'user',
+    },
+    EMAIL_ALREADY_EXISTS,
+  );
+}
+
+function isUniqueConstraintError(error: unknown) {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
+}
+
+function toUserProfile(user: {
+  id: string;
+  email: string;
+  nickname: string;
+  authProvider: string;
+  createdAt: Date;
+  updatedAt: Date;
+}) {
+  return {
+    id: user.id,
+    email: user.email,
+    nickname: user.nickname,
+    authProvider: user.authProvider,
+    createdAt: user.createdAt.toISOString(),
+    updatedAt: user.updatedAt.toISOString(),
+  };
+}
+
 export async function registerUser(input: RegisterInputType) {
-  const existing = await prisma.user.findUnique({ where: { email: input.email } });
-  if (existing) throw new AppError(409, '이미 가입된 이메일입니다');
+  const normalizedEmail = normalizeEmail(input.email);
+  const existing = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+  if (existing) {
+    throw createEmailAlreadyExistsError();
+  }
 
   const passwordHash = await bcrypt.hash(input.password, 10);
 
-  const user = await prisma.$transaction(async (tx) => {
-    const newUser = await tx.user.create({
-      data: {
-        email: input.email,
-        passwordHash,
-        nickname: input.nickname,
-        cash: 15000000,
-      },
-    });
-
-    for (const h of INITIAL_HOLDINGS) {
-      await tx.holding.create({
+  try {
+    const user = await prisma.$transaction(async (tx) => {
+      const newUser = await tx.user.create({
         data: {
-          userId: newUser.id,
-          coinId: h.coinId,
-          quantity: h.quantity,
-          avgPrice: h.avgPrice,
+          email: normalizedEmail,
+          authProvider: EMAIL_AUTH_PROVIDER,
+          providerAccountId: normalizedEmail,
+          passwordHash,
+          nickname: input.nickname.trim(),
+          cash: 15000000,
         },
       });
+
+      for (const holding of INITIAL_HOLDINGS) {
+        await tx.holding.create({
+          data: {
+            userId: newUser.id,
+            coinId: holding.coinId,
+            quantity: holding.quantity,
+            avgPrice: holding.avgPrice,
+          },
+        });
+      }
+
+      return newUser;
+    });
+
+    return toUserProfile(user);
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      throw createEmailAlreadyExistsError();
     }
-
-    return newUser;
-  });
-
-  return { id: user.id, email: user.email, nickname: user.nickname, cash: user.cash };
+    throw error;
+  }
 }
 
 export async function loginUser(input: LoginInputType) {
-  const user = await prisma.user.findUnique({ where: { email: input.email } });
-  if (!user) throw new AppError(401, '이메일 또는 비밀번호가 올바르지 않습니다');
+  const normalizedEmail = normalizeEmail(input.email);
+  const user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+  if (!user || user.authProvider !== EMAIL_AUTH_PROVIDER) {
+    throw new AppError(401, '이메일 또는 비밀번호가 올바르지 않습니다');
+  }
 
   const valid = await bcrypt.compare(input.password, user.passwordHash);
-  if (!valid) throw new AppError(401, '이메일 또는 비밀번호가 올바르지 않습니다');
+  if (!valid) {
+    throw new AppError(401, '이메일 또는 비밀번호가 올바르지 않습니다');
+  }
 
-  return { id: user.id, email: user.email, nickname: user.nickname, cash: user.cash };
+  return toUserProfile(user);
+}
+
+export async function getCurrentUserProfile(userId: string) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      email: true,
+      nickname: true,
+      authProvider: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  });
+
+  if (!user) {
+    throw new AppError(404, '사용자를 찾을 수 없습니다');
+  }
+
+  return toUserProfile(user);
 }

@@ -1,7 +1,17 @@
 import { env } from '../../config/env';
 import { resolveExchangeInterval } from '../../core/exchange/interval.mapper';
+import { exchangeProviderRegistry } from '../../core/exchange/registry.bootstrap';
+import { resolveExchangeMarketInput } from '../../core/exchange/market-metadata';
 import { toCanonicalMarket, toCanonicalSymbol } from '../../core/exchange/symbol.mapper';
-import type { CanonicalCandle, ExchangeId } from '../../core/exchange/exchange.types';
+import type {
+  CanonicalCandle,
+  CanonicalMarketCapabilities,
+  CanonicalMarketMetadata,
+  ExchangeId,
+  ExchangeMarketDescriptor,
+  MarketCapabilitySnapshot,
+  QuoteCurrency,
+} from '../../core/exchange/exchange.types';
 import { marketEventBus } from '../../modules/public-market/market.event-bus';
 import { publicMarketDataStore } from '../../modules/public-market/market.data.store';
 import type {
@@ -23,6 +33,17 @@ type ChartLiveStatus = 'live' | 'stale' | 'pending';
 
 export type ChartCandlesResponse = {
   exchange: ExchangeId;
+  marketId: string;
+  rawSymbol: string;
+  canonicalSymbol: string;
+  baseAsset: string;
+  quoteAsset: QuoteCurrency;
+  displaySymbol: string;
+  koreanName: string | null;
+  englishName: string | null;
+  iconUrl: string | null;
+  isActive: boolean;
+  capabilities: CanonicalMarketCapabilities;
   symbol: string;
   requestedInterval: string;
   interval: string;
@@ -83,6 +104,11 @@ let chartLiveStarted = false;
 let tradeListener: ((payload: NormalizedMarketTrade) => void) | null = null;
 let tickerListener: ((payload: NormalizedMarketTicker) => void) | null = null;
 
+type ChartMarketLookupRequest = {
+  symbol?: string;
+  marketId?: string;
+};
+
 function intervalToMilliseconds(interval: string) {
   return INTERVAL_MS_MAP[interval] ?? null;
 }
@@ -94,6 +120,89 @@ function assertCanonicalSymbol(symbol: string) {
   }
 
   return canonical;
+}
+
+function defaultCapabilitySnapshot(markets: ExchangeMarketDescriptor[]): MarketCapabilitySnapshot {
+  const marketSymbols = Array.from(new Set(markets.map((market) => market.symbol)));
+  return {
+    websocketTickerSymbols: marketSymbols,
+    capabilitySymbols: {
+      tickers: marketSymbols,
+      orderbook: marketSymbols,
+      trades: marketSymbols,
+      candles: marketSymbols,
+    },
+  };
+}
+
+function buildChartCapabilityMap(snapshot: MarketCapabilitySnapshot, symbols: string[]) {
+  return new Map(symbols.map((symbol) => [
+    symbol,
+    {
+      candles: (snapshot.capabilitySymbols.candles ?? []).includes(symbol),
+      orderbook: (snapshot.capabilitySymbols.orderbook ?? []).includes(symbol),
+      trades: (snapshot.capabilitySymbols.trades ?? []).includes(symbol),
+    },
+  ]));
+}
+
+async function resolveChartMarketMetadata(
+  exchange: ExchangeId,
+  request: ChartMarketLookupRequest,
+): Promise<CanonicalMarketMetadata> {
+  try {
+    const provider = exchangeProviderRegistry.getMarketDataProvider(exchange);
+    if (typeof provider.listMarkets !== 'function') {
+      return toCanonicalMarket(exchange, assertCanonicalSymbol(request.symbol ?? request.marketId ?? ''));
+    }
+    const markets = (await provider.listMarkets()).filter((market) => market.tradable !== false);
+    const capabilitySnapshot = provider.getMarketCapabilitySnapshot
+      ? await provider.getMarketCapabilitySnapshot(markets)
+      : defaultCapabilitySnapshot(markets);
+    const resolved = resolveExchangeMarketInput({
+      exchange,
+      markets,
+      input: request,
+      capabilitiesBySymbol: buildChartCapabilityMap(
+        capabilitySnapshot,
+        markets.map((market) => market.symbol),
+      ),
+    });
+
+    if (!resolved.ok) {
+      const reason = resolved.reason === 'MARKET_ID_NOT_FOUND'
+        ? `marketId ${resolved.input} is not listed on ${exchange}`
+        : resolved.reason === 'SYMBOL_NOT_FOUND'
+          ? `symbol ${resolved.input} could not be resolved to a listed ${exchange} market`
+          : 'marketId or symbol is required';
+      throw new AppError(400, reason);
+    }
+
+    return resolved.metadata;
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+    throw new AppError(503, `${exchange} chart market metadata is temporarily unavailable`);
+  }
+}
+
+function buildChartResponseBase(metadata: CanonicalMarketMetadata) {
+  return {
+    exchange: metadata.exchange,
+    marketId: metadata.marketId,
+    rawSymbol: metadata.rawSymbol,
+    canonicalSymbol: metadata.canonicalSymbol,
+    baseAsset: metadata.baseAsset,
+    quoteAsset: metadata.quoteAsset,
+    displaySymbol: metadata.displaySymbol,
+    koreanName: metadata.koreanName,
+    englishName: metadata.englishName,
+    iconUrl: metadata.iconUrl,
+    isActive: metadata.isActive,
+    capabilities: metadata.capabilities,
+    symbol: metadata.canonicalSymbol,
+  };
 }
 
 function marketKey(exchange: ExchangeId, symbol: string) {
@@ -435,7 +544,8 @@ export async function ensureChartLiveCandle(params: {
 
 export async function getChartCandles(params: {
   exchange: ExchangeId;
-  symbol: string;
+  symbol?: string;
+  marketId?: string;
   interval: string;
   limit?: number;
 }): Promise<ChartCandlesResponse> {
@@ -443,7 +553,11 @@ export async function getChartCandles(params: {
     throw new AppError(400, 'limit must be a positive integer');
   }
 
-  const canonical = assertCanonicalSymbol(params.symbol);
+  const metadata = await resolveChartMarketMetadata(params.exchange, {
+    symbol: params.symbol,
+    marketId: params.marketId,
+  });
+  const canonical = metadata.canonicalSymbol;
   const requestedLimit = params.limit ?? 200;
   const snapshot = await resolveCandleSnapshot({
     exchange: params.exchange,
@@ -454,8 +568,7 @@ export async function getChartCandles(params: {
   const effectiveInterval = snapshot.interval ?? snapshot.normalizedInterval;
   if (!effectiveInterval) {
     return {
-      exchange: params.exchange,
-      symbol: canonical,
+      ...buildChartResponseBase(metadata),
       requestedInterval: params.interval,
       interval: params.interval,
       support: snapshot.support,
@@ -518,6 +631,7 @@ export async function getChartCandles(params: {
     {
       domain: 'chart-live',
       exchange: params.exchange,
+      marketId: metadata.marketId,
       symbol: canonical,
       requestedInterval: params.interval,
       interval: effectiveInterval,
@@ -544,6 +658,8 @@ export async function getChartCandles(params: {
   logger.info(
     {
       domain: 'chart-live',
+      exchange: params.exchange,
+      marketId: metadata.marketId,
       symbol: canonical,
       freshnessState: snapshot.meta.freshnessState,
       isRenderable,
@@ -554,8 +670,7 @@ export async function getChartCandles(params: {
   );
 
   return {
-    exchange: params.exchange,
-    symbol: canonical,
+    ...buildChartResponseBase(metadata),
     requestedInterval: params.interval,
     interval: effectiveInterval,
     support: snapshot.support,

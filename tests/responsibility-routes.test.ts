@@ -43,8 +43,13 @@ const listComparableKimchiSymbolsMock = vi.fn(async () => ({
   exchange: 'upbit',
   items: [
     {
+      marketId: 'KRW-BTC',
+      rawSymbol: 'KRW-BTC',
+      canonicalSymbol: 'BTC',
+      baseAsset: 'BTC',
+      quoteAsset: 'KRW',
       symbol: 'BTC',
-      displaySymbol: 'BTC',
+      displaySymbol: 'BTC/KRW',
       displayName: '비트코인',
       market: 'BTC/KRW',
       exchangeSymbol: 'KRW-BTC',
@@ -58,6 +63,21 @@ const listComparableKimchiSymbolsMock = vi.fn(async () => ({
 }));
 const getChartCandlesMock = vi.fn(async () => ({
   exchange: 'upbit',
+  marketId: 'KRW-BTC',
+  rawSymbol: 'KRW-BTC',
+  canonicalSymbol: 'BTC',
+  baseAsset: 'BTC',
+  quoteAsset: 'KRW',
+  displaySymbol: 'BTC/KRW',
+  koreanName: '비트코인',
+  englishName: 'Bitcoin',
+  iconUrl: 'https://assets.example.com/btc.png',
+  isActive: true,
+  capabilities: {
+    supportsCandles: true,
+    supportsOrderBook: true,
+    supportsTrades: true,
+  },
   symbol: 'BTC',
   interval: '1m',
   items: [
@@ -112,14 +132,19 @@ const getMarketSnapshotMock = vi.fn(async () => ({
     {
       exchange: 'upbit',
       exchangeName: '업비트',
+      marketId: 'KRW-BTC',
+      rawSymbol: 'KRW-BTC',
+      canonicalSymbol: 'BTC',
+      baseAsset: 'BTC',
+      quoteAsset: 'KRW',
       symbol: 'BTC',
-      displaySymbol: 'BTC',
+      displaySymbol: 'BTC/KRW',
       displayName: '비트코인',
+      iconUrl: 'https://assets.example.com/btc.png',
       exchangeSymbol: 'KRW-BTC',
       market: 'BTC/KRW',
       baseCurrency: 'BTC',
       quoteCurrency: 'KRW',
-      rawSymbol: 'KRW-BTC',
       price: 100000000,
       change24h: 1.2,
       signedChangeRate: 1.2,
@@ -142,6 +167,20 @@ const getMarketSnapshotMock = vi.fn(async () => ({
       errorMessage: null,
       registryMapped: true,
       tradable: true,
+      isActive: true,
+      capabilities: {
+        tickers: true,
+        orderbook: true,
+        trades: true,
+        candles: true,
+        supportsCandles: true,
+        supportsOrderBook: true,
+        supportsTrades: true,
+      },
+      isChartAvailable: true,
+      isOrderBookAvailable: true,
+      isTradesAvailable: true,
+      unavailableReason: null,
       kimchiComparable: true,
       kimchiComparisonReason: 'COMPARABLE',
     },
@@ -170,6 +209,21 @@ vi.mock('../src/domains/market-data/market-data.service', () => ({
     items: [
       {
         exchange: 'upbit',
+        marketId: 'KRW-BTC',
+        rawSymbol: 'KRW-BTC',
+        canonicalSymbol: 'BTC',
+        baseAsset: 'BTC',
+        quoteAsset: 'KRW',
+        displaySymbol: 'BTC/KRW',
+        koreanName: '비트코인',
+        englishName: 'Bitcoin',
+        iconUrl: 'https://assets.example.com/btc.png',
+        isActive: true,
+        capabilities: {
+          supportsCandles: true,
+          supportsOrderBook: true,
+          supportsTrades: true,
+        },
         symbol: 'BTC',
         exchangeSymbol: 'KRW-BTC',
         market: 'BTC/KRW',
@@ -184,11 +238,29 @@ vi.mock('../src/domains/market-data/market-data.service', () => ({
   getTickers: vi.fn(async () => [
     {
       exchange: 'upbit',
+      marketId: 'KRW-BTC',
+      rawSymbol: 'KRW-BTC',
+      canonicalSymbol: 'BTC',
+      baseAsset: 'BTC',
+      quoteAsset: 'KRW',
+      displaySymbol: 'BTC/KRW',
+      koreanName: '비트코인',
+      englishName: 'Bitcoin',
+      iconUrl: 'https://assets.example.com/btc.png',
+      isActive: true,
+      capabilities: {
+        supportsCandles: true,
+        supportsOrderBook: true,
+        supportsTrades: true,
+      },
       symbol: 'BTC',
+      canonicalAssetKey: 'BTC',
+      imageUrl: 'https://assets.example.com/btc.png',
+      hasImage: true,
+      assetImageUrl: 'https://assets.example.com/btc.png',
       market: 'BTC/KRW',
       baseCurrency: 'BTC',
       quoteCurrency: 'KRW',
-      rawSymbol: 'KRW-BTC',
       price: 100000000,
       change24h: 1.2,
       volume24h: 1000,
@@ -235,8 +307,26 @@ describe('Responsibility Routes', () => {
     const body = JSON.parse(res.body);
     expect(body.success).toBe(true);
     expect(body.data[0].exchange).toBe('upbit');
+    expect(body.data[0].marketId).toBe('KRW-BTC');
+    expect(body.data[0]).toMatchObject({
+      canonicalAssetKey: 'BTC',
+      hasImage: true,
+      imageUrl: 'https://assets.example.com/btc.png',
+    });
     await app.close();
   }, 10000);
+
+  it('GET /market/tickers accepts marketId filters without auth', async () => {
+    const app = await createApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/market/tickers?exchange=upbit&marketId=KRW-BTC',
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(getMarketSnapshotMock).not.toHaveBeenCalled();
+    await app.close();
+  });
 
   it('GET /market/snapshot returns snapshot-first canonical data without auth', async () => {
     const app = await createApp();
@@ -280,6 +370,7 @@ describe('Responsibility Routes', () => {
     expect(body.success).toBe(true);
     expect(body.data.items[0]).toMatchObject({
       symbol: 'BTC',
+      marketId: 'KRW-BTC',
       tradable: true,
       kimchiComparable: true,
     });
@@ -298,13 +389,17 @@ describe('Responsibility Routes', () => {
     expect(body.success).toBe(true);
     expect(body.data).toMatchObject({
       exchange: 'upbit',
+      marketId: 'KRW-BTC',
       symbol: 'BTC',
+      canonicalSymbol: 'BTC',
+      displaySymbol: 'BTC/KRW',
       interval: '1m',
       liveStatus: 'live',
     });
     expect(getChartCandlesMock).toHaveBeenCalledWith({
       exchange: 'upbit',
       symbol: 'BTC',
+      marketId: undefined,
       interval: '1m',
       limit: 200,
     });

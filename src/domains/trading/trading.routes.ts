@@ -19,6 +19,14 @@ const createOrderSchema = z.object({
   quantity: z.number().positive(),
   price: z.number().positive().optional(),
   clientOrderId: z.string().optional(),
+}).superRefine((value, ctx) => {
+  if (value.type === 'limit' && (!value.price || value.price <= 0)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'limit order requires a positive price',
+      path: ['price'],
+    });
+  }
 });
 
 export async function tradingRoutes(app: FastifyInstance) {
@@ -34,7 +42,7 @@ export async function tradingRoutes(app: FastifyInstance) {
       return createSuccessResponse(await getOrderChance(request.user.id, exchange, symbol));
     } catch (error) {
       if (error instanceof AppError) {
-        return reply.status(error.statusCode).send(createErrorResponse(error.message));
+        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
       }
       throw error;
     }
@@ -50,7 +58,7 @@ export async function tradingRoutes(app: FastifyInstance) {
       return createSuccessResponse(await createTradingOrder(request.user.id, parsed.data));
     } catch (error) {
       if (error instanceof AppError) {
-        return reply.status(error.statusCode).send(createErrorResponse(error.message));
+        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
       }
       throw error;
     }
@@ -63,7 +71,7 @@ export async function tradingRoutes(app: FastifyInstance) {
       return createSuccessResponse(await cancelTradingOrder(request.user.id, exchange, orderId, symbol));
     } catch (error) {
       if (error instanceof AppError) {
-        return reply.status(error.statusCode).send(createErrorResponse(error.message));
+        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
       }
       throw error;
     }
@@ -76,7 +84,7 @@ export async function tradingRoutes(app: FastifyInstance) {
       return createSuccessResponse(await getTradingOrder(request.user.id, exchange, orderId, symbol));
     } catch (error) {
       if (error instanceof AppError) {
-        return reply.status(error.statusCode).send(createErrorResponse(error.message));
+        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
       }
       throw error;
     }
@@ -91,7 +99,7 @@ export async function tradingRoutes(app: FastifyInstance) {
       return createSuccessResponse(await getOpenOrders(request.user.id, exchange, symbol));
     } catch (error) {
       if (error instanceof AppError) {
-        return reply.status(error.statusCode).send(createErrorResponse(error.message));
+        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
       }
       throw error;
     }
@@ -106,7 +114,7 @@ export async function tradingRoutes(app: FastifyInstance) {
       return createSuccessResponse(await getRecentFills(request.user.id, exchange, symbol, limit ? parseInt(limit, 10) : 50));
     } catch (error) {
       if (error instanceof AppError) {
-        return reply.status(error.statusCode).send(createErrorResponse(error.message));
+        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
       }
       throw error;
     }

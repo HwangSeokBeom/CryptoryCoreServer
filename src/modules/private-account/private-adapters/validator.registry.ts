@@ -1,8 +1,10 @@
 import { getExchangeConfig } from '../../../config/exchange.config';
+import { BinanceSigner } from '../../../core/exchange/auth/binance.signer';
 import { JwtHmacSigner } from '../../../core/exchange/auth/jwt-hmac.signer';
 import { CoinoneSigner } from '../../../core/exchange/auth/coinone.signer';
 import { KorbitHmacSigner } from '../../../core/exchange/auth/korbit.signer';
 import { RestClient } from '../../../core/exchange/rest.client';
+import { classifyExchangeValidationError } from './validation-error-classifier';
 import type {
   ExchangeConnectionCredentials,
   ExchangeConnectionValidationResult,
@@ -20,6 +22,7 @@ class LiveExchangeConnectionValidator implements ExchangeConnectionValidator {
       return {
         status: 'invalid',
         mode: 'syntactic',
+        code: 'invalid_credentials',
         canUsePrivateApi: false,
         message: 'apiKey and secretKey are required',
         checkedAt: new Date().toISOString(),
@@ -31,16 +34,23 @@ class LiveExchangeConnectionValidator implements ExchangeConnectionValidator {
       return {
         status: 'verified',
         mode: 'live_api',
+        code: 'verified',
         canUsePrivateApi: true,
         message: `${this.exchange} private API credentials verified successfully.`,
+        details: {
+          verifiedAgainst: this.exchange,
+        },
         checkedAt: new Date().toISOString(),
       };
     } catch (error) {
+      const classified = classifyExchangeValidationError(error);
       return {
         status: 'invalid',
         mode: 'live_api',
+        code: classified.code,
         canUsePrivateApi: false,
-        message: error instanceof Error ? error.message : `${this.exchange} private API validation failed`,
+        message: classified.message,
+        details: classified.details,
         checkedAt: new Date().toISOString(),
       };
     }
@@ -55,6 +65,7 @@ class PlaceholderExchangeConnectionValidator implements ExchangeConnectionValida
       return {
         status: 'invalid',
         mode: 'syntactic',
+        code: 'invalid_credentials',
         canUsePrivateApi: false,
         message: 'apiKey and secretKey are required',
         checkedAt: new Date().toISOString(),
@@ -64,8 +75,12 @@ class PlaceholderExchangeConnectionValidator implements ExchangeConnectionValida
     return {
       status: 'placeholder',
       mode: 'placeholder',
+      code: 'unsupported_exchange',
       canUsePrivateApi: false,
       message: `Credentials stored for ${this.exchange}, but a live private adapter is not implemented yet.`,
+      details: {
+        exchange: this.exchange,
+      },
       checkedAt: new Date().toISOString(),
     };
   }
@@ -127,12 +142,25 @@ async function validateKorbit(credentials: ExchangeConnectionCredentials) {
   });
 }
 
+async function validateBinance(credentials: ExchangeConnectionCredentials) {
+  const signer = new BinanceSigner();
+  const client = new RestClient('binance', getExchangeConfig('binance').restBaseUrl);
+  const signed = signer.createSignedRequest({
+    apiKey: credentials.apiKey,
+    secretKey: credentials.secretKey,
+  });
+  await client.request('/api/v3/account', {
+    headers: signed.headers,
+    query: signed.query,
+  });
+}
+
 const validators = new Map<string, ExchangeConnectionValidator>([
   ['upbit', new LiveExchangeConnectionValidator('upbit', validateUpbit)],
   ['bithumb', new LiveExchangeConnectionValidator('bithumb', validateBithumb)],
   ['coinone', new LiveExchangeConnectionValidator('coinone', validateCoinone)],
   ['korbit', new LiveExchangeConnectionValidator('korbit', validateKorbit)],
-  ['binance', new PlaceholderExchangeConnectionValidator('binance')],
+  ['binance', new LiveExchangeConnectionValidator('binance', validateBinance)],
 ]);
 
 export function getExchangeConnectionValidator(exchange: string) {

@@ -1,11 +1,19 @@
 import { COIN_MAP } from '../../config/constants';
+import { DEFAULT_COIN_PLACEHOLDER_ICON_URL, resolveIconUrl } from '../../core/exchange/icon.resolver';
 import { exchangeProviderRegistry } from '../../core/exchange/registry.bootstrap';
 import { resolveExchangeInterval } from '../../core/exchange/interval.mapper';
-import { toCanonicalSymbol } from '../../core/exchange/symbol.mapper';
+import { resolveCanonicalAssetKey as resolveCanonicalAssetImageKey, toCanonicalMarket, toCanonicalSymbol } from '../../core/exchange/symbol.mapper';
 import { EXCHANGE_IDS } from '../../core/exchange/exchange.types';
-import { assetMetadataService } from '../assets/asset-metadata.service';
+import {
+  assetMetadataService,
+  type AssetImageAvailability,
+  type AssetMetadataLookup,
+  type AssetMetadataView,
+} from '../assets/asset-metadata.service';
 import type {
   CanonicalCandle,
+  CanonicalMarketCapabilities,
+  CanonicalMarketMetadata,
   ExchangeMarketDescriptor,
   MarketCapabilityChannel,
   MarketCapabilitySnapshot,
@@ -22,6 +30,11 @@ import type {
   SnapshotPartialFailure,
   SnapshotSource,
 } from '../../core/exchange/exchange.types';
+import {
+  buildCanonicalMarketMetadataFromDescriptor,
+  resolveExchangeMarketInput,
+  toCanonicalMarketCapabilities,
+} from '../../core/exchange/market-metadata';
 import type { ExchangeMarketDataProvider } from '../../core/exchange/provider.interfaces';
 import {
   createFreshnessMetadata,
@@ -48,6 +61,7 @@ import { publicMarketDataStore } from '../../modules/public-market/market.data.s
 import type { NormalizedMarketTicker, NormalizedMarketTrade } from '../../modules/public-market/market.types';
 import { logger } from '../../utils/logger';
 import { AppError } from '../../utils/errors';
+import { buildMarketDataError } from './market-data.errors';
 
 type FreshMarketData<T> = T & {
   dataMode: 'streaming' | 'snapshot' | 'cached_snapshot';
@@ -62,6 +76,38 @@ type FreshMarketData<T> = T & {
 export type MarketCandlesResponse = {
   items: Array<FreshMarketData<CanonicalCandle>>;
   meta: CandleResponseMeta;
+  metadata: MarketResponseMetadata;
+};
+
+type MarketLookupRequest = string | { symbol?: string; marketId?: string };
+
+type MarketAvailabilityState = 'available' | 'unavailable' | 'unsupported';
+
+type MarketAvailability = {
+  candles: MarketAvailabilityState;
+  orderbook: MarketAvailabilityState;
+  trades: MarketAvailabilityState;
+};
+
+type MarketResponseMetadata = CanonicalMarketMetadata & {
+  availability: MarketAvailability;
+  isChartAvailable: boolean;
+  isOrderBookAvailable: boolean;
+  isTradesAvailable: boolean;
+  unavailableReason: string | null;
+};
+
+export type MarketTradesResponse = {
+  items: Array<FreshMarketData<CanonicalTrade>>;
+  total: number;
+  metadata: MarketResponseMetadata;
+};
+
+export type MarketSummaryResponse = {
+  metadata: MarketResponseMetadata;
+  latestTicker: FreshMarketData<CanonicalTickerSnapshot> | null;
+  market: MarketResponseMetadata;
+  updatedAt: number | null;
 };
 
 type SparklinePoint = {
@@ -114,6 +160,119 @@ function assertSupportedSymbol(symbol: string) {
     throw new AppError(400, 'symbol is required');
   }
   return normalized;
+}
+
+function normalizeMarketLookupRequest(input: MarketLookupRequest): { symbol?: string; marketId?: string } {
+  return typeof input === 'string' ? { symbol: input } : input;
+}
+
+function buildAvailability(metadata: CanonicalMarketMetadata, unavailable?: {
+  target: 'candles' | 'orderbook' | 'trades';
+  reason?: string | null;
+}): MarketResponseMetadata {
+  const availability: MarketAvailability = {
+    candles: metadata.capabilities.supportsCandles ? 'available' : 'unsupported',
+    orderbook: metadata.capabilities.supportsOrderBook ? 'available' : 'unsupported',
+    trades: metadata.capabilities.supportsTrades ? 'available' : 'unsupported',
+  };
+
+  if (unavailable && availability[unavailable.target] === 'available') {
+    availability[unavailable.target] = 'unavailable';
+  }
+
+  return {
+    ...metadata,
+    availability,
+    isChartAvailable: availability.candles === 'available',
+    isOrderBookAvailable: availability.orderbook === 'available',
+    isTradesAvailable: availability.trades === 'available',
+    unavailableReason: unavailable?.reason ?? null,
+  };
+}
+
+function applyMetadataToCanonicalMarket<T extends {
+  exchange: ExchangeId;
+  symbol: string;
+  market: string;
+  baseCurrency: string;
+  quoteCurrency: QuoteCurrency;
+  rawSymbol: string;
+}>(item: T, metadata: CanonicalMarketMetadata): T & CanonicalMarketMetadata {
+  return {
+    ...item,
+    ...metadata,
+    symbol: metadata.canonicalSymbol,
+    market: metadata.displaySymbol,
+    baseCurrency: metadata.baseAsset,
+    quoteCurrency: metadata.quoteAsset,
+    rawSymbol: metadata.rawSymbol,
+    nameKo: metadata.koreanName ?? undefined,
+    nameEn: metadata.englishName ?? undefined,
+  };
+}
+
+function buildCapabilitiesBySymbol(snapshot: MarketCapabilitySnapshot, symbols: string[]) {
+  return new Map(symbols.map((symbol) => [symbol, buildCapabilityFlags(snapshot, symbol)]));
+}
+
+async function resolveMarketForRequest(
+  exchange: ExchangeId,
+  request: MarketLookupRequest,
+  target: 'candles' | 'orderbook' | 'trades' | 'summary',
+): Promise<{
+  provider: ExchangeMarketDataProvider;
+  market: ExchangeMarketDescriptor;
+  metadata: CanonicalMarketMetadata;
+  responseMetadata: MarketResponseMetadata;
+}> {
+  const provider = exchangeProviderRegistry.getMarketDataProvider(exchange);
+  let markets: ExchangeMarketDescriptor[];
+  let capabilitySnapshot: MarketCapabilitySnapshot;
+  try {
+    markets = (await provider.listMarkets()).filter((market) => market.tradable !== false);
+    capabilitySnapshot = await resolveCapabilitySnapshot(provider, markets);
+  } catch (error) {
+    throw buildMarketDataError({
+      code: 'MARKET_DATA_UNAVAILABLE',
+      target,
+      exchange,
+      reason: error instanceof Error ? error.message : String(error),
+      retryable: true,
+    });
+  }
+  const capabilitiesBySymbol = buildCapabilitiesBySymbol(
+    capabilitySnapshot,
+    markets.map((market) => market.symbol),
+  );
+  const resolved = resolveExchangeMarketInput({
+    exchange,
+    markets,
+    input: normalizeMarketLookupRequest(request),
+    capabilitiesBySymbol,
+  });
+
+  if (!resolved.ok) {
+    const reason = resolved.reason === 'MARKET_ID_NOT_FOUND'
+      ? `marketId ${resolved.input} is not listed on ${exchange}`
+      : resolved.reason === 'SYMBOL_NOT_FOUND'
+        ? `symbol ${resolved.input} could not be resolved to a listed ${exchange} market`
+        : 'marketId or symbol is required';
+    throw buildMarketDataError({
+      code: 'MARKET_DATA_UNSUPPORTED',
+      target,
+      exchange,
+      reason,
+      retryable: false,
+      statusCode: 400,
+    });
+  }
+
+  return {
+    provider,
+    market: resolved.market,
+    metadata: resolved.metadata,
+    responseMetadata: buildAvailability(resolved.metadata),
+  };
 }
 
 function extractUpstreamStatus(error: unknown) {
@@ -249,6 +408,24 @@ function summarizeDroppedReasons(droppedSymbols: Array<{ reason: string }>) {
   }, {});
 }
 
+function summarizeAssetImageReasons(items: Array<{ reason?: string | null }>) {
+  return items.reduce<Record<string, number>>((summary, item) => {
+    if (!item.reason) {
+      return summary;
+    }
+    summary[item.reason] = (summary[item.reason] ?? 0) + 1;
+    return summary;
+  }, {});
+}
+
+function toImageCoverageRate(withImageCount: number, totalCount: number) {
+  if (totalCount === 0) {
+    return 0;
+  }
+
+  return Number(((withImageCount / totalCount) * 100).toFixed(2));
+}
+
 const MARKET_CAPABILITY_CHANNELS: MarketCapabilityChannel[] = ['tickers', 'orderbook', 'trades', 'candles'];
 const EXCHANGE_CAPABILITY_BY_CHANNEL = {
   tickers: 'market:ticker',
@@ -257,20 +434,33 @@ const EXCHANGE_CAPABILITY_BY_CHANNEL = {
   candles: 'market:candles',
 } as const;
 
-type MarketCapabilityFlags = Record<MarketCapabilityChannel, boolean>;
+type MarketCapabilityFlags = Record<MarketCapabilityChannel, boolean> & CanonicalMarketCapabilities;
 
 type MarketUniverseItem = {
   exchange: ExchangeId;
   exchangeName: string;
+  marketId: string;
+  rawSymbol: string;
+  canonicalSymbol: string;
+  baseAsset: string;
+  quoteAsset: QuoteCurrency;
+  displaySymbol: string;
+  koreanName: string | null;
+  englishName: string | null;
+  iconUrl: string | null;
+  isActive: boolean;
   symbol: string;
-  canonicalAssetKey: string;
+  canonicalAssetKey: string | null;
   exchangeSymbol: string;
   market: string;
   baseCurrency: string;
   quoteCurrency: QuoteCurrency;
-  rawSymbol: string;
   tradable: boolean;
   capabilities: MarketCapabilityFlags;
+  isChartAvailable: boolean;
+  isOrderBookAvailable: boolean;
+  isTradesAvailable: boolean;
+  unavailableReason: string | null;
   kimchiComparable: boolean;
   kimchiComparisonReason: MarketSymbolSupportEntry['kimchiComparisonReason'];
   nameKo?: string;
@@ -282,8 +472,28 @@ type MarketTickerItem = MarketTickerRow & Omit<
   MarketUniverseItem,
   'exchange' | 'symbol' | 'market' | 'baseCurrency' | 'quoteCurrency' | 'rawSymbol'
 > & {
+  imageUrl: string | null;
+  imageURL: string | null;
+  hasImage: boolean;
   assetImageUrl: string | null;
+  imageAvailability: AssetImageAvailability;
+  imageFailureReason: string | null;
+  fallbackType: string | null;
+  assetType: string | null;
+  canonicalName: string | null;
+  fallbackColor: string | null;
+  fallbackInitials: string | null;
 };
+
+type AssetImageProjectionReason =
+  | 'canonical_key_missing'
+  | 'alias_miss'
+  | 'metadata_missing'
+  | 'image_url_empty'
+  | 'upstream_fetch_failed';
+
+const FIRST_PAGE_VISIBLE_SYMBOL_LIMIT = 24;
+const TOP_VOLUME_SYMBOL_PRELOAD_LIMIT = 50;
 
 type DroppedSymbolEntry = {
   exchange: ExchangeId;
@@ -321,16 +531,28 @@ export type MarketSnapshotTrend = 'up' | 'down' | 'flat' | 'unknown';
 export type MarketSnapshotItem = {
   exchange: ExchangeId;
   exchangeName: string;
+  marketId: string;
+  rawSymbol: string | null;
+  canonicalSymbol: string;
+  baseAsset: string | null;
+  quoteAsset: QuoteCurrency | null;
   symbol: string;
   displaySymbol: string;
   displayName: string;
   canonicalAssetKey: string | null;
+  iconUrl: string | null;
   assetImageUrl: string | null;
+  imageAvailability?: AssetImageAvailability;
+  imageFailureReason?: string | null;
+  fallbackType?: string | null;
+  assetType?: string | null;
+  canonicalName?: string | null;
+  fallbackColor?: string | null;
+  fallbackInitials?: string | null;
   exchangeSymbol: string | null;
   market: string | null;
   baseCurrency: string | null;
   quoteCurrency: QuoteCurrency | null;
-  rawSymbol: string | null;
   price: number | null;
   change24h: number | null;
   signedChangeRate: number | null;
@@ -350,6 +572,12 @@ export type MarketSnapshotItem = {
   errorMessage: string | null;
   registryMapped: boolean;
   tradable: boolean;
+  isActive: boolean;
+  capabilities: MarketCapabilityFlags;
+  isChartAvailable: boolean;
+  isOrderBookAvailable: boolean;
+  isTradesAvailable: boolean;
+  unavailableReason: string | null;
   kimchiComparable: boolean;
   kimchiComparisonReason: MarketSymbolSupportEntry['kimchiComparisonReason'];
 };
@@ -377,11 +605,24 @@ export type MarketDisplayStatus = 'fresh' | 'delayed' | 'partial' | 'unavailable
 export type MarketViewportRow = {
   selectedExchange: ExchangeId;
   sourceExchange: ExchangeId | null;
+  marketId: string | null;
+  rawSymbol: string | null;
+  canonicalSymbol: string;
+  baseAsset: string | null;
+  quoteAsset: QuoteCurrency | null;
   symbol: string;
   displaySymbol: string;
   displayName: string;
   canonicalAssetKey: string | null;
+  iconUrl: string | null;
   assetImageUrl: string | null;
+  imageAvailability?: AssetImageAvailability;
+  imageFailureReason?: string | null;
+  fallbackType?: string | null;
+  assetType?: string | null;
+  canonicalName?: string | null;
+  fallbackColor?: string | null;
+  fallbackInitials?: string | null;
   exchangeSymbol: string | null;
   market: string | null;
   baseCurrency: string | null;
@@ -394,6 +635,12 @@ export type MarketViewportRow = {
   updatedAt: number | null;
   displayStatus: MarketDisplayStatus;
   partial: boolean;
+  isActive: boolean;
+  capabilities?: MarketCapabilityFlags;
+  isChartAvailable: boolean;
+  isOrderBookAvailable: boolean;
+  isTradesAvailable: boolean;
+  unavailableReason: string | null;
   sparkline?: number[] | null;
   sparklinePointCount?: number | null;
   debugReasons?: string[];
@@ -473,11 +720,24 @@ export type MarketSparklineResponse = {
     MarketViewportRow,
     | 'selectedExchange'
     | 'sourceExchange'
+    | 'marketId'
+    | 'rawSymbol'
+    | 'canonicalSymbol'
+    | 'baseAsset'
+    | 'quoteAsset'
     | 'symbol'
     | 'displaySymbol'
     | 'displayName'
     | 'canonicalAssetKey'
+    | 'iconUrl'
     | 'assetImageUrl'
+    | 'imageAvailability'
+    | 'imageFailureReason'
+    | 'fallbackType'
+    | 'assetType'
+    | 'canonicalName'
+    | 'fallbackColor'
+    | 'fallbackInitials'
     | 'representative'
     | 'updatedAt'
     | 'displayStatus'
@@ -499,11 +759,24 @@ type MarketSymbolRequestFailure = {
 export type MarketBaseSnapshotItem = {
   selectedExchange: ExchangeId;
   sourceExchange: ExchangeId | null;
+  marketId: string | null;
+  rawSymbol: string | null;
+  canonicalSymbol: string;
+  baseAsset: string | null;
+  quoteAsset: QuoteCurrency | null;
   symbol: string;
   displaySymbol: string;
   displayName: string;
   canonicalAssetKey: string | null;
+  iconUrl: string | null;
   assetImageUrl: string | null;
+  imageAvailability?: AssetImageAvailability;
+  imageFailureReason?: string | null;
+  fallbackType?: string | null;
+  assetType?: string | null;
+  canonicalName?: string | null;
+  fallbackColor?: string | null;
+  fallbackInitials?: string | null;
   exchangeSymbol: string | null;
   market: string | null;
   baseCurrency: string | null;
@@ -521,6 +794,12 @@ export type MarketBaseSnapshotItem = {
   source: Exclude<SnapshotSource, 'mixed'>;
   representative: boolean;
   tradable: boolean;
+  isActive: boolean;
+  capabilities: MarketCapabilityFlags;
+  isChartAvailable: boolean;
+  isOrderBookAvailable: boolean;
+  isTradesAvailable: boolean;
+  unavailableReason: string | null;
   kimchiComparable: boolean;
   errorCode: SnapshotErrorCode | null;
   errorMessage: string | null;
@@ -547,11 +826,24 @@ export type MarketBaseSnapshotResponse = {
 };
 
 export type ComparableKimchiSymbolItem = {
+  marketId: string | null;
+  rawSymbol: string | null;
+  canonicalSymbol: string;
+  baseAsset: string | null;
+  quoteAsset: QuoteCurrency | null;
   symbol: string;
   displaySymbol: string;
   displayName: string;
   canonicalAssetKey: string | null;
+  iconUrl: string | null;
   assetImageUrl: string | null;
+  imageAvailability?: AssetImageAvailability;
+  imageFailureReason?: string | null;
+  fallbackType?: string | null;
+  assetType?: string | null;
+  canonicalName?: string | null;
+  fallbackColor?: string | null;
+  fallbackInitials?: string | null;
   market: string | null;
   exchangeSymbol: string | null;
   price: number | null;
@@ -649,13 +941,17 @@ async function resolveCapabilitySnapshot(
 }
 
 function buildCapabilityFlags(snapshot: MarketCapabilitySnapshot, symbol: string): MarketCapabilityFlags {
-  return MARKET_CAPABILITY_CHANNELS.reduce<MarketCapabilityFlags>(
+  const channelFlags = MARKET_CAPABILITY_CHANNELS.reduce<Record<MarketCapabilityChannel, boolean>>(
     (summary, channel) => {
       summary[channel] = (snapshot.capabilitySymbols[channel] ?? []).includes(symbol);
       return summary;
     },
     { tickers: false, orderbook: false, trades: false, candles: false },
   );
+  return {
+    ...channelFlags,
+    ...toCanonicalMarketCapabilities(channelFlags),
+  };
 }
 
 function resolveKimchiMetadata(params: {
@@ -709,21 +1005,51 @@ async function buildProviderMarketUniverse(
   const marketSymbolSet = new Set(marketSymbols);
 
   const items = listedMarkets.map<MarketUniverseItem>((market) => {
-    const coin = COIN_MAP.get(market.symbol);
     const quoteCurrency = market.quoteCurrency ?? provider.metadata.quoteCurrency;
     const exchangeSymbol = market.exchangeSymbol ?? market.rawSymbol;
+    const capabilities = buildCapabilityFlags(capabilitySnapshot, market.symbol);
+    const metadata = buildCanonicalMarketMetadataFromDescriptor({
+      exchange: provider.exchange,
+      market: {
+        ...market,
+        exchangeSymbol,
+        quoteCurrency,
+      },
+      capabilities,
+    });
+    const assetResolution = resolveCanonicalAssetImageKey({
+      exchange: provider.exchange,
+      symbol: market.symbol,
+      exchangeSymbol,
+      rawSymbol: market.rawSymbol ?? exchangeSymbol,
+    });
+    const canonicalAssetKey = assetResolution.canonicalAssetKey;
+    const coin = COIN_MAP.get(canonicalAssetKey ?? market.symbol) ?? COIN_MAP.get(market.symbol);
     return {
       exchange: provider.exchange,
       exchangeName: provider.metadata.displayName,
+      marketId: metadata.marketId,
+      rawSymbol: metadata.rawSymbol,
+      canonicalSymbol: metadata.canonicalSymbol,
+      baseAsset: metadata.baseAsset,
+      quoteAsset: metadata.quoteAsset,
+      displaySymbol: metadata.displaySymbol,
+      koreanName: metadata.koreanName,
+      englishName: metadata.englishName,
+      iconUrl: canonicalAssetKey ? resolveIconUrl(canonicalAssetKey) ?? metadata.iconUrl : metadata.iconUrl,
+      isActive: metadata.isActive,
       symbol: market.symbol,
-      canonicalAssetKey: market.symbol,
+      canonicalAssetKey,
       exchangeSymbol,
       market: market.market,
       baseCurrency: market.baseCurrency ?? market.symbol,
       quoteCurrency,
-      rawSymbol: market.rawSymbol,
       tradable: market.tradable ?? true,
-      capabilities: buildCapabilityFlags(capabilitySnapshot, market.symbol),
+      capabilities,
+      isChartAvailable: capabilities.supportsCandles,
+      isOrderBookAvailable: capabilities.supportsOrderBook,
+      isTradesAvailable: capabilities.supportsTrades,
+      unavailableReason: null,
       ...resolveKimchiMetadata({
         exchange: provider.exchange,
         quoteCurrency,
@@ -732,7 +1058,7 @@ async function buildProviderMarketUniverse(
       }),
       nameKo: coin?.nameKo,
       nameEn: coin?.nameEn,
-      registryMapped: COIN_MAP.has(market.symbol),
+      registryMapped: canonicalAssetKey ? COIN_MAP.has(canonicalAssetKey) : COIN_MAP.has(market.symbol),
     };
   });
 
@@ -1231,7 +1557,7 @@ function computeWebsocketMergeLagMs(rows: Array<{ updatedAt: number | null }>) {
 
 function fromCachedTicker(item: ReturnType<typeof publicMarketDataStore.getTickers>[number]): CanonicalTickerSnapshot {
   return {
-    exchange: item.exchange as ExchangeId,
+    ...toCanonicalMarket(item.exchange as ExchangeId, item.symbol),
     symbol: item.symbol,
     market: item.market,
     baseCurrency: item.baseCurrency,
@@ -1280,16 +1606,21 @@ function createSnapshotItemFromTicker(market: MarketUniverseItem, ticker: Market
   return {
     exchange: ticker.exchange,
     exchangeName: market.exchangeName,
+    marketId: market.marketId,
+    rawSymbol: ticker.rawSymbol,
+    canonicalSymbol: market.canonicalSymbol,
+    baseAsset: ticker.baseAsset,
+    quoteAsset: ticker.quoteAsset,
     symbol: ticker.symbol,
-    displaySymbol: ticker.symbol,
+    displaySymbol: market.displaySymbol,
     displayName: getSnapshotDisplayName(market),
     canonicalAssetKey: market.canonicalAssetKey,
-    assetImageUrl: null,
+    iconUrl: market.iconUrl,
+    assetImageUrl: market.iconUrl,
     exchangeSymbol: market.exchangeSymbol,
     market: ticker.market,
     baseCurrency: ticker.baseCurrency,
     quoteCurrency: ticker.quoteCurrency,
-    rawSymbol: ticker.rawSymbol,
     price: ticker.price,
     change24h: ticker.change24h,
     signedChangeRate: ticker.change24h,
@@ -1309,6 +1640,12 @@ function createSnapshotItemFromTicker(market: MarketUniverseItem, ticker: Market
     errorMessage: stale ? `${ticker.symbol} snapshot is stale` : null,
     registryMapped: market.registryMapped,
     tradable: market.tradable,
+    isActive: market.isActive,
+    capabilities: market.capabilities,
+    isChartAvailable: market.isChartAvailable,
+    isOrderBookAvailable: market.isOrderBookAvailable,
+    isTradesAvailable: market.isTradesAvailable,
+    unavailableReason: market.unavailableReason,
     kimchiComparable: market.kimchiComparable,
     kimchiComparisonReason: market.kimchiComparisonReason,
   };
@@ -1322,16 +1659,21 @@ function createPendingSnapshotItem(
   return {
     exchange: market.exchange,
     exchangeName: market.exchangeName,
+    marketId: market.marketId,
+    rawSymbol: market.rawSymbol,
+    canonicalSymbol: market.canonicalSymbol,
+    baseAsset: market.baseAsset,
+    quoteAsset: market.quoteAsset,
     symbol: market.symbol,
-    displaySymbol: market.symbol,
+    displaySymbol: market.displaySymbol,
     displayName: getSnapshotDisplayName(market),
     canonicalAssetKey: market.canonicalAssetKey,
-    assetImageUrl: null,
+    iconUrl: market.iconUrl,
+    assetImageUrl: market.iconUrl,
     exchangeSymbol: market.exchangeSymbol,
     market: market.market,
     baseCurrency: market.baseCurrency,
     quoteCurrency: market.quoteCurrency,
-    rawSymbol: market.rawSymbol,
     price: null,
     change24h: null,
     signedChangeRate: null,
@@ -1351,6 +1693,12 @@ function createPendingSnapshotItem(
     errorMessage: message,
     registryMapped: market.registryMapped,
     tradable: market.tradable,
+    isActive: market.isActive,
+    capabilities: market.capabilities,
+    isChartAvailable: market.isChartAvailable,
+    isOrderBookAvailable: market.isOrderBookAvailable,
+    isTradesAvailable: market.isTradesAvailable,
+    unavailableReason: reason ?? null,
     kimchiComparable: market.kimchiComparable,
     kimchiComparisonReason: market.kimchiComparisonReason,
   };
@@ -1554,11 +1902,17 @@ function buildMarketViewportRow(params: {
   return {
     selectedExchange: params.exchange,
     sourceExchange: params.tickerRow.exchange,
+    marketId: params.market.marketId,
+    rawSymbol: params.tickerRow.rawSymbol,
+    canonicalSymbol: params.market.canonicalSymbol,
+    baseAsset: params.tickerRow.baseAsset,
+    quoteAsset: params.tickerRow.quoteAsset,
     symbol: params.market.symbol,
-    displaySymbol: params.market.symbol,
+    displaySymbol: params.market.displaySymbol,
     displayName: getSnapshotDisplayName(params.market),
     canonicalAssetKey: params.market.canonicalAssetKey,
-    assetImageUrl: null,
+    iconUrl: params.market.iconUrl,
+    assetImageUrl: params.market.iconUrl,
     exchangeSymbol: params.market.exchangeSymbol,
     market: params.market.market,
     baseCurrency: params.market.baseCurrency,
@@ -1571,6 +1925,12 @@ function buildMarketViewportRow(params: {
     updatedAt: params.tickerRow.sourceTimestamp,
     displayStatus: status.displayStatus,
     partial: status.partial,
+    isActive: params.market.isActive,
+    capabilities: params.market.capabilities,
+    isChartAvailable: params.market.isChartAvailable,
+    isOrderBookAvailable: params.market.isOrderBookAvailable,
+    isTradesAvailable: params.market.isTradesAvailable,
+    unavailableReason: params.market.unavailableReason,
     sparkline,
     sparklinePointCount: params.includeSparkline ? params.tickerRow.sparklinePoints.length : null,
     debugReasons: params.debug ? debugReasons : undefined,
@@ -1605,11 +1965,24 @@ function buildMarketViewportRowFromSnapshotItem(params: {
   return {
     selectedExchange: params.exchange,
     sourceExchange: params.item.exchange,
+    marketId: params.item.marketId,
+    rawSymbol: params.item.rawSymbol,
+    canonicalSymbol: params.item.canonicalSymbol,
+    baseAsset: params.item.baseAsset,
+    quoteAsset: params.item.quoteAsset,
     symbol: params.item.symbol,
     displaySymbol: params.item.displaySymbol,
     displayName: params.item.displayName,
     canonicalAssetKey: params.item.canonicalAssetKey,
+    iconUrl: params.item.iconUrl,
     assetImageUrl: params.item.assetImageUrl,
+    imageAvailability: params.item.imageAvailability,
+    imageFailureReason: params.item.imageFailureReason,
+    fallbackType: params.item.fallbackType,
+    assetType: params.item.assetType,
+    canonicalName: params.item.canonicalName,
+    fallbackColor: params.item.fallbackColor,
+    fallbackInitials: params.item.fallbackInitials,
     exchangeSymbol: params.item.exchangeSymbol,
     market: params.item.market,
     baseCurrency: params.item.baseCurrency,
@@ -1622,6 +1995,12 @@ function buildMarketViewportRowFromSnapshotItem(params: {
     updatedAt: params.item.asOf ?? params.item.timestamp,
     displayStatus,
     partial: displayStatus === 'partial' || displayStatus === 'unavailable' || (params.includeSparkline && !hasRenderableSparkline),
+    isActive: params.item.isActive,
+    capabilities: params.item.capabilities,
+    isChartAvailable: params.item.isChartAvailable,
+    isOrderBookAvailable: params.item.isOrderBookAvailable,
+    isTradesAvailable: params.item.isTradesAvailable,
+    unavailableReason: params.item.unavailableReason,
     sparkline: params.includeSparkline && hasRenderableSparkline
       ? sparklinePoints.map((point) => point.price)
       : null,
@@ -1638,11 +2017,24 @@ function buildBaseSnapshotItem(params: {
   return {
     selectedExchange: params.exchange,
     sourceExchange: params.item.exchange,
+    marketId: params.item.marketId,
+    rawSymbol: params.item.rawSymbol,
+    canonicalSymbol: params.item.canonicalSymbol,
+    baseAsset: params.item.baseAsset,
+    quoteAsset: params.item.quoteAsset,
     symbol: params.item.symbol,
     displaySymbol: params.item.displaySymbol,
     displayName: params.item.displayName,
     canonicalAssetKey: params.item.canonicalAssetKey,
+    iconUrl: params.item.iconUrl,
     assetImageUrl: params.item.assetImageUrl,
+    imageAvailability: params.item.imageAvailability,
+    imageFailureReason: params.item.imageFailureReason,
+    fallbackType: params.item.fallbackType,
+    assetType: params.item.assetType,
+    canonicalName: params.item.canonicalName,
+    fallbackColor: params.item.fallbackColor,
+    fallbackInitials: params.item.fallbackInitials,
     exchangeSymbol: params.item.exchangeSymbol,
     market: params.item.market,
     baseCurrency: params.item.baseCurrency,
@@ -1660,42 +2052,299 @@ function buildBaseSnapshotItem(params: {
     source: params.item.source,
     representative: params.representativeSymbols.has(params.item.symbol),
     tradable: params.item.tradable,
+    isActive: params.item.isActive,
+    capabilities: params.item.capabilities,
+    isChartAvailable: params.item.isChartAvailable,
+    isOrderBookAvailable: params.item.isOrderBookAvailable,
+    isTradesAvailable: params.item.isTradesAvailable,
+    unavailableReason: params.item.unavailableReason,
     kimchiComparable: params.item.kimchiComparable,
     errorCode: params.item.errorCode,
     errorMessage: params.item.errorMessage,
   };
 }
 
+function buildAssetImageClientKey(exchange: string | null | undefined, symbol: string) {
+  return exchange ? `${exchange}:${symbol}` : symbol;
+}
+
+function isDefaultPlaceholderAssetImage(view: AssetMetadataView | undefined, imageUrl: string | null | undefined) {
+  return Boolean(imageUrl)
+    && (view?.fallbackType === 'default_placeholder'
+      || view?.source === 'placeholder'
+      || imageUrl === DEFAULT_COIN_PLACEHOLDER_ICON_URL);
+}
+
+function toUsableAssetImageUrl(view: AssetMetadataView | undefined, fallbackUrl: string | null | undefined) {
+  const imageUrl = view?.assetImageUrl ?? fallbackUrl ?? null;
+  return isDefaultPlaceholderAssetImage(view, imageUrl) ? null : imageUrl;
+}
+
+function toProjectedImageAvailability(view: AssetMetadataView | undefined, assetImageUrl: string | null, canonicalAssetKey?: string | null): AssetImageAvailability {
+  if (assetImageUrl) {
+    return view?.fallbackHit ? 'fallback' : 'available';
+  }
+  return view?.imageAvailability ?? (canonicalAssetKey ? 'pending' : 'unavailable');
+}
+
+function buildAssetMetadataProjection(view: AssetMetadataView | undefined, assetImageUrl: string | null, canonicalAssetKey?: string | null) {
+  return {
+    imageAvailability: toProjectedImageAvailability(view, assetImageUrl, canonicalAssetKey),
+    imageFailureReason: view?.failureReason ?? null,
+    fallbackType: view?.fallbackType ?? null,
+    assetType: view?.assetType ?? null,
+    canonicalName: view?.canonicalName ?? null,
+    fallbackColor: view?.fallbackColor ?? null,
+    fallbackInitials: view?.fallbackInitials ?? null,
+  };
+}
+
 function logAssetImageProjection(params: {
   route: string;
+  exchange?: string | null;
   symbol: string;
   canonicalAssetKey: string | null | undefined;
   assetImageUrl: string | null | undefined;
+  imageAvailability?: AssetImageAvailability | null;
+  failureReason?: string | null;
+  reason?: string | null;
+  fallbackType?: string | null;
+  fallbackHit?: boolean;
+  source?: string | null;
 }) {
+  const hasImage = Boolean(params.assetImageUrl);
+  const reason = !hasImage ? params.reason ?? 'metadata_missing' : null;
+  const clientSymbolKey = buildAssetImageClientKey(params.exchange, params.symbol);
+
+  if (hasImage) {
+    logger.info(
+      {
+        domain: 'asset-image',
+        action: 'image_hit',
+        route: params.route,
+        exchange: params.exchange ?? null,
+        symbol: params.symbol,
+        clientSymbolKey,
+        canonicalAssetKey: params.canonicalAssetKey ?? null,
+        imageAvailability: params.imageAvailability ?? null,
+        failureReason: params.failureReason ?? null,
+        fallbackType: params.fallbackType ?? null,
+        fallbackHit: params.fallbackHit ?? false,
+        source: params.source ?? null,
+      },
+      `[AssetImageDebug] action=image_hit exchange=${params.exchange ?? 'null'} symbol=${params.symbol} canonicalAssetKey=${params.canonicalAssetKey ?? 'null'}`,
+    );
+  } else {
+    logger.info(
+      {
+        domain: 'asset-image',
+        action: 'image_miss',
+        route: params.route,
+        exchange: params.exchange ?? null,
+        symbol: params.symbol,
+        clientSymbolKey,
+        canonicalAssetKey: params.canonicalAssetKey ?? null,
+        imageAvailability: params.imageAvailability ?? null,
+        failureReason: params.failureReason ?? reason,
+        reason,
+        fallbackType: params.fallbackType ?? null,
+        fallbackHit: params.fallbackHit ?? false,
+        source: params.source ?? null,
+      },
+      `[AssetImageDebug] action=image_miss exchange=${params.exchange ?? 'null'} symbol=${params.symbol} canonicalAssetKey=${params.canonicalAssetKey ?? 'null'} reason=${reason}`,
+    );
+  }
+
   logger.info(
     {
       domain: 'asset-image',
       action: 'projection_included',
       route: params.route,
+      exchange: params.exchange ?? null,
       symbol: params.symbol,
+      clientSymbolKey,
       canonicalAssetKey: params.canonicalAssetKey ?? null,
-      hasImage: Boolean(params.assetImageUrl),
+      hasImage,
+      imageAvailability: params.imageAvailability ?? null,
+      failureReason: params.failureReason ?? reason,
+      reason,
+      fallbackType: params.fallbackType ?? null,
+      fallbackHit: params.fallbackHit ?? false,
+      source: params.source ?? null,
     },
-    `[AssetImageDebug] action=projection_included route=${params.route} symbol=${params.symbol} canonicalAssetKey=${params.canonicalAssetKey ?? 'null'} hasImage=${Boolean(params.assetImageUrl)}`,
+    `[AssetImageDebug] action=projection_included route=${params.route} symbol=${params.symbol} canonicalAssetKey=${params.canonicalAssetKey ?? 'null'} hasImage=${hasImage} availability=${params.imageAvailability ?? 'null'} reason=${reason ?? 'null'} fallbackHit=${params.fallbackHit ?? false}`,
+  );
+}
+
+function logAssetImageCoverageSummary(params: {
+  route: string;
+  exchange: string;
+  scope: 'exchange' | 'first_page_visible' | 'top_volume' | 'response';
+  items: Array<{ assetImageUrl?: string | null; reason?: string | null }>;
+}) {
+  const withImageCount = params.items.filter((item) => Boolean(item.assetImageUrl)).length;
+  const coverage = toImageCoverageRate(withImageCount, params.items.length);
+
+  logger.info(
+    {
+      domain: 'asset-image',
+      action: 'coverage_summary',
+      route: params.route,
+      exchange: params.exchange,
+      scope: params.scope,
+      totalCount: params.items.length,
+      withImageCount,
+      withoutImageCount: params.items.length - withImageCount,
+      coverage,
+      falseReasonStats: summarizeAssetImageReasons(params.items),
+    },
+    `[AssetImageDebug] action=coverage_summary exchange=${params.exchange} total=${params.items.length} withImage=${withImageCount} coverage=${coverage}`,
   );
 }
 
 function logAssetImageProjectionBatch(
   route: string,
-  items: Array<{ symbol: string; canonicalAssetKey?: string | null; assetImageUrl?: string | null }>,
+  items: Array<{
+    exchange?: string | null;
+    symbol: string;
+    canonicalAssetKey?: string | null;
+    assetImageUrl?: string | null;
+    imageAvailability?: AssetImageAvailability | null;
+    failureReason?: string | null;
+    reason?: string | null;
+    fallbackType?: string | null;
+    fallbackHit?: boolean;
+    source?: string | null;
+    volume24h?: number | null;
+  }>,
 ) {
   for (const item of items) {
     logAssetImageProjection({
       route,
+      exchange: item.exchange,
       symbol: item.symbol,
       canonicalAssetKey: item.canonicalAssetKey,
       assetImageUrl: item.assetImageUrl,
+      imageAvailability: item.imageAvailability,
+      failureReason: item.failureReason,
+      reason: item.reason,
+      fallbackType: item.fallbackType,
+      fallbackHit: item.fallbackHit,
+      source: item.source,
     });
+  }
+
+  const withImageCount = items.filter((item) => Boolean(item.assetImageUrl)).length;
+  const withoutImageItems = items.filter((item) => !item.assetImageUrl);
+  const falseReasonStats = withoutImageItems.reduce<Record<string, number>>((acc, item) => {
+    const reason = item.reason ?? 'missing_metadata';
+    acc[reason] = (acc[reason] ?? 0) + 1;
+    return acc;
+  }, {});
+  const fallbackHitCount = items.filter((item) => item.fallbackHit).length;
+  const coverageRate = items.length === 0 ? 0 : Number(((withImageCount / items.length) * 100).toFixed(2));
+
+  logger.info(
+    {
+      domain: 'asset-image',
+      action: 'projection_summary',
+      route,
+      totalCount: items.length,
+      withImageCount,
+      withoutImageCount: items.length - withImageCount,
+      coverageRate,
+      fallbackHitCount,
+      falseReasonStats,
+    },
+    `[AssetImageDebug] action=projection_summary route=${route} total=${items.length} withImage=${withImageCount} coverageRate=${coverageRate}`,
+  );
+
+  const itemsByExchange = items.reduce<Map<string, typeof items>>((grouped, item) => {
+    const exchange = item.exchange ?? 'unknown';
+    const bucket = grouped.get(exchange) ?? [];
+    bucket.push(item);
+    grouped.set(exchange, bucket);
+    return grouped;
+  }, new Map<string, typeof items>());
+
+  for (const [exchange, exchangeItems] of itemsByExchange.entries()) {
+    logAssetImageCoverageSummary({
+      route,
+      exchange,
+      scope: 'exchange',
+      items: exchangeItems,
+    });
+  }
+
+  if (route === '/market/tickers') {
+    const firstPageVisibleItems = items.slice(0, FIRST_PAGE_VISIBLE_SYMBOL_LIMIT);
+    const topVolumeItems = [...items]
+      .sort((left, right) => (right.volume24h ?? 0) - (left.volume24h ?? 0))
+      .slice(0, FIRST_PAGE_VISIBLE_SYMBOL_LIMIT);
+    logAssetImageCoverageSummary({
+      route,
+      exchange: 'all',
+      scope: 'first_page_visible',
+      items: firstPageVisibleItems,
+    });
+    logAssetImageCoverageSummary({
+      route,
+      exchange: 'all',
+      scope: 'top_volume',
+      items: topVolumeItems,
+    });
+  }
+}
+
+function toAssetImageProjectionReason(params: {
+  canonicalAssetKey?: string | null;
+  failureReason?: string | null;
+}): AssetImageProjectionReason {
+  if (!params.canonicalAssetKey) {
+    return 'canonical_key_missing';
+  }
+
+  switch (params.failureReason) {
+    case 'alias_not_found':
+      return 'alias_miss';
+    case 'image_url_empty':
+      return 'image_url_empty';
+    case 'coingecko_fetch_failed':
+      return 'upstream_fetch_failed';
+    case 'missing_metadata':
+    default:
+      return 'metadata_missing';
+  }
+}
+
+async function getAssetViewsForProjection(
+  lookups: AssetMetadataLookup[],
+  context: string,
+): Promise<Map<string, AssetMetadataView>> {
+  const service = assetMetadataService as typeof assetMetadataService & {
+    getAssetViewsSafely?: (
+      lookups: AssetMetadataLookup[],
+      context: string,
+    ) => Promise<Map<string, AssetMetadataView>>;
+  };
+
+  if (typeof service.getAssetViewsSafely === 'function') {
+    return service.getAssetViewsSafely(lookups, context);
+  }
+
+  try {
+    return await service.getAssetViews(lookups);
+  } catch (error) {
+    logger.warn(
+      {
+        domain: 'asset-image',
+        action: 'asset_view_lookup_failed',
+        context,
+        err: error,
+      },
+      `[AssetImageDebug] action=asset_view_lookup_failed context=${context}`,
+    );
+    return new Map<string, AssetMetadataView>();
   }
 }
 
@@ -1704,20 +2353,24 @@ async function decorateMarketViewportRows(rows: MarketViewportRow[]) {
     return rows;
   }
 
-  const views = await assetMetadataService.getAssetViews(rows.map((row) => ({
+  const views = await getAssetViewsForProjection(rows.map((row) => ({
     exchange: row.selectedExchange,
     symbol: row.symbol,
     exchangeSymbol: row.exchangeSymbol,
     displayName: row.displayName,
     canonicalAssetKey: row.canonicalAssetKey,
-  })));
+  })), 'market.decorateMarketViewportRows');
 
   return rows.map((row) => {
     const view = views.get(row.canonicalAssetKey ?? row.symbol);
+    const canonicalAssetKey = view?.canonicalAssetKey ?? row.canonicalAssetKey ?? row.symbol;
+    const assetImageUrl = toUsableAssetImageUrl(view, row.assetImageUrl ?? row.iconUrl ?? null);
     return {
       ...row,
-      canonicalAssetKey: view?.canonicalAssetKey ?? row.canonicalAssetKey ?? row.symbol,
-      assetImageUrl: view?.assetImageUrl ?? row.assetImageUrl ?? null,
+      canonicalAssetKey,
+      iconUrl: assetImageUrl ?? row.iconUrl ?? null,
+      assetImageUrl,
+      ...buildAssetMetadataProjection(view, assetImageUrl, canonicalAssetKey),
     };
   });
 }
@@ -1727,20 +2380,24 @@ async function decorateMarketSnapshotItems(items: MarketSnapshotItem[]) {
     return items;
   }
 
-  const views = await assetMetadataService.getAssetViews(items.map((item) => ({
+  const views = await getAssetViewsForProjection(items.map((item) => ({
     exchange: item.exchange,
     symbol: item.symbol,
     exchangeSymbol: item.exchangeSymbol,
     displayName: item.displayName,
     canonicalAssetKey: item.canonicalAssetKey,
-  })));
+  })), 'market.decorateMarketSnapshotItems');
 
   return items.map((item) => {
     const view = views.get(item.canonicalAssetKey ?? item.symbol);
+    const canonicalAssetKey = view?.canonicalAssetKey ?? item.canonicalAssetKey ?? item.symbol;
+    const assetImageUrl = toUsableAssetImageUrl(view, item.assetImageUrl ?? item.iconUrl ?? null);
     return {
       ...item,
-      canonicalAssetKey: view?.canonicalAssetKey ?? item.canonicalAssetKey ?? item.symbol,
-      assetImageUrl: view?.assetImageUrl ?? item.assetImageUrl ?? null,
+      canonicalAssetKey,
+      iconUrl: assetImageUrl ?? item.iconUrl ?? null,
+      assetImageUrl,
+      ...buildAssetMetadataProjection(view, assetImageUrl, canonicalAssetKey),
     };
   });
 }
@@ -1750,20 +2407,24 @@ async function decorateBaseSnapshotItems(items: MarketBaseSnapshotItem[]) {
     return items;
   }
 
-  const views = await assetMetadataService.getAssetViews(items.map((item) => ({
+  const views = await getAssetViewsForProjection(items.map((item) => ({
     exchange: item.selectedExchange,
     symbol: item.symbol,
     exchangeSymbol: item.exchangeSymbol,
     displayName: item.displayName,
     canonicalAssetKey: item.canonicalAssetKey,
-  })));
+  })), 'market.decorateBaseSnapshotItems');
 
   return items.map((item) => {
     const view = views.get(item.canonicalAssetKey ?? item.symbol);
+    const canonicalAssetKey = view?.canonicalAssetKey ?? item.canonicalAssetKey ?? item.symbol;
+    const assetImageUrl = toUsableAssetImageUrl(view, item.assetImageUrl ?? item.iconUrl ?? null);
     return {
       ...item,
-      canonicalAssetKey: view?.canonicalAssetKey ?? item.canonicalAssetKey ?? item.symbol,
-      assetImageUrl: view?.assetImageUrl ?? item.assetImageUrl ?? null,
+      canonicalAssetKey,
+      iconUrl: assetImageUrl ?? item.iconUrl ?? null,
+      assetImageUrl,
+      ...buildAssetMetadataProjection(view, assetImageUrl, canonicalAssetKey),
     };
   });
 }
@@ -1773,20 +2434,24 @@ async function decorateComparableKimchiItems(exchange: ExchangeId, items: Compar
     return items;
   }
 
-  const views = await assetMetadataService.getAssetViews(items.map((item) => ({
+  const views = await getAssetViewsForProjection(items.map((item) => ({
     exchange,
     symbol: item.symbol,
     exchangeSymbol: item.exchangeSymbol,
     displayName: item.displayName,
     canonicalAssetKey: item.canonicalAssetKey,
-  })));
+  })), 'market.decorateComparableKimchiItems');
 
   return items.map((item) => {
     const view = views.get(item.canonicalAssetKey ?? item.symbol);
+    const canonicalAssetKey = view?.canonicalAssetKey ?? item.canonicalAssetKey ?? item.symbol;
+    const assetImageUrl = toUsableAssetImageUrl(view, item.assetImageUrl ?? item.iconUrl ?? null);
     return {
       ...item,
-      canonicalAssetKey: view?.canonicalAssetKey ?? item.canonicalAssetKey ?? item.symbol,
-      assetImageUrl: view?.assetImageUrl ?? item.assetImageUrl ?? null,
+      canonicalAssetKey,
+      iconUrl: assetImageUrl ?? item.iconUrl ?? null,
+      assetImageUrl,
+      ...buildAssetMetadataProjection(view, assetImageUrl, canonicalAssetKey),
     };
   });
 }
@@ -1796,22 +2461,55 @@ async function decorateMarketTickerItems(items: MarketTickerItem[]) {
     return items;
   }
 
-  const views = await assetMetadataService.getAssetViews(items.map((item) => ({
+  const views = await getAssetViewsForProjection(items.map((item) => ({
     exchange: item.exchange,
     symbol: item.symbol,
     exchangeSymbol: item.exchangeSymbol,
     displayName: item.nameKo ?? item.nameEn ?? item.symbol,
     canonicalAssetKey: item.canonicalAssetKey,
-  })));
+  })), '/market/tickers');
 
-  return items.map((item) => {
+  const projectedItems = items.map((item) => {
     const view = views.get(item.canonicalAssetKey ?? item.symbol);
+    const canonicalAssetKey = view?.canonicalAssetKey ?? item.canonicalAssetKey ?? null;
+    const assetImageUrl = toUsableAssetImageUrl(view, item.assetImageUrl ?? item.iconUrl ?? null);
+    const imageFields = buildAssetMetadataProjection(view, assetImageUrl, canonicalAssetKey);
     return {
       ...item,
-      canonicalAssetKey: view?.canonicalAssetKey ?? item.canonicalAssetKey ?? item.symbol,
-      assetImageUrl: view?.assetImageUrl ?? item.assetImageUrl ?? null,
+      canonicalAssetKey,
+      iconUrl: assetImageUrl ?? item.iconUrl ?? null,
+      imageUrl: assetImageUrl,
+      imageURL: assetImageUrl,
+      assetImageUrl,
+      hasImage: Boolean(assetImageUrl),
+      ...imageFields,
     };
   });
+
+  logAssetImageProjectionBatch('/market/tickers', projectedItems.map((item) => {
+    const view = views.get(item.canonicalAssetKey ?? item.symbol);
+    const reason = !item.assetImageUrl
+      ? toAssetImageProjectionReason({
+        canonicalAssetKey: item.canonicalAssetKey,
+        failureReason: view?.failureReason ?? null,
+      })
+      : null;
+    return {
+      exchange: item.exchange,
+      symbol: item.symbol,
+      canonicalAssetKey: item.canonicalAssetKey,
+      assetImageUrl: item.assetImageUrl,
+      imageAvailability: item.imageAvailability,
+      failureReason: item.imageFailureReason,
+      reason,
+      fallbackType: view?.fallbackType ?? null,
+      fallbackHit: view?.fallbackHit ?? false,
+      source: view?.source ?? null,
+      volume24h: item.volume24h,
+    };
+  }));
+
+  return projectedItems;
 }
 
 function toViewportSkipReason(params: {
@@ -1948,7 +2646,7 @@ function buildUnavailableMarketSnapshotResponse(params: {
 
 function fromCachedOrderbook(item: NonNullable<ReturnType<typeof publicMarketDataStore.getOrderbook>>): CanonicalOrderbookSnapshot {
   return {
-    exchange: item.exchange as ExchangeId,
+    ...toCanonicalMarket(item.exchange as ExchangeId, item.symbol),
     symbol: item.symbol,
     market: item.market,
     baseCurrency: item.baseCurrency,
@@ -1965,7 +2663,7 @@ function fromCachedOrderbook(item: NonNullable<ReturnType<typeof publicMarketDat
 
 function fromCachedTrade(item: ReturnType<typeof publicMarketDataStore.getTrades>[number]): CanonicalTrade {
   return {
-    exchange: item.exchange as ExchangeId,
+    ...toCanonicalMarket(item.exchange as ExchangeId, item.symbol),
     symbol: item.symbol,
     market: item.market,
     baseCurrency: item.baseCurrency,
@@ -1998,10 +2696,16 @@ function buildExchangeSnapshotCacheEntry(params: {
     .filter((item) => item.kimchiComparable)
     .sort((left, right) => comparePrioritySnapshotItems(left, right))
     .map((item, index) => ({
+      marketId: item.marketId,
+      rawSymbol: item.rawSymbol,
+      canonicalSymbol: item.canonicalSymbol,
+      baseAsset: item.baseAsset,
+      quoteAsset: item.quoteAsset,
       symbol: item.symbol,
       displaySymbol: item.displaySymbol,
       displayName: item.displayName,
       canonicalAssetKey: item.canonicalAssetKey,
+      iconUrl: item.iconUrl,
       assetImageUrl: item.assetImageUrl,
       market: item.market,
       exchangeSymbol: item.exchangeSymbol,
@@ -2270,7 +2974,7 @@ function buildMarketSnapshotResponse(params: {
 
 function toCanonicalTickerFromEvent(ticker: NormalizedMarketTicker): CanonicalTickerSnapshot {
   return {
-    exchange: ticker.exchange as ExchangeId,
+    ...toCanonicalMarket(ticker.exchange as ExchangeId, ticker.symbol),
     symbol: ticker.symbol,
     market: ticker.market,
     baseCurrency: ticker.baseCurrency,
@@ -2611,10 +3315,16 @@ function buildMarketViewportResponse(params: {
       items: params.rows.map((row) => ({
         selectedExchange: row.selectedExchange,
         sourceExchange: row.sourceExchange,
+        marketId: row.marketId,
+        rawSymbol: row.rawSymbol,
+        canonicalSymbol: row.canonicalSymbol,
+        baseAsset: row.baseAsset,
+        quoteAsset: row.quoteAsset,
         symbol: row.symbol,
         displaySymbol: row.displaySymbol,
         displayName: row.displayName,
         canonicalAssetKey: row.canonicalAssetKey,
+        iconUrl: row.iconUrl,
         assetImageUrl: row.assetImageUrl,
         representative: row.representative,
         updatedAt: row.updatedAt,
@@ -3616,16 +4326,21 @@ export async function listMarkets(exchange?: ExchangeId): Promise<MarketUniverse
 export async function getTickers(params: {
   exchange?: ExchangeId;
   symbol?: string;
+  marketId?: string;
   limit?: number;
 }): Promise<MarketUniverseResponse<MarketTickerItem>> {
   if (params.limit !== undefined && (!Number.isInteger(params.limit) || params.limit < 1)) {
     throw new AppError(400, 'limit must be a positive integer');
   }
+  if (params.marketId && !params.exchange) {
+    throw new AppError(400, 'exchange is required when marketId is provided');
+  }
 
   const providers = params.exchange
     ? [exchangeProviderRegistry.getMarketDataProvider(params.exchange)]
     : exchangeProviderRegistry.listMarketDataProviders();
-  const requestedSymbol = params.symbol ? assertSupportedSymbol(params.symbol) : null;
+  const requestedSymbol = params.marketId ? null : params.symbol ? assertSupportedSymbol(params.symbol) : null;
+  const requestedMarketId = params.marketId?.trim() ?? null;
   const binanceSymbolSet = await loadBinanceSymbolSet();
   const universeResults = await Promise.allSettled(providers.map((provider) => buildProviderMarketUniverse(provider, binanceSymbolSet)));
 
@@ -3652,7 +4367,31 @@ export async function getTickers(params: {
     }
 
     const bundle = universeResult.value;
-    const requestedSymbols = requestedSymbol ? [requestedSymbol] : bundle.marketSymbols;
+    let requestedSymbols = requestedSymbol ? [requestedSymbol] : bundle.marketSymbols;
+    if (requestedMarketId) {
+      const resolved = resolveExchangeMarketInput({
+        exchange: provider.exchange,
+        markets: bundle.items.map((item) => ({
+          symbol: item.symbol,
+          exchangeSymbol: item.exchangeSymbol,
+          marketId: item.marketId,
+          market: item.market,
+          baseCurrency: item.baseCurrency,
+          quoteCurrency: item.quoteCurrency,
+          rawSymbol: item.rawSymbol,
+          tradable: item.tradable,
+        })),
+        input: { marketId: requestedMarketId },
+        capabilitiesBySymbol: new Map(bundle.items.map((item) => [item.symbol, item.capabilities])),
+      });
+      if (!resolved.ok) {
+        if (params.exchange) {
+          throw new AppError(400, `marketId ${requestedMarketId} is not listed on ${provider.exchange}`);
+        }
+        continue;
+      }
+      requestedSymbols = [resolved.metadata.canonicalSymbol];
+    }
 
     let tickerLoads;
     try {
@@ -3702,16 +4441,39 @@ export async function getTickers(params: {
       items.push({
         ...withTickerCompletenessFromSource(load.ticker, resolveTickerDataMode(load.source)),
         exchangeName: market.exchangeName,
+        marketId: market.marketId,
+        canonicalSymbol: market.canonicalSymbol,
+        baseAsset: market.baseAsset,
+        quoteAsset: market.quoteAsset,
+        displaySymbol: market.displaySymbol,
+        koreanName: market.koreanName,
+        englishName: market.englishName,
+        iconUrl: market.iconUrl,
+        isActive: market.isActive,
         canonicalAssetKey: market.canonicalAssetKey,
         exchangeSymbol: market.exchangeSymbol,
         tradable: market.tradable,
         capabilities: market.capabilities,
+        isChartAvailable: market.isChartAvailable,
+        isOrderBookAvailable: market.isOrderBookAvailable,
+        isTradesAvailable: market.isTradesAvailable,
+        unavailableReason: market.unavailableReason,
         kimchiComparable: market.kimchiComparable,
         kimchiComparisonReason: market.kimchiComparisonReason,
         nameKo: market.nameKo,
         nameEn: market.nameEn,
         registryMapped: market.registryMapped,
+        imageUrl: null,
+        imageURL: null,
+        hasImage: false,
         assetImageUrl: null,
+        imageAvailability: 'pending',
+        imageFailureReason: null,
+        fallbackType: null,
+        assetType: null,
+        canonicalName: null,
+        fallbackColor: null,
+        fallbackInitials: null,
       });
     }
 
@@ -3749,9 +4511,70 @@ export async function getTickers(params: {
     throw new AppError(503, 'market tickers are temporarily unavailable');
   }
 
+  type AssetPreloadLookup = {
+    exchange?: ExchangeId;
+    symbol?: string;
+    exchangeSymbol?: string | null;
+    canonicalAssetKey?: string | null;
+  };
+  const toAssetLookup = (item: MarketTickerItem): AssetPreloadLookup => ({
+    exchange: item.exchange,
+    symbol: item.symbol,
+    exchangeSymbol: item.exchangeSymbol,
+    canonicalAssetKey: item.canonicalAssetKey,
+  });
+  const firstPageVisibleLookups = items.slice(0, FIRST_PAGE_VISIBLE_SYMBOL_LIMIT).map(toAssetLookup);
+  const topVolumeLookups = items
+    .slice()
+    .sort((left, right) => (right.volume24h ?? 0) - (left.volume24h ?? 0))
+    .slice(0, TOP_VOLUME_SYMBOL_PRELOAD_LIMIT)
+    .map(toAssetLookup);
+  const topVolumeLookupsByExchange = Array.from(
+    items.reduce<Map<ExchangeId, MarketTickerItem[]>>((grouped, item) => {
+      const bucket = grouped.get(item.exchange) ?? [];
+      bucket.push(item);
+      grouped.set(item.exchange, bucket);
+      return grouped;
+    }, new Map<ExchangeId, MarketTickerItem[]>()),
+  ).flatMap(([, exchangeItems]) =>
+    exchangeItems
+      .slice()
+      .sort((left, right) => (right.volume24h ?? 0) - (left.volume24h ?? 0))
+      .slice(0, FIRST_PAGE_VISIBLE_SYMBOL_LIMIT)
+      .map(toAssetLookup));
+  const pinnedAssetLookups: AssetPreloadLookup[] = ['BTC', 'ETH', 'XRP', 'SOL', 'DOGE', 'USDT', 'USDC', 'BNB', 'TRX'].map((symbol) => ({
+    symbol,
+    canonicalAssetKey: symbol,
+  }));
+  const likelyVisibleLookups = Array.from(
+    [...firstPageVisibleLookups, ...topVolumeLookups, ...topVolumeLookupsByExchange, ...pinnedAssetLookups]
+      .reduce<Map<string, AssetPreloadLookup>>((deduped, lookup) => {
+        const key = `${lookup.exchange ?? 'global'}:${lookup.canonicalAssetKey ?? lookup.symbol ?? lookup.exchangeSymbol ?? ''}`;
+        deduped.set(key, lookup);
+        return deduped;
+      }, new Map())
+      .values(),
+  );
+  assetMetadataService.preloadAssetLookups(likelyVisibleLookups, 'priority');
+
   const decoratedItems = await decorateMarketTickerItems(items);
   const limited = applyUniverseLimit(decoratedItems, params.limit);
-  logAssetImageProjectionBatch('/market/tickers', limited.items);
+  logAssetImageCoverageSummary({
+    route: '/market/tickers',
+    exchange: 'all',
+    scope: 'response',
+    items: limited.items.map((item) => ({
+      assetImageUrl: item.assetImageUrl,
+      reason: item.hasImage
+        ? null
+        : item.canonicalAssetKey
+          ? toAssetImageProjectionReason({
+            canonicalAssetKey: item.canonicalAssetKey,
+            failureReason: item.imageFailureReason,
+          })
+          : 'canonical_key_missing',
+    })),
+  });
   return {
     items: limited.items,
     meta: {
@@ -3903,6 +4726,17 @@ export async function listSymbolSupport(exchange: ExchangeId): Promise<{
   const bundle = await buildProviderMarketUniverse(provider, binanceSymbolSet);
   const items = bundle.items.map<MarketSymbolSupportEntry>((item) => ({
     exchange,
+    marketId: item.marketId,
+    rawSymbol: item.rawSymbol,
+    canonicalSymbol: item.canonicalSymbol,
+    baseAsset: item.baseAsset,
+    quoteAsset: item.quoteAsset,
+    displaySymbol: item.displaySymbol,
+    koreanName: item.koreanName,
+    englishName: item.englishName,
+    iconUrl: item.iconUrl,
+    isActive: item.isActive,
+    capabilities: item.capabilities,
     symbol: item.symbol,
     exchangeSymbol: item.exchangeSymbol,
     market: item.market,
@@ -4013,31 +4847,88 @@ export async function getComparableKimchiSymbolSet(exchange: ExchangeId): Promis
   return snapshot ? new Set(snapshot.comparableKimchiSymbolSet) : new Set<string>();
 }
 
-export async function getOrderbook(exchange: ExchangeId, symbol: string): Promise<CanonicalOrderbookSnapshot> {
-  const canonical = assertSupportedSymbol(symbol);
+export async function getOrderbook(
+  exchange: ExchangeId,
+  request: MarketLookupRequest,
+): Promise<FreshMarketData<CanonicalOrderbookSnapshot> & { metadata: MarketResponseMetadata }> {
+  const resolved = await resolveMarketForRequest(exchange, request, 'orderbook');
+  const canonical = resolved.metadata.canonicalSymbol;
+  if (!resolved.metadata.capabilities.supportsOrderBook) {
+    throw buildMarketDataError({
+      code: 'MARKET_DATA_UNSUPPORTED',
+      target: 'orderbook',
+      exchange,
+      metadata: resolved.metadata,
+      reason: 'orderbook_not_supported',
+      retryable: false,
+    });
+  }
+
   try {
-    const orderbook = await exchangeProviderRegistry.getMarketDataProvider(exchange).getOrderbookSnapshot(canonical);
-    return withFreshness(orderbook, orderbook.timestamp, 'snapshot');
+    const orderbook = await resolved.provider.getOrderbookSnapshot(canonical);
+    const enriched = applyMetadataToCanonicalMarket(orderbook, resolved.metadata);
+    return {
+      ...withFreshness(enriched, orderbook.timestamp, 'snapshot'),
+      metadata: resolved.responseMetadata,
+    };
   } catch (error) {
     logger.warn(
-      { domain: 'market-routes', exchange, symbol: canonical, capability: 'orderbook', err: error },
+      {
+        domain: 'market-routes',
+        exchange,
+        marketId: resolved.metadata.marketId,
+        symbol: canonical,
+        capability: 'orderbook',
+        err: error,
+      },
       'Falling back to cached orderbook data',
     );
     const cached = publicMarketDataStore.getOrderbook(exchange, canonical);
     if (cached) {
       const snapshot = fromCachedOrderbook(cached);
-      return withFreshness(snapshot, snapshot.timestamp, 'cached_snapshot');
+      const enriched = applyMetadataToCanonicalMarket(snapshot, resolved.metadata);
+      return {
+        ...withFreshness(enriched, snapshot.timestamp, 'cached_snapshot'),
+        metadata: buildAvailability(resolved.metadata, {
+          target: 'orderbook',
+          reason: error instanceof Error ? error.message : String(error),
+        }),
+      };
     }
-    throw new AppError(503, `${exchange} orderbook is temporarily unavailable`);
+    throw buildMarketDataError({
+      code: 'MARKET_DATA_UNAVAILABLE',
+      target: 'orderbook',
+      exchange,
+      metadata: resolved.metadata,
+      reason: error instanceof Error ? error.message : String(error),
+      retryable: true,
+    });
   }
 }
 
-export async function getTrades(exchange: ExchangeId, symbol: string, limit?: number): Promise<CanonicalTrade[]> {
-  const canonical = assertSupportedSymbol(symbol);
+export async function getTradesWithMeta(
+  exchange: ExchangeId,
+  request: MarketLookupRequest,
+  limit?: number,
+): Promise<MarketTradesResponse> {
+  const resolved = await resolveMarketForRequest(exchange, request, 'trades');
+  const canonical = resolved.metadata.canonicalSymbol;
+  if (!resolved.metadata.capabilities.supportsTrades) {
+    throw buildMarketDataError({
+      code: 'MARKET_DATA_UNSUPPORTED',
+      target: 'trades',
+      exchange,
+      metadata: resolved.metadata,
+      reason: 'trades_not_supported',
+      retryable: false,
+    });
+  }
+
   try {
-    const trades = await exchangeProviderRegistry.getMarketDataProvider(exchange).getRecentTrades(canonical, limit);
+    const trades = await resolved.provider.getRecentTrades(canonical, limit);
     if (trades.length > 0) {
-      const normalizedTrades = trades.map((item) => withFreshness(item, item.timestamp, 'snapshot'));
+      const normalizedTrades = trades.map((item) =>
+        withFreshness(applyMetadataToCanonicalMarket(item, resolved.metadata), item.timestamp, 'snapshot'));
       const distinctTimestamps = new Set(
         normalizedTrades
           .map((item) => item.timestamp)
@@ -4047,6 +4938,7 @@ export async function getTrades(exchange: ExchangeId, symbol: string, limit?: nu
         {
           domain: 'market-routes',
           exchange,
+          marketId: resolved.metadata.marketId,
           symbol: canonical,
           tradeCount: normalizedTrades.length,
           invalidTimestampCount: normalizedTrades.filter((item) => item.timestamp === null).length,
@@ -4054,18 +4946,68 @@ export async function getTrades(exchange: ExchangeId, symbol: string, limit?: nu
         },
         `[TradeTimestampAPI] exchange=${exchange} symbol=${canonical} tradeCount=${normalizedTrades.length} distinctTimestamps=${distinctTimestamps}`,
       );
-      return normalizedTrades;
+      return {
+        items: normalizedTrades,
+        total: normalizedTrades.length,
+        metadata: resolved.responseMetadata,
+      };
     }
   } catch (error) {
     logger.warn(
-      { domain: 'market-routes', exchange, symbol: canonical, capability: 'trades', err: error },
+      {
+        domain: 'market-routes',
+        exchange,
+        marketId: resolved.metadata.marketId,
+        symbol: canonical,
+        capability: 'trades',
+        err: error,
+      },
       'Falling back to cached trade data',
     );
+    const cachedTrades = publicMarketDataStore
+      .getTrades(exchange, canonical, limit ?? 50)
+      .map((item) => {
+        const cached = fromCachedTrade(item);
+        return withFreshness(applyMetadataToCanonicalMarket(cached, resolved.metadata), item.timestamp, 'cached_snapshot');
+      });
+
+    if (cachedTrades.length > 0) {
+      return {
+        items: cachedTrades,
+        total: cachedTrades.length,
+        metadata: buildAvailability(resolved.metadata, {
+          target: 'trades',
+          reason: error instanceof Error ? error.message : String(error),
+        }),
+      };
+    }
+
+    throw buildMarketDataError({
+      code: 'MARKET_DATA_UNAVAILABLE',
+      target: 'trades',
+      exchange,
+      metadata: resolved.metadata,
+      reason: error instanceof Error ? error.message : String(error),
+      retryable: true,
+    });
   }
 
-  return publicMarketDataStore
+  const cachedTrades = publicMarketDataStore
     .getTrades(exchange, canonical, limit ?? 50)
-    .map((item) => withFreshness(fromCachedTrade(item), item.timestamp, 'cached_snapshot'));
+    .map((item) => {
+      const cached = fromCachedTrade(item);
+      return withFreshness(applyMetadataToCanonicalMarket(cached, resolved.metadata), item.timestamp, 'cached_snapshot');
+    });
+
+  return {
+    items: cachedTrades,
+    total: cachedTrades.length,
+    metadata: resolved.responseMetadata,
+  };
+}
+
+export async function getTrades(exchange: ExchangeId, symbol: string, limit?: number): Promise<CanonicalTrade[]> {
+  return (await getTradesWithMeta(exchange, symbol, limit)).items;
 }
 
 export async function getCandles(
@@ -4079,50 +5021,121 @@ export async function getCandles(
 
 export async function getCandlesWithMeta(
   exchange: ExchangeId,
-  symbol: string,
+  request: MarketLookupRequest,
   interval: string,
   limit?: number,
 ): Promise<MarketCandlesResponse> {
+  const resolved = await resolveMarketForRequest(exchange, request, 'candles');
+  if (!resolved.metadata.capabilities.supportsCandles) {
+    throw buildMarketDataError({
+      code: 'MARKET_DATA_UNSUPPORTED',
+      target: 'candles',
+      exchange,
+      metadata: resolved.metadata,
+      reason: 'candles_not_supported',
+      retryable: false,
+    });
+  }
+
   const snapshot = await resolveCandleSnapshot({
     exchange,
-    symbol: assertSupportedSymbol(symbol),
+    symbol: resolved.metadata.canonicalSymbol,
     interval,
     limit,
   });
   if (snapshot.support === 'unsupported') {
-    throw new AppError(400, `${exchange} interval ${interval} is unsupported`, {
+    throw buildMarketDataError({
+      code: 'MARKET_DATA_UNSUPPORTED',
+      target: 'candles',
       exchange,
-      interval,
-      reason: snapshot.reason,
+      metadata: resolved.metadata,
+      reason: snapshot.reason ?? `${interval} is unsupported`,
+      retryable: false,
+      statusCode: 400,
     });
   }
 
   if (snapshot.status === 'unavailable' || snapshot.status === 'failed') {
-    throw new AppError(503, `${exchange} candles are temporarily unavailable`, {
+    throw buildMarketDataError({
+      code: 'MARKET_DATA_UNAVAILABLE',
+      target: 'candles',
       exchange,
-      interval: snapshot.interval ?? interval,
-      reason: snapshot.reason,
-      status: snapshot.status,
-      meta: snapshot.meta,
+      metadata: resolved.metadata,
+      reason: snapshot.reason ?? snapshot.status,
+      retryable: true,
     });
   }
 
   if (snapshot.status === 'empty' || snapshot.items.length === 0 || !snapshot.meta.isRenderable) {
-    throw new AppError(503, `${exchange} candles are temporarily unavailable`, {
+    throw buildMarketDataError({
+      code: 'MARKET_DATA_UNAVAILABLE',
+      target: 'candles',
       exchange,
-      interval: snapshot.interval ?? interval,
+      metadata: resolved.metadata,
       reason: snapshot.reason ?? 'no_usable_candles',
-      status: snapshot.status,
-      meta: snapshot.meta,
+      retryable: true,
     });
   }
 
   const items = snapshot.items.map((item) =>
-    withFreshness(item, item.closeTime, snapshot.staleCacheUsed ? 'cached_snapshot' : 'snapshot'));
+    withFreshness(
+      applyMetadataToCanonicalMarket(item, resolved.metadata),
+      item.closeTime,
+      snapshot.staleCacheUsed ? 'cached_snapshot' : 'snapshot',
+    ));
 
   return {
     items,
     meta: snapshot.meta,
+    metadata: resolved.responseMetadata,
+  };
+}
+
+export async function getMarketSummary(params: {
+  exchange: ExchangeId;
+  symbol?: string;
+  marketId?: string;
+}): Promise<MarketSummaryResponse> {
+  const resolved = await resolveMarketForRequest(params.exchange, {
+    symbol: params.symbol,
+    marketId: params.marketId,
+  }, 'summary');
+  let latestTicker: FreshMarketData<CanonicalTickerSnapshot> | null = null;
+
+  try {
+    const loads = await getExchangeTickerLoads(params.exchange, [resolved.metadata.canonicalSymbol], {
+      freshnessTargetMs: PRIORITY_FRESHNESS_TARGET_MS.snapshotTop,
+      prioritySymbols: [resolved.metadata.canonicalSymbol],
+      priorityFreshnessTargetMs: PRIORITY_FRESHNESS_TARGET_MS.snapshotTop,
+      providerTimeoutMs: 900,
+    });
+    const load = loads.get(resolved.metadata.canonicalSymbol);
+    if (load?.ticker) {
+      latestTicker = withFreshness(
+        applyMetadataToCanonicalMarket(load.ticker, resolved.metadata),
+        load.ticker.timestamp,
+        resolveTickerDataMode(load.source),
+      );
+    }
+  } catch (error) {
+    logger.warn(
+      {
+        domain: 'market-routes',
+        exchange: params.exchange,
+        marketId: resolved.metadata.marketId,
+        symbol: resolved.metadata.canonicalSymbol,
+        capability: 'summary_ticker',
+        err: error,
+      },
+      'Market summary ticker snapshot unavailable',
+    );
+  }
+
+  return {
+    metadata: resolved.responseMetadata,
+    market: resolved.responseMetadata,
+    latestTicker,
+    updatedAt: latestTicker?.sourceTimestamp ?? latestTicker?.timestamp ?? null,
   };
 }
 

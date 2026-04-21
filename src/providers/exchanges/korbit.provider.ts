@@ -92,6 +92,7 @@ export class KorbitProvider
             return {
               symbol: normalizedSymbol,
               exchangeSymbol: symbol.toLowerCase(),
+              marketId: symbol.toLowerCase(),
               market: `${normalizedSymbol}/KRW`,
               baseCurrency: normalizedSymbol,
               quoteCurrency: 'KRW',

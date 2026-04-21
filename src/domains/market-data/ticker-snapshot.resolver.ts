@@ -1,5 +1,6 @@
 import { env } from '../../config/env';
 import { exchangeProviderRegistry } from '../../core/exchange/registry.bootstrap';
+import { toCanonicalMarket } from '../../core/exchange/symbol.mapper';
 import type {
   CanonicalTickerSnapshot,
   ExchangeId,
@@ -33,7 +34,7 @@ export type TickerSnapshotLoadOptions = {
 
 function fromCachedTicker(item: NonNullable<ReturnType<typeof publicMarketDataStore.getTicker>>): CanonicalTickerSnapshot {
   return {
-    exchange: item.exchange as ExchangeId,
+    ...toCanonicalMarket(item.exchange as ExchangeId, item.symbol),
     symbol: item.symbol,
     market: item.market,
     baseCurrency: item.baseCurrency,

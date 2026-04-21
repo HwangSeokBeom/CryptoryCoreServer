@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { resolveExchangeInterval } from '../src/core/exchange/interval.mapper';
-import { fromExchangeSymbol, toExchangeSymbol } from '../src/core/exchange/symbol.mapper';
+import { fromExchangeSymbol, resolveCanonicalAssetKey, toExchangeSymbol } from '../src/core/exchange/symbol.mapper';
 
 describe('Exchange Mappers', () => {
   it('normalizes symbol formats per exchange', () => {
@@ -15,6 +15,8 @@ describe('Exchange Mappers', () => {
     expect(fromExchangeSymbol('coinone', 'btc')).toBe('BTC');
     expect(fromExchangeSymbol('korbit', 'btc_krw')).toBe('BTC');
     expect(fromExchangeSymbol('binance', 'btcusdt')).toBe('BTC');
+    expect(fromExchangeSymbol('binance', 'ETHUSDC')).toBe('ETH');
+    expect(fromExchangeSymbol('binance', 'FDUSDUSDT')).toBe('FDUSD');
   });
 
   it('falls back to the next supported interval when needed', () => {
@@ -31,6 +33,73 @@ describe('Exchange Mappers', () => {
       resolvedInterval: '1h',
       exchangeInterval: '60',
       fallbackApplied: false,
+    });
+  });
+
+  it('canonicalizes asset image keys for alias and wrapped variants', () => {
+    expect(resolveCanonicalAssetKey({
+      exchange: 'binance',
+      exchangeSymbol: 'ETHUSDC',
+    })).toMatchObject({
+      canonicalAssetKey: 'ETH',
+      aliasHit: false,
+    });
+
+    expect(resolveCanonicalAssetKey({
+      exchange: 'binance',
+      exchangeSymbol: 'FDUSDUSDT',
+    })).toMatchObject({
+      canonicalAssetKey: 'FDUSD',
+      aliasHit: false,
+    });
+
+    expect(resolveCanonicalAssetKey({
+      exchange: 'binance',
+      symbol: '1000SHIB',
+      exchangeSymbol: '1000SHIBUSDT',
+    })).toMatchObject({
+      canonicalAssetKey: 'SHIB',
+      aliasHit: true,
+    });
+
+    expect(resolveCanonicalAssetKey({
+      symbol: 'RNDR',
+    })).toMatchObject({
+      canonicalAssetKey: 'RENDER',
+      aliasHit: true,
+    });
+
+    expect(resolveCanonicalAssetKey({
+      symbol: 'USDC.E',
+    })).toMatchObject({
+      canonicalAssetKey: 'USDC',
+      aliasHit: true,
+    });
+
+    expect(resolveCanonicalAssetKey({
+      symbol: 'WBTC',
+    })).toMatchObject({
+      canonicalAssetKey: 'BTC',
+      aliasHit: true,
+    });
+
+    expect(resolveCanonicalAssetKey({
+      exchange: 'upbit',
+      symbol: 'T',
+      exchangeSymbol: 'KRW-T',
+    })).toMatchObject({
+      canonicalAssetKey: 'T',
+      aliasHit: true,
+      matchedBy: 'exchange_alias',
+    });
+
+    expect(resolveCanonicalAssetKey({
+      exchange: 'binance',
+      symbol: '1000000MOG',
+      exchangeSymbol: '1000000MOGUSDT',
+    })).toMatchObject({
+      canonicalAssetKey: 'MOG',
+      aliasHit: true,
     });
   });
 });

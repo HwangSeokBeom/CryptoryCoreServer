@@ -22,6 +22,7 @@ const CANDLE_NEGATIVE_COOLDOWN_BASE_MS = 3_000;
 const CANDLE_NEGATIVE_COOLDOWN_MAX_MS = 30_000;
 const CANDLE_REFRESH_CONCURRENCY = 4;
 const CANDLE_REDIS_KEY_PREFIX = 'cryptory:candles:v2';
+const MIN_PROVIDER_CANDLE_FETCH_LIMIT = 60;
 
 export type CandleRequestSupport = 'supported' | 'fallback' | 'unsupported';
 export type CandleSnapshotStatus = 'loaded' | 'stale' | 'empty' | 'unavailable' | 'failed';
@@ -109,8 +110,13 @@ type CandleRefreshJob = {
   reject: (error: unknown) => void;
 };
 
+type CandleInFlightRefresh = {
+  limit: number;
+  promise: Promise<CandleRefreshOutcome>;
+};
+
 const candleSnapshotCache = new Map<string, CachedCandleSnapshot>();
-const candleSnapshotInFlight = new Map<string, Promise<CandleRefreshOutcome>>();
+const candleSnapshotInFlight = new Map<string, CandleInFlightRefresh>();
 const candleFailureCooldown = new Map<string, CandleFailureState>();
 
 class CandleRefreshCoordinator {
@@ -186,6 +192,10 @@ function clampCandleLimit(limit?: number) {
 
 function candleCacheKey(exchange: ExchangeId, symbol: string, interval: string) {
   return `${exchange}:${symbol}:${interval}`;
+}
+
+function resolveProviderCandleFetchLimit(requestedLimit: number) {
+  return Math.min(Math.max(requestedLimit, MIN_PROVIDER_CANDLE_FETCH_LIMIT), MAX_CANDLE_LIMIT);
 }
 
 function candleRedisKey(cacheKey: string) {
@@ -307,7 +317,9 @@ function logCandleCacheDebug(params: {
   action:
     | 'memory_hit'
     | 'redis_hit'
+    | 'cache_miss'
     | 'singleflight_join'
+    | 'singleflight_upgrade'
     | 'stale_fallback'
     | 'unavailable';
   exchange: ExchangeId;
@@ -316,6 +328,8 @@ function logCandleCacheDebug(params: {
   freshness?: CandleFreshnessState;
   reason?: string | null;
   retryAfterMs?: number;
+  cachedPointCount?: number;
+  requestedPointCount?: number;
 }) {
   logger.info(
     {
@@ -435,12 +449,36 @@ function getActiveCandleFailure(cacheKey: string) {
 function mergeCandleItems(existing: CanonicalCandle[] | undefined, incoming: CanonicalCandle[]) {
   const merged = new Map<string, CanonicalCandle>();
   for (const item of [...(existing ?? []), ...incoming]) {
-    merged.set(`${item.openTime}:${item.closeTime}`, item);
+    merged.set(String(item.openTime), item);
   }
 
   return Array.from(merged.values())
     .sort((left, right) => left.openTime - right.openTime || left.closeTime - right.closeTime)
     .slice(-MAX_CANDLE_LIMIT);
+}
+
+function normalizeCandleItems(items: CanonicalCandle[]) {
+  const deduped = new Map<string, CanonicalCandle>();
+  for (const item of items) {
+    if (
+      !Number.isFinite(item.openTime)
+      || !Number.isFinite(item.closeTime)
+      || item.openTime <= 0
+      || item.closeTime <= 0
+      || item.closeTime < item.openTime
+      || !Number.isFinite(item.open)
+      || !Number.isFinite(item.high)
+      || !Number.isFinite(item.low)
+      || !Number.isFinite(item.close)
+      || !Number.isFinite(item.volume)
+    ) {
+      continue;
+    }
+    deduped.set(String(item.openTime), item);
+  }
+
+  return Array.from(deduped.values())
+    .sort((left, right) => left.openTime - right.openTime || left.closeTime - right.closeTime);
 }
 
 function sliceCandleItems(items: CanonicalCandle[], limit: number) {
@@ -730,7 +768,7 @@ async function fetchAndStoreCandleSnapshot(params: {
 
   try {
     const provider = exchangeProviderRegistry.getMarketDataProvider(params.exchange);
-    const candles = await provider.getCandles(params.symbol, params.resolvedInterval, params.limit);
+    const candles = normalizeCandleItems(await provider.getCandles(params.symbol, params.resolvedInterval, params.limit));
     const capturedAt = Date.now();
 
     if (candles.length > 0) {
@@ -829,14 +867,27 @@ function startCandleRefresh(params: {
   priority: CandleRefreshPriority;
 }) {
   const existing = candleSnapshotInFlight.get(params.cacheKey);
-  if (existing) {
+  if (existing && existing.limit >= params.limit) {
     logCandleCacheDebug({
       action: 'singleflight_join',
       exchange: params.exchange,
       symbol: params.symbol,
       interval: params.requestedInterval,
+      requestedPointCount: params.limit,
     });
-    return existing;
+    return existing.promise;
+  }
+
+  if (existing) {
+    logCandleCacheDebug({
+      action: 'singleflight_upgrade',
+      exchange: params.exchange,
+      symbol: params.symbol,
+      interval: params.requestedInterval,
+      cachedPointCount: existing.limit,
+      requestedPointCount: params.limit,
+      reason: 'larger_limit_requested',
+    });
   }
 
   if (params.priority === 'visible') {
@@ -846,11 +897,14 @@ function startCandleRefresh(params: {
   const queued = candleRefreshCoordinator.enqueue(params.cacheKey, params.priority, () =>
     fetchAndStoreCandleSnapshot(params));
   const tracked = queued.finally(() => {
-    if (candleSnapshotInFlight.get(params.cacheKey) === tracked) {
+    if (candleSnapshotInFlight.get(params.cacheKey)?.promise === tracked) {
       candleSnapshotInFlight.delete(params.cacheKey);
     }
   });
-  candleSnapshotInFlight.set(params.cacheKey, tracked);
+  candleSnapshotInFlight.set(params.cacheKey, {
+    limit: params.limit,
+    promise: tracked,
+  });
   return tracked;
 }
 
@@ -870,6 +924,7 @@ export async function resolveCandleSnapshot(params: {
   const normalizedInterval = resolved?.normalizedInterval ?? params.interval.trim().toLowerCase();
   const rawSymbol = toExchangeSymbol(params.exchange, canonicalSymbol);
   const requestedLimit = clampCandleLimit(params.limit);
+  const providerFetchLimit = resolveProviderCandleFetchLimit(requestedLimit);
   const foregroundPriority = resolveCandleRefreshPriority(canonicalSymbol, true);
 
   logCandlePhase({
@@ -925,13 +980,15 @@ export async function resolveCandleSnapshot(params: {
   let cached = candleSnapshotCache.get(cacheKey) ?? null;
   let cachedSource: Extract<CandleMetaSource, 'memory' | 'redis'> = 'memory';
 
-  if (cached && cached.expiresAt > now) {
+  if (cached && cached.expiresAt > now && cached.items.length >= requestedLimit) {
     logCandleCacheDebug({
       action: 'memory_hit',
       exchange: params.exchange,
       symbol: canonicalSymbol,
       interval: params.interval,
       freshness: 'live',
+      cachedPointCount: cached.items.length,
+      requestedPointCount: requestedLimit,
     });
     return buildResultFromCache({
       exchange: params.exchange,
@@ -949,6 +1006,19 @@ export async function resolveCandleSnapshot(params: {
     });
   }
 
+  if (cached && cached.expiresAt > now && cached.items.length < requestedLimit) {
+    logCandleCacheDebug({
+      action: 'cache_miss',
+      exchange: params.exchange,
+      symbol: canonicalSymbol,
+      interval: params.interval,
+      freshness: 'live',
+      reason: 'cached_point_count_below_requested_limit',
+      cachedPointCount: cached.items.length,
+      requestedPointCount: requestedLimit,
+    });
+  }
+
   if (!cached) {
     const redisCached = await readRedisCandleSnapshot(cacheKey);
     if (redisCached) {
@@ -961,8 +1031,10 @@ export async function resolveCandleSnapshot(params: {
         symbol: canonicalSymbol,
         interval: params.interval,
         freshness: redisCached.expiresAt > now ? 'live' : 'stale',
+        cachedPointCount: redisCached.items.length,
+        requestedPointCount: requestedLimit,
       });
-      if (redisCached.expiresAt > now) {
+      if (redisCached.expiresAt > now && redisCached.items.length >= requestedLimit) {
         return buildResultFromCache({
           exchange: params.exchange,
           symbol: canonicalSymbol,
@@ -976,6 +1048,18 @@ export async function resolveCandleSnapshot(params: {
           stale: false,
           metaSource: 'redis',
           refreshPriority: foregroundPriority,
+        });
+      }
+      if (redisCached.expiresAt > now && redisCached.items.length < requestedLimit) {
+        logCandleCacheDebug({
+          action: 'cache_miss',
+          exchange: params.exchange,
+          symbol: canonicalSymbol,
+          interval: params.interval,
+          freshness: 'live',
+          reason: 'redis_point_count_below_requested_limit',
+          cachedPointCount: redisCached.items.length,
+          requestedPointCount: requestedLimit,
         });
       }
     }
@@ -1018,13 +1102,15 @@ export async function resolveCandleSnapshot(params: {
     }
 
     const existing = candleSnapshotInFlight.get(cacheKey);
-    if (existing) {
+    if (existing && existing.limit >= providerFetchLimit) {
       logCandleCacheDebug({
         action: 'singleflight_join',
         exchange: params.exchange,
         symbol: canonicalSymbol,
         interval: params.interval,
         freshness: 'stale',
+        cachedPointCount: existing.limit,
+        requestedPointCount: providerFetchLimit,
       });
     } else {
       void startCandleRefresh({
@@ -1035,7 +1121,7 @@ export async function resolveCandleSnapshot(params: {
         requestedInterval: params.interval,
         normalizedInterval: resolved.normalizedInterval,
         resolvedInterval: resolved.resolvedInterval,
-        limit: requestedLimit,
+        limit: providerFetchLimit,
         priority: resolveCandleRefreshPriority(canonicalSymbol, false),
       });
     }
@@ -1047,6 +1133,8 @@ export async function resolveCandleSnapshot(params: {
       interval: params.interval,
       freshness: 'stale',
       reason: fallbackReason,
+      cachedPointCount: cached.items.length,
+      requestedPointCount: requestedLimit,
     });
     logCandlePhase({
       exchange: params.exchange,
@@ -1111,16 +1199,29 @@ export async function resolveCandleSnapshot(params: {
     });
   }
 
+  if (!cached) {
+    logCandleCacheDebug({
+      action: 'cache_miss',
+      exchange: params.exchange,
+      symbol: canonicalSymbol,
+      interval: params.interval,
+      reason: 'no_usable_cache',
+      requestedPointCount: requestedLimit,
+    });
+  }
+
   const inFlight = candleSnapshotInFlight.get(cacheKey);
-  const outcome = inFlight
+  const outcome = inFlight && inFlight.limit >= providerFetchLimit
     ? await (() => {
         logCandleCacheDebug({
           action: 'singleflight_join',
           exchange: params.exchange,
           symbol: canonicalSymbol,
           interval: params.interval,
+          cachedPointCount: inFlight.limit,
+          requestedPointCount: providerFetchLimit,
         });
-        return inFlight;
+        return inFlight.promise;
       })()
     : await startCandleRefresh({
         cacheKey,
@@ -1130,7 +1231,7 @@ export async function resolveCandleSnapshot(params: {
         requestedInterval: params.interval,
         normalizedInterval: resolved.normalizedInterval,
         resolvedInterval: resolved.resolvedInterval,
-        limit: requestedLimit,
+        limit: providerFetchLimit,
         priority: foregroundPriority,
       });
 

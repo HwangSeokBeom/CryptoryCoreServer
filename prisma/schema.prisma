@@ -10,6 +10,8 @@ datasource db {
 model User {
   id                  String               @id @default(uuid())
   email               String               @unique
+  authProvider        String               @default("email")
+  providerAccountId   String?
   passwordHash        String
   nickname            String
   cash                Float                @default(15000000)
@@ -19,6 +21,10 @@ model User {
   orders              Order[]
   favorites           Favorite[]
   exchangeConnections ExchangeConnection[]
+  exchangeConnectionVerifications ExchangeConnectionVerification[]
+  orderRequests       OrderRequest[]
+
+  @@unique([authProvider, providerAccountId])
 }
 
 model Coin {
@@ -78,16 +84,63 @@ model ExchangeConnection {
   passphraseEncrypted String?
   validationStatus    String    @default("placeholder")
   validationMode      String    @default("placeholder")
+  validationCode      String?
   validationMessage   String?
+  validationDetails   Json?
   canUsePrivateApi    Boolean   @default(false)
   connectionStatus    String    @default("pending")
   lastValidatedAt     DateTime?
   lastSyncAt          DateTime?
   isTestConnectionResult Boolean @default(false)
+  lastErrorCode       String?
+  lastErrorSummary    String?
   failureReason       String?
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
+  verifications       ExchangeConnectionVerification[]
+  orderRequests       OrderRequest[]
 
   @@unique([userId, exchange])
   @@index([userId, exchange])
+}
+
+model ExchangeConnectionVerification {
+  id                  String              @id @default(uuid())
+  exchangeConnectionId String?
+  exchangeConnection  ExchangeConnection? @relation(fields: [exchangeConnectionId], references: [id], onDelete: SetNull)
+  userId              String
+  user                User                @relation(fields: [userId], references: [id])
+  exchange            String
+  status              String
+  code                String
+  message             String
+  details             Json?
+  checkedAt           DateTime            @default(now())
+  createdAt           DateTime            @default(now())
+
+  @@index([userId, exchange, checkedAt])
+  @@index([exchangeConnectionId, checkedAt])
+}
+
+model OrderRequest {
+  id                  String              @id @default(uuid())
+  userId              String
+  user                User                @relation(fields: [userId], references: [id])
+  exchangeConnectionId String?
+  exchangeConnection  ExchangeConnection? @relation(fields: [exchangeConnectionId], references: [id], onDelete: SetNull)
+  exchange            String
+  symbol              String
+  side                String
+  type                String
+  status              String
+  providerOrderId     String?
+  requestPayload      Json
+  responsePayload     Json?
+  failureCode         String?
+  failureMessage      String?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  @@index([userId, exchange, createdAt])
+  @@index([exchangeConnectionId, createdAt])
 }

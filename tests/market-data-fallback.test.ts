@@ -7,6 +7,7 @@ const provider = {
     quoteCurrency: 'KRW',
   },
   listMarkets: vi.fn(),
+  getMarketCapabilitySnapshot: vi.fn(),
   getTickerSnapshot: vi.fn(),
   getOrderbookSnapshot: vi.fn(),
   getRecentTrades: vi.fn(),
@@ -39,6 +40,27 @@ describe('market-data.service fallbacks', () => {
     publicMarketDataStore.getTickers.mockReturnValue([]);
     publicMarketDataStore.getOrderbook.mockReturnValue(null);
     publicMarketDataStore.getTrades.mockReturnValue([]);
+    provider.listMarkets.mockResolvedValue([
+      {
+        symbol: 'BTC',
+        exchangeSymbol: 'btc_krw',
+        marketId: 'btc_krw',
+        market: 'BTC/KRW',
+        baseCurrency: 'BTC',
+        quoteCurrency: 'KRW',
+        rawSymbol: 'btc_krw',
+        tradable: true,
+      },
+    ]);
+    provider.getMarketCapabilitySnapshot.mockResolvedValue({
+      websocketTickerSymbols: ['BTC'],
+      capabilitySymbols: {
+        tickers: ['BTC'],
+        orderbook: ['BTC'],
+        trades: ['BTC'],
+        candles: ['BTC'],
+      },
+    });
   });
 
   it('falls back to cached orderbook data when provider snapshot fails', async () => {
@@ -62,6 +84,8 @@ describe('market-data.service fallbacks', () => {
     const snapshot = await getOrderbook('korbit', 'BTC');
 
     expect(publicMarketDataStore.getOrderbook).toHaveBeenCalledWith('korbit', 'BTC');
+    expect(snapshot.marketId).toBe('btc_krw');
+    expect(snapshot.displaySymbol).toBe('BTC/KRW');
     expect(snapshot.bestAsk).toBe(101);
     expect(snapshot.bestBid).toBe(99);
     expect(snapshot.sourceTimestamp).toBe(1710000000000);
@@ -91,6 +115,7 @@ describe('market-data.service fallbacks', () => {
 
     expect(publicMarketDataStore.getTrades).toHaveBeenCalledWith('korbit', 'BTC', 20);
     expect(trades).toHaveLength(1);
+    expect(trades[0].marketId).toBe('btc_krw');
     expect(trades[0].tradeId).toBe('cached-trade');
     expect(trades[0].notional).toBe(10);
   });

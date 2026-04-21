@@ -15,6 +15,7 @@ import { tradingRoutes } from './domains/trading/trading.routes';
 import { portfolioRoutes } from './domains/portfolio/portfolio.routes';
 import { kimchiPremiumRoutes } from './domains/kimchi-premium/kimchi-premium.routes';
 import { exchangeConnectionRoutes } from './domains/exchange-connections/exchange-connections.routes';
+import { exchangeMetadataRoutes } from './domains/exchange-metadata/exchange-metadata.routes';
 
 export async function buildApp() {
   const app = Fastify({
@@ -40,7 +41,13 @@ export async function buildApp() {
     const statusCode = error.statusCode || 500;
     reply
       .status(statusCode)
-      .send(createErrorResponse(error.message || 'Internal Server Error', error instanceof AppError ? error.details : undefined));
+      .send(
+        createErrorResponse(
+          error.message || 'Internal Server Error',
+          error instanceof AppError ? error.details : undefined,
+          error instanceof AppError ? error.code : undefined,
+        ),
+      );
   });
 
   // Health check
@@ -56,6 +63,7 @@ export async function buildApp() {
   await app.register(tradingRoutes, { prefix: '/trading' });
   await app.register(portfolioRoutes, { prefix: '/portfolio' });
   await app.register(exchangeConnectionRoutes, { prefix: '/exchange-connections' });
+  await app.register(exchangeMetadataRoutes, { prefix: '/exchange-metadata' });
 
   return app;
 }

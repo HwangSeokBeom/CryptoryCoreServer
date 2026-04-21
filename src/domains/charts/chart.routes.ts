@@ -12,15 +12,16 @@ function parseExchange(exchange: string | undefined) {
 
 export async function chartRoutes(app: FastifyInstance) {
   app.get('/candles', async (request, reply) => {
-    const { exchange, symbol, interval, limit } = request.query as {
+    const { exchange, symbol, marketId, interval, limit } = request.query as {
       exchange?: string;
       symbol?: string;
+      marketId?: string;
       interval?: string;
       limit?: string;
     };
 
-    if (!exchange || !symbol) {
-      return reply.status(400).send(createErrorResponse('exchange and symbol are required'));
+    if (!exchange || (!symbol && !marketId)) {
+      return reply.status(400).send(createErrorResponse('exchange and symbol or marketId are required'));
     }
 
     const parsedExchange = parseExchange(exchange);
@@ -32,6 +33,7 @@ export async function chartRoutes(app: FastifyInstance) {
       return createSuccessResponse(await getChartCandles({
         exchange: parsedExchange,
         symbol,
+        marketId,
         interval: interval ?? '1m',
         limit: limit ? Number.parseInt(limit, 10) : 200,
       }));

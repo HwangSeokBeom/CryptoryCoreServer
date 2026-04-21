@@ -87,6 +87,7 @@ export class UpbitProvider
             return {
               symbol,
               exchangeSymbol: item.market,
+              marketId: item.market,
               market: `${symbol}/KRW`,
               baseCurrency: symbol,
               quoteCurrency: 'KRW',

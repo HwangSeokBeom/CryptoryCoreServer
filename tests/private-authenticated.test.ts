@@ -81,7 +81,6 @@ vi.mock('../src/modules/orders/orders.service', () => ({
 }));
 
 async function createAppWithToken() {
-  vi.resetModules();
   const { buildApp } = await import('../src/app');
   const app = await buildApp();
   const token = app.jwt.sign({ id: 'user-1', email: 'user@example.com' });

@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { EXCHANGE_MAP } from '../../config/constants';
+import { buildCanonicalMarketMetadata } from '../../core/exchange/market-metadata';
+import type { ExchangeId, QuoteCurrency } from '../../core/exchange/exchange.types';
 import type {
   NormalizedMarketCandle,
   NormalizedMarketOrderbook,
@@ -11,6 +13,25 @@ export const MARKET_WS_PROTOCOL_VERSION = '2026-04-15';
 
 const exchangeIdSchema = z.enum(['upbit', 'bithumb', 'coinone', 'korbit', 'binance']);
 
+const marketCapabilitiesDtoSchema = z.object({
+  supportsCandles: z.boolean(),
+  supportsOrderBook: z.boolean(),
+  supportsTrades: z.boolean(),
+});
+
+const marketMetadataShape = {
+  marketId: z.string(),
+  canonicalSymbol: z.string(),
+  baseAsset: z.string(),
+  quoteAsset: z.string(),
+  displaySymbol: z.string(),
+  koreanName: z.string().nullable(),
+  englishName: z.string().nullable(),
+  iconUrl: z.string().url().nullable(),
+  isActive: z.boolean(),
+  capabilities: marketCapabilitiesDtoSchema,
+};
+
 export const marketLevelDtoSchema = z.object({
   price: z.number(),
   quantity: z.number(),
@@ -19,9 +40,20 @@ export const marketLevelDtoSchema = z.object({
 export const tickerDtoSchema = z.object({
   exchange: exchangeIdSchema,
   exchangeName: z.string(),
+  ...marketMetadataShape,
   symbol: z.string(),
   canonicalAssetKey: z.string().nullable().optional(),
   assetImageUrl: z.string().url().nullable().optional(),
+  imageUrl: z.string().url().nullable().optional(),
+  imageURL: z.string().url().nullable().optional(),
+  hasImage: z.boolean().optional(),
+  imageAvailability: z.enum(['available', 'fallback', 'pending', 'lookup_failed', 'unavailable']).optional(),
+  imageFailureReason: z.string().nullable().optional(),
+  fallbackType: z.string().nullable().optional(),
+  assetType: z.string().nullable().optional(),
+  canonicalName: z.string().nullable().optional(),
+  fallbackColor: z.string().nullable().optional(),
+  fallbackInitials: z.string().nullable().optional(),
   market: z.string(),
   baseCurrency: z.string(),
   quoteCurrency: z.string(),
@@ -37,6 +69,7 @@ export const tickerDtoSchema = z.object({
 export const orderbookDtoSchema = z.object({
   exchange: exchangeIdSchema,
   exchangeName: z.string(),
+  ...marketMetadataShape,
   symbol: z.string(),
   market: z.string(),
   baseCurrency: z.string(),
@@ -53,6 +86,7 @@ export const orderbookDtoSchema = z.object({
 export const tradeDtoSchema = z.object({
   exchange: exchangeIdSchema,
   exchangeName: z.string(),
+  ...marketMetadataShape,
   symbol: z.string(),
   market: z.string(),
   baseCurrency: z.string(),
@@ -79,6 +113,7 @@ export const candleDtoSchema = z.object({
 export const liveCandleDtoSchema = z.object({
   exchange: exchangeIdSchema,
   exchangeName: z.string(),
+  ...marketMetadataShape,
   symbol: z.string(),
   market: z.string(),
   baseCurrency: z.string(),
@@ -110,6 +145,7 @@ export const orderbookResponseDtoSchema = orderbookDtoSchema;
 export const tradesResponseDtoSchema = z.object({
   exchange: exchangeIdSchema,
   exchangeName: z.string(),
+  ...marketMetadataShape,
   symbol: z.string(),
   market: z.string(),
   items: z.array(tradeDtoSchema),
@@ -120,6 +156,7 @@ export const tradesResponseDtoSchema = z.object({
 export const candlesResponseDtoSchema = z.object({
   exchange: exchangeIdSchema,
   exchangeName: z.string(),
+  ...marketMetadataShape,
   symbol: z.string(),
   market: z.string(),
   interval: z.string(),
@@ -325,13 +362,69 @@ function exchangeName(exchange: string) {
   return EXCHANGE_MAP.get(exchange)?.name ?? exchange;
 }
 
+function metadataFor(exchange: string, params: {
+  symbol: string;
+  rawSymbol?: string;
+  marketId?: string;
+  baseCurrency?: string;
+  quoteCurrency?: string;
+  canonicalSymbol?: string;
+  baseAsset?: string;
+  quoteAsset?: string;
+  displaySymbol?: string;
+  koreanName?: string | null;
+  englishName?: string | null;
+  iconUrl?: string | null;
+  isActive?: boolean;
+  capabilities?: {
+    supportsCandles: boolean;
+    supportsOrderBook: boolean;
+    supportsTrades: boolean;
+  };
+}) {
+  const metadata = buildCanonicalMarketMetadata({
+    exchange: exchange as ExchangeId,
+    symbol: params.canonicalSymbol ?? params.symbol,
+    marketId: params.marketId ?? params.rawSymbol,
+    rawSymbol: params.rawSymbol,
+    baseAsset: params.baseAsset ?? params.baseCurrency,
+    quoteAsset: (params.quoteAsset ?? params.quoteCurrency) as QuoteCurrency | undefined,
+    isActive: params.isActive,
+    capabilities: params.capabilities,
+  });
+
+  return {
+    marketId: params.marketId ?? metadata.marketId,
+    canonicalSymbol: params.canonicalSymbol ?? metadata.canonicalSymbol,
+    baseAsset: params.baseAsset ?? metadata.baseAsset,
+    quoteAsset: params.quoteAsset ?? metadata.quoteAsset,
+    displaySymbol: params.displaySymbol ?? metadata.displaySymbol,
+    koreanName: params.koreanName ?? metadata.koreanName,
+    englishName: params.englishName ?? metadata.englishName,
+    iconUrl: params.iconUrl ?? metadata.iconUrl,
+    isActive: params.isActive ?? metadata.isActive,
+    capabilities: params.capabilities ?? metadata.capabilities,
+  };
+}
+
 export function serializeTickerDto(ticker: NormalizedMarketTicker) {
   return tickerDtoSchema.parse({
     exchange: ticker.exchange,
     exchangeName: exchangeName(ticker.exchange),
+    ...metadataFor(ticker.exchange, ticker),
     symbol: ticker.symbol,
     canonicalAssetKey: ticker.canonicalAssetKey ?? ticker.symbol,
-    assetImageUrl: ticker.assetImageUrl ?? null,
+    assetImageUrl: ticker.assetImageUrl ?? ticker.iconUrl ?? null,
+    imageUrl: ticker.imageUrl ?? ticker.assetImageUrl ?? ticker.iconUrl ?? null,
+    imageURL: ticker.imageURL ?? ticker.imageUrl ?? ticker.assetImageUrl ?? ticker.iconUrl ?? null,
+    hasImage: ticker.hasImage ?? Boolean(ticker.assetImageUrl ?? ticker.iconUrl),
+    imageAvailability: ticker.imageAvailability,
+    imageFailureReason: ticker.imageFailureReason ?? null,
+    fallbackType: ticker.fallbackType ?? null,
+    assetType: ticker.assetType ?? null,
+    canonicalName: ticker.canonicalName ?? null,
+    fallbackColor: ticker.fallbackColor ?? null,
+    fallbackInitials: ticker.fallbackInitials ?? null,
     market: ticker.market,
     baseCurrency: ticker.baseCurrency,
     quoteCurrency: ticker.quoteCurrency,
@@ -349,6 +442,7 @@ export function serializeOrderbookDto(orderbook: NormalizedMarketOrderbook) {
   return orderbookDtoSchema.parse({
     exchange: orderbook.exchange,
     exchangeName: exchangeName(orderbook.exchange),
+    ...metadataFor(orderbook.exchange, orderbook),
     symbol: orderbook.symbol,
     market: orderbook.market,
     baseCurrency: orderbook.baseCurrency,
@@ -377,6 +471,7 @@ export function serializeTradeDto(trade: NormalizedMarketTrade) {
   return tradeDtoSchema.parse({
     exchange: trade.exchange,
     exchangeName: exchangeName(trade.exchange),
+    ...metadataFor(trade.exchange, trade),
     symbol: trade.symbol,
     market: trade.market,
     baseCurrency: trade.baseCurrency,
@@ -400,19 +495,37 @@ export function serializeTickersResponse(items: NormalizedMarketTicker[]) {
   });
 }
 
-export function serializeTradesResponse(
-  exchange: string,
-  symbol: string,
-  market: string,
-  items: NormalizedMarketTrade[],
-) {
+export function serializeTradesResponse(params: {
+  exchange: string;
+  symbol: string;
+  market: string;
+  rawSymbol?: string;
+  marketId?: string;
+  baseCurrency?: string;
+  quoteCurrency?: string;
+  canonicalSymbol?: string;
+  baseAsset?: string;
+  quoteAsset?: string;
+  displaySymbol?: string;
+  koreanName?: string | null;
+  englishName?: string | null;
+  iconUrl?: string | null;
+  isActive?: boolean;
+  capabilities?: {
+    supportsCandles: boolean;
+    supportsOrderBook: boolean;
+    supportsTrades: boolean;
+  };
+  items: NormalizedMarketTrade[];
+}) {
   return tradesResponseDtoSchema.parse({
-    exchange,
-    exchangeName: exchangeName(exchange),
-    symbol,
-    market,
-    items: items.map(serializeTradeDto),
-    total: items.length,
+    exchange: params.exchange,
+    exchangeName: exchangeName(params.exchange),
+    ...metadataFor(params.exchange, params),
+    symbol: params.symbol,
+    market: params.market,
+    items: params.items.map(serializeTradeDto),
+    total: params.items.length,
     snapshotAt: Date.now(),
   });
 }
@@ -421,6 +534,23 @@ export function serializeCandlesResponse(params: {
   exchange: string;
   symbol: string;
   market: string;
+  rawSymbol?: string;
+  marketId?: string;
+  baseCurrency?: string;
+  quoteCurrency?: string;
+  canonicalSymbol?: string;
+  baseAsset?: string;
+  quoteAsset?: string;
+  displaySymbol?: string;
+  koreanName?: string | null;
+  englishName?: string | null;
+  iconUrl?: string | null;
+  isActive?: boolean;
+  capabilities?: {
+    supportsCandles: boolean;
+    supportsOrderBook: boolean;
+    supportsTrades: boolean;
+  };
   interval: string;
   items: Array<{ time: number; open: number; high: number; low: number; close: number; volume: number }>;
   meta?: {
@@ -439,6 +569,7 @@ export function serializeCandlesResponse(params: {
   return candlesResponseDtoSchema.parse({
     exchange: params.exchange,
     exchangeName: exchangeName(params.exchange),
+    ...metadataFor(params.exchange, params),
     symbol: params.symbol,
     market: params.market,
     interval: params.interval,
@@ -652,6 +783,7 @@ export function serializeCandleDto(candle: NormalizedMarketCandle) {
   return liveCandleDtoSchema.parse({
     exchange: candle.exchange,
     exchangeName: exchangeName(candle.exchange),
+    ...metadataFor(candle.exchange, candle),
     symbol: candle.symbol,
     market: candle.market,
     baseCurrency: candle.baseCurrency,

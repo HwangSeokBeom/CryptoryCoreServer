@@ -1,9 +1,29 @@
 import { COIN_MAP } from '../../config/constants';
+import {
+  compactAssetToken,
+  isKnownQuoteAssetToken,
+  normalizeAssetToken,
+  resolveAssetAliasCandidate,
+  splitKnownQuotePair,
+} from './asset.registry';
 import { EXCHANGE_METADATA } from './exchange.metadata';
+import { resolveIconUrl } from './icon.resolver';
 import type { CanonicalMarket, ExchangeId } from './exchange.types';
 
+export type CanonicalAssetResolution = {
+  canonicalAssetKey: string | null;
+  aliasHit: boolean;
+  matchedBy: 'canonicalAssetKey' | 'symbol' | 'exchangeSymbol' | 'rawSymbol' | 'exchange_alias' | 'global_alias' | 'normalized' | 'unresolved';
+  input: string | null;
+};
+
 function normalizeSymbol(symbol: string) {
-  return symbol.trim().toUpperCase().replace(/\s+/g, '');
+  return normalizeAssetToken(symbol);
+}
+
+function isFiatOrStableQuoteToken(value: string) {
+  return ['KRW', 'USD', 'USDT', 'USDC', 'FDUSD', 'BUSD', 'TUSD', 'USDP', 'DAI', 'EUR', 'TRY', 'BRL']
+    .includes(compactAssetToken(value));
 }
 
 export function toCanonicalSymbol(symbol: string) {
@@ -12,34 +32,32 @@ export function toCanonicalSymbol(symbol: string) {
     return '';
   }
 
-  const exchangePrefixMatch = normalized.match(/^(KRW|USDT)[-_/]([A-Z0-9]+)$/i);
-  if (exchangePrefixMatch) {
-    return exchangePrefixMatch[2];
-  }
-
-  const exchangeSuffixMatch = normalized.match(/^([A-Z0-9]+)[-_/](KRW|USDT)$/i);
-  if (exchangeSuffixMatch) {
-    return exchangeSuffixMatch[1];
-  }
-
-  if (/^[A-Z0-9]+USDT$/i.test(normalized) && normalized.length > 4) {
-    return normalized.slice(0, -4);
-  }
-
-  if (/^(KRW|USDT)[A-Z0-9]+$/i.test(normalized)) {
-    const prefixLength = normalized.startsWith('KRW') ? 3 : 4;
-    const candidate = normalized.slice(prefixLength);
-    if (COIN_MAP.has(candidate)) {
-      return candidate;
+  const separatedPairMatch = normalized.match(/^([A-Z0-9]+)[-_/]([A-Z0-9]+)$/i);
+  if (separatedPairMatch) {
+    const left = separatedPairMatch[1];
+    const right = separatedPairMatch[2];
+    if (isFiatOrStableQuoteToken(left) && right) {
+      return right;
+    }
+    if (isFiatOrStableQuoteToken(right) && left) {
+      return left;
+    }
+    if (isKnownQuoteAssetToken(right) && left) {
+      return left;
+    }
+    if (isKnownQuoteAssetToken(left) && right) {
+      return right;
     }
   }
 
-  if (/^[A-Z0-9]+(KRW|USDT)$/i.test(normalized)) {
-    const suffixLength = normalized.endsWith('KRW') ? 3 : 4;
-    const candidate = normalized.slice(0, -suffixLength);
-    if (COIN_MAP.has(candidate)) {
-      return candidate;
-    }
+  const compactPair = splitKnownQuotePair(normalized);
+  if (compactPair) {
+    return compactPair.baseAsset;
+  }
+
+  const compact = compactAssetToken(normalized);
+  if (compact !== normalized) {
+    return compact;
   }
 
   return normalized;
@@ -47,6 +65,57 @@ export function toCanonicalSymbol(symbol: string) {
 
 export function isSupportedCanonicalSymbol(symbol: string) {
   return COIN_MAP.has(toCanonicalSymbol(symbol));
+}
+
+export function resolveCanonicalAssetKey(params: {
+  exchange?: ExchangeId;
+  canonicalAssetKey?: string | null;
+  symbol?: string | null;
+  exchangeSymbol?: string | null;
+  rawSymbol?: string | null;
+}): CanonicalAssetResolution {
+  const candidates: Array<{ value?: string | null; matchedBy: CanonicalAssetResolution['matchedBy'] }> = [
+    { value: params.canonicalAssetKey, matchedBy: 'canonicalAssetKey' },
+    { value: params.symbol, matchedBy: 'symbol' },
+    { value: params.exchangeSymbol, matchedBy: 'exchangeSymbol' },
+    { value: params.rawSymbol, matchedBy: 'rawSymbol' },
+  ];
+
+  for (const candidate of candidates) {
+    if (!candidate.value) {
+      continue;
+    }
+
+    const normalized = toCanonicalSymbol(candidate.value);
+    if (!normalized) {
+      continue;
+    }
+
+    const alias = resolveAssetAliasCandidate(candidate.value, params.exchange)
+      ?? resolveAssetAliasCandidate(normalized, params.exchange);
+    if (alias?.canonicalAssetKey) {
+      return {
+        canonicalAssetKey: alias.canonicalAssetKey,
+        aliasHit: true,
+        matchedBy: alias.matchedBy,
+        input: candidate.value,
+      };
+    }
+
+    return {
+      canonicalAssetKey: normalized,
+      aliasHit: false,
+      matchedBy: candidate.matchedBy === 'canonicalAssetKey' ? 'canonicalAssetKey' : 'normalized',
+      input: candidate.value,
+    };
+  }
+
+  return {
+    canonicalAssetKey: null,
+    aliasHit: false,
+    matchedBy: 'unresolved',
+    input: null,
+  };
 }
 
 export function toExchangeSymbol(exchange: ExchangeId, symbol: string) {
@@ -71,15 +140,15 @@ export function fromExchangeSymbol(exchange: ExchangeId, rawSymbol: string) {
 
   switch (exchange) {
     case 'upbit':
-      return normalized.replace(/^KRW-|^USDT-/i, '').toUpperCase();
+      return toCanonicalSymbol(normalized);
     case 'bithumb':
-      return normalized.replace(/_KRW$/i, '').replace(/^KRW-/i, '').toUpperCase();
+      return toCanonicalSymbol(normalized);
     case 'coinone':
-      return normalized.toUpperCase();
+      return toCanonicalSymbol(normalized);
     case 'korbit':
-      return normalized.replace(/_krw$/i, '').replace(/_usdt$/i, '').toUpperCase();
+      return toCanonicalSymbol(normalized);
     case 'binance':
-      return normalized.replace(/USDT$/i, '').toUpperCase();
+      return toCanonicalSymbol(normalized);
   }
 }
 
@@ -87,14 +156,29 @@ export function toCanonicalMarket(exchange: ExchangeId, symbol: string): Canonic
   const canonicalSymbol = toCanonicalSymbol(symbol);
   const quoteCurrency = EXCHANGE_METADATA[exchange].quoteCurrency;
   const coin = COIN_MAP.get(canonicalSymbol);
+  const rawSymbol = toExchangeSymbol(exchange, canonicalSymbol);
 
   return {
     exchange,
+    marketId: rawSymbol,
+    rawSymbol,
+    canonicalSymbol,
+    baseAsset: canonicalSymbol,
+    quoteAsset: quoteCurrency,
+    displaySymbol: `${canonicalSymbol}/${quoteCurrency}`,
+    koreanName: coin?.nameKo ?? null,
+    englishName: coin?.nameEn ?? null,
+    iconUrl: resolveIconUrl(canonicalSymbol),
+    isActive: true,
+    capabilities: {
+      supportsCandles: true,
+      supportsOrderBook: true,
+      supportsTrades: true,
+    },
     symbol: canonicalSymbol,
     market: `${canonicalSymbol}/${quoteCurrency}`,
     baseCurrency: canonicalSymbol,
     quoteCurrency,
-    rawSymbol: toExchangeSymbol(exchange, canonicalSymbol),
     nameKo: coin?.nameKo,
     nameEn: coin?.nameEn,
   };

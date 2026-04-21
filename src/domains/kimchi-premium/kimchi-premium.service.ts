@@ -24,7 +24,11 @@ import type {
 } from '../../core/exchange/exchange.types';
 import { logger } from '../../utils/logger';
 import { AppError } from '../../utils/errors';
-import { assetMetadataService } from '../assets/asset-metadata.service';
+import {
+  assetMetadataService,
+  type AssetMetadataLookup,
+  type AssetMetadataView,
+} from '../assets/asset-metadata.service';
 import {
   calculateDataAge,
   createFreshnessMetadata,
@@ -1833,17 +1837,48 @@ function logAssetImageProjectionBatch(
   }
 }
 
+async function getAssetViewsForProjection(
+  lookups: AssetMetadataLookup[],
+  context: string,
+): Promise<Map<string, AssetMetadataView>> {
+  const service = assetMetadataService as typeof assetMetadataService & {
+    getAssetViewsSafely?: (
+      lookups: AssetMetadataLookup[],
+      context: string,
+    ) => Promise<Map<string, AssetMetadataView>>;
+  };
+
+  if (typeof service.getAssetViewsSafely === 'function') {
+    return service.getAssetViewsSafely(lookups, context);
+  }
+
+  try {
+    return await service.getAssetViews(lookups);
+  } catch (error) {
+    logger.warn(
+      {
+        domain: 'asset-image',
+        action: 'asset_view_lookup_failed',
+        context,
+        err: error,
+      },
+      `[AssetImageDebug] action=asset_view_lookup_failed context=${context}`,
+    );
+    return new Map<string, AssetMetadataView>();
+  }
+}
+
 async function decorateKimchiViewportRows(rows: KimchiPremiumViewportRow[]) {
   if (rows.length === 0) {
     return rows;
   }
 
-  const views = await assetMetadataService.getAssetViews(rows.map((row) => ({
+  const views = await getAssetViewsForProjection(rows.map((row) => ({
     exchange: row.selectedExchange,
     symbol: row.symbol,
     displayName: row.displayName,
     canonicalAssetKey: row.canonicalAssetKey,
-  })));
+  })), 'kimchi-premium.decorateKimchiViewportRows');
 
   return rows.map((row) => {
     const view = views.get(row.canonicalAssetKey ?? row.symbol);

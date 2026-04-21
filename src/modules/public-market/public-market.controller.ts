@@ -3,7 +3,7 @@ import { EXCHANGE_MAP } from '../../config/constants';
 import type { DomesticExchangeId } from '../../core/exchange/exchange.types';
 import { createErrorResponse, createSuccessResponse } from '../../utils/errors';
 import { logger } from '../../utils/logger';
-import { buildUnifiedMarketName, toUnifiedSymbol } from './market.normalization';
+import { buildUnifiedMarketName, resolveMarketCatalogEntry, toUnifiedSymbol } from './market.normalization';
 import {
   serializeCandlesResponse,
   serializeKimchiPremiumResponse,
@@ -63,26 +63,40 @@ export async function publicMarketRoutes(app: FastifyInstance) {
   });
 
   app.get('/tickers', async (request, reply) => {
-    const { exchange, symbol } = request.query as { exchange?: string; symbol?: string };
+    const { exchange, symbol, marketId } = request.query as { exchange?: string; symbol?: string; marketId?: string };
     const exchangeError = ensureSupportedExchange(exchange);
     if (exchangeError) {
       return reply.status(400).send(exchangeError);
     }
-    const tickers = await getPublicTickers({ exchange, symbol });
+    if (marketId && !exchange) {
+      return reply.status(400).send(createErrorResponse('exchange is required when marketId is provided'));
+    }
+    const resolvedMarket = exchange && marketId
+      ? resolveMarketCatalogEntry({ exchange, marketId })
+      : null;
+    if (marketId && exchange && !resolvedMarket) {
+      return reply.status(400).send(createErrorResponse('marketId is not listed on the requested exchange'));
+    }
+    const tickers = await getPublicTickers({ exchange, symbol: resolvedMarket?.symbol ?? symbol });
     return createSuccessResponse(serializeTickersResponse(tickers));
   });
 
   app.get('/orderbook', async (request, reply) => {
-    const { exchange, symbol } = request.query as { exchange?: string; symbol?: string };
-    if (!exchange || !symbol) {
-      return reply.status(400).send(createErrorResponse('exchange and symbol are required'));
+    const { exchange, symbol, marketId } = request.query as { exchange?: string; symbol?: string; marketId?: string };
+    if (!exchange || (!symbol && !marketId)) {
+      return reply.status(400).send(createErrorResponse('exchange and symbol or marketId are required'));
     }
     const exchangeError = ensureSupportedExchange(exchange);
     if (exchangeError) {
       return reply.status(400).send(exchangeError);
     }
 
-    const orderbook = await getPublicOrderbook(symbol, exchange);
+    const resolvedMarket = resolveMarketCatalogEntry({ exchange, symbol, marketId });
+    if (!resolvedMarket) {
+      return reply.status(400).send(createErrorResponse('symbol or marketId is not listed on the requested exchange'));
+    }
+
+    const orderbook = await getPublicOrderbook(resolvedMarket.symbol, exchange);
     if (!orderbook) {
       return reply.status(404).send(createErrorResponse('orderbook not found'));
     }
@@ -91,56 +105,99 @@ export async function publicMarketRoutes(app: FastifyInstance) {
   });
 
   app.get('/trades', async (request, reply) => {
-    const { exchange, symbol, limit } = request.query as {
+    const { exchange, symbol, marketId, limit } = request.query as {
       exchange?: string;
       symbol?: string;
+      marketId?: string;
       limit?: string;
     };
 
-    if (!exchange || !symbol) {
-      return reply.status(400).send(createErrorResponse('exchange and symbol are required'));
+    if (!exchange || (!symbol && !marketId)) {
+      return reply.status(400).send(createErrorResponse('exchange and symbol or marketId are required'));
     }
     const exchangeError = ensureSupportedExchange(exchange);
     if (exchangeError) {
       return reply.status(400).send(exchangeError);
     }
 
-    const trades = getPublicTrades(symbol, exchange, limit ? parseInt(limit, 10) : 50);
-    const unifiedSymbol = toUnifiedSymbol(symbol);
+    const resolvedMarket = resolveMarketCatalogEntry({ exchange, symbol, marketId });
+    if (!resolvedMarket) {
+      return reply.status(400).send(createErrorResponse('symbol or marketId is not listed on the requested exchange'));
+    }
+
+    const trades = getPublicTrades(resolvedMarket.symbol, exchange, limit ? parseInt(limit, 10) : 50);
+    const unifiedSymbol = toUnifiedSymbol(resolvedMarket.symbol);
     return createSuccessResponse(
-      serializeTradesResponse(exchange, unifiedSymbol, buildUnifiedMarketName(exchange, unifiedSymbol), trades),
+      serializeTradesResponse({
+        exchange,
+        symbol: unifiedSymbol,
+        market: buildUnifiedMarketName(exchange, unifiedSymbol),
+        marketId: resolvedMarket.marketId,
+        rawSymbol: resolvedMarket.rawSymbol,
+        canonicalSymbol: resolvedMarket.canonicalSymbol,
+        baseCurrency: resolvedMarket.baseCurrency,
+        quoteCurrency: resolvedMarket.quoteCurrency,
+        baseAsset: resolvedMarket.baseAsset,
+        quoteAsset: resolvedMarket.quoteAsset,
+        displaySymbol: resolvedMarket.displaySymbol,
+        koreanName: resolvedMarket.koreanName,
+        englishName: resolvedMarket.englishName,
+        iconUrl: resolvedMarket.iconUrl,
+        isActive: resolvedMarket.isActive,
+        capabilities: resolvedMarket.capabilities,
+        items: trades,
+      }),
     );
   });
 
   app.get('/candles', async (request, reply) => {
-    const { exchange, symbol, period, limit } = request.query as {
+    const { exchange, symbol, marketId, period, limit } = request.query as {
       exchange?: string;
       symbol?: string;
+      marketId?: string;
       period?: string;
       limit?: string;
     };
 
-    if (!exchange || !symbol) {
-      return reply.status(400).send(createErrorResponse('exchange and symbol are required'));
+    if (!exchange || (!symbol && !marketId)) {
+      return reply.status(400).send(createErrorResponse('exchange and symbol or marketId are required'));
     }
     const exchangeError = ensureSupportedExchange(exchange);
     if (exchangeError) {
       return reply.status(400).send(exchangeError);
     }
 
+    const resolvedMarket = resolveMarketCatalogEntry({ exchange, symbol, marketId });
+    if (!resolvedMarket) {
+      return reply.status(400).send(createErrorResponse('symbol or marketId is not listed on the requested exchange'));
+    }
+
     const candles = await getPublicCandlesWithMeta(
-      symbol,
+      resolvedMarket.symbol,
       exchange,
       period ?? '1h',
       limit ? parseInt(limit, 10) : 60,
     );
 
-    const unifiedSymbol = toUnifiedSymbol(symbol);
+    const unifiedSymbol = toUnifiedSymbol(resolvedMarket.symbol);
     return createSuccessResponse(
       serializeCandlesResponse({
         exchange,
         symbol: unifiedSymbol,
         market: buildUnifiedMarketName(exchange, unifiedSymbol),
+        marketId: resolvedMarket.marketId,
+        rawSymbol: resolvedMarket.rawSymbol,
+        canonicalSymbol: resolvedMarket.canonicalSymbol,
+        baseCurrency: resolvedMarket.baseCurrency,
+        quoteCurrency: resolvedMarket.quoteCurrency,
+        baseAsset: resolvedMarket.baseAsset,
+        quoteAsset: resolvedMarket.quoteAsset,
+        displaySymbol: resolvedMarket.displaySymbol,
+        koreanName: resolvedMarket.koreanName,
+        englishName: resolvedMarket.englishName,
+        iconUrl: resolvedMarket.iconUrl,
+        isActive: resolvedMarket.isActive,
+        capabilities: resolvedMarket.capabilities,
         interval: period ?? '1h',
         items: candles.items,
         meta: candles.meta,
