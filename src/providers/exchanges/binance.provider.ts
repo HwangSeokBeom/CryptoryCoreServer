@@ -1,5 +1,5 @@
 import { COINS } from '../../config/constants';
-import { buildBinancePublicWebSocketUrl } from '../../config/exchange.config';
+import { buildBinancePublicWebSocketUrl, getExchangeConfig } from '../../config/exchange.config';
 import { ExchangeRequestError } from '../../core/exchange/errors';
 import { resolveExchangeInterval } from '../../core/exchange/interval.mapper';
 import type {
@@ -85,6 +85,16 @@ export class BinanceProvider
 
   constructor() {
     super('binance');
+    const config = getExchangeConfig(this.exchange);
+    logger.info(
+      {
+        domain: 'market-provider',
+        exchange: this.exchange,
+        publicRestBaseUrl: config.publicRestBaseUrl,
+        privateRestBaseUrl: config.privateRestBaseUrl,
+      },
+      'Initialized Binance REST clients',
+    );
   }
 
   private logTickerDebug(
@@ -131,8 +141,30 @@ export class BinanceProvider
       ttlMs: MARKET_CACHE_TTL_MS,
       staleTtlMs: MARKET_STALE_TTL_MS,
       loader: async () => {
-        const response = await this.restClient.request<any>('/api/v3/exchangeInfo');
-        const symbols = Array.isArray(response.symbols) ? response.symbols : [];
+        const config = getExchangeConfig(this.exchange);
+        logger.info(
+          {
+            domain: 'market-provider',
+            exchange: this.exchange,
+            operation: 'markets',
+            endpoint: '/api/v3/exchangeInfo',
+            publicRestBaseUrl: config.publicRestBaseUrl,
+          },
+          'Preparing Binance public exchangeInfo request',
+        );
+        const response = await this.publicRestClient.requestDetailed<any>('/api/v3/exchangeInfo');
+        logger.info(
+          {
+            domain: 'market-provider',
+            exchange: this.exchange,
+            operation: 'markets',
+            endpoint: response.meta.path,
+            requestUrl: response.meta.requestUrl,
+            statusCode: response.meta.statusCode,
+          },
+          'Completed Binance public exchangeInfo request',
+        );
+        const symbols = Array.isArray(response.data.symbols) ? response.data.symbols : [];
         return symbols
           .filter((item: any) => String(item.quoteAsset ?? '').toUpperCase() === 'USDT')
           .map((item: any): ExchangeMarketDescriptor => {
@@ -228,7 +260,7 @@ export class BinanceProvider
           });
 
           try {
-            const response = await this.restClient.requestDetailed<any[]>('/api/v3/ticker/24hr', { query });
+            const response = await this.publicRestClient.requestDetailed<any[]>('/api/v3/ticker/24hr', { query });
             this.logTickerDebug({
               action: 'response_success',
               endpoint: '/api/v3/ticker/24hr',
@@ -311,7 +343,7 @@ export class BinanceProvider
   async getOrderbookSnapshot(symbol: string, depth = 15): Promise<CanonicalOrderbookSnapshot> {
     const canonical = toCanonicalSymbol(symbol);
     const market = toCanonicalMarket(this.exchange, canonical);
-    const response = await this.restClient.request<any>('/api/v3/depth', {
+    const response = await this.publicRestClient.request<any>('/api/v3/depth', {
       query: {
         symbol: toExchangeSymbol(this.exchange, canonical),
         limit: Math.min(depth, 1000),
@@ -346,7 +378,7 @@ export class BinanceProvider
   async getRecentTrades(symbol: string, limit = 50): Promise<CanonicalTrade[]> {
     const canonical = toCanonicalSymbol(symbol);
     const rawSymbol = toExchangeSymbol(this.exchange, canonical);
-    const response = await this.restClient.request<any[]>('/api/v3/trades', {
+    const response = await this.publicRestClient.request<any[]>('/api/v3/trades', {
       query: {
         symbol: rawSymbol,
         limit,
@@ -383,7 +415,7 @@ export class BinanceProvider
     if (!resolved) {
       return [];
     }
-    const candles = await this.restClient.request<any[]>('/api/v3/klines', {
+    const candles = await this.publicRestClient.request<any[]>('/api/v3/klines', {
       query: {
         symbol: toExchangeSymbol(this.exchange, canonical),
         interval: resolved.exchangeInterval,

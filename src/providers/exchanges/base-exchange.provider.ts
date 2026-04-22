@@ -69,12 +69,17 @@ function isRateLimitError(error: unknown) {
 export abstract class BaseExchangeProvider {
   readonly metadata: ExchangeMetadata;
   protected readonly restClient: RestClient;
+  protected readonly publicRestClient: RestClient;
+  protected readonly privateRestClient: RestClient;
   private readonly requestCache = new Map<string, CachedProviderResponse<unknown>>();
   private readonly inFlightRequests = new Map<string, Promise<unknown>>();
 
   constructor(readonly exchange: ExchangeId) {
     this.metadata = EXCHANGE_METADATA[exchange];
-    this.restClient = new RestClient(exchange, getExchangeConfig(exchange).publicRestBaseUrl);
+    const exchangeConfig = getExchangeConfig(exchange);
+    this.publicRestClient = new RestClient(exchange, exchangeConfig.publicRestBaseUrl);
+    this.privateRestClient = new RestClient(exchange, exchangeConfig.privateRestBaseUrl);
+    this.restClient = this.publicRestClient;
   }
 
   supports(capability: ExchangeCapability) {
