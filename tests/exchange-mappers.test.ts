@@ -308,5 +308,168 @@ describe('Exchange Mappers', () => {
       resolutionSource: 'registry_direct',
       fallbackOnly: false,
     });
+
+    expect(resolvePreferredAssetImage({
+      canonicalAssetKey: 'MON',
+      symbol: 'MON',
+    })).toMatchObject({
+      preferredImageSlug: 'monad',
+      preferredImageCoingeckoId: 'monad',
+      resolutionSource: 'image_alias_override',
+      fallbackOnly: false,
+    });
+
+    expect(resolvePreferredAssetImage({
+      canonicalAssetKey: 'ORDER',
+      symbol: 'ORDER',
+    })).toMatchObject({
+      preferredImageSlug: 'orderly-network',
+      preferredImageCoingeckoId: 'orderly-network',
+      resolutionSource: 'image_alias_override',
+      fallbackOnly: false,
+    });
+
+    expect(resolvePreferredAssetImage({
+      canonicalAssetKey: 'XPLA',
+      symbol: 'XPLA',
+    })).toMatchObject({
+      preferredImageSymbol: 'CONX',
+      preferredImageSlug: 'xpla',
+      preferredImageCoingeckoId: 'xpla',
+      resolutionSource: 'image_alias_override',
+      fallbackOnly: false,
+    });
+
+    expect(resolvePreferredAssetImage({
+      canonicalAssetKey: 'BOBA',
+      symbol: 'BOBA',
+    })).toMatchObject({
+      preferredImageSlug: 'boba-network',
+      preferredImageCoingeckoId: 'boba-network',
+      resolutionSource: 'image_alias_override',
+      fallbackOnly: false,
+    });
+
+    expect(resolvePreferredAssetImage({
+      canonicalAssetKey: 'DBR',
+      symbol: 'DBR',
+    })).toMatchObject({
+      preferredImageSlug: 'debridge',
+      preferredImageCoingeckoId: 'debridge',
+      resolutionSource: 'image_alias_override',
+      fallbackOnly: false,
+    });
+
+    expect(resolvePreferredAssetImage({
+      canonicalAssetKey: 'IOTX',
+      symbol: 'IOTX',
+    })).toMatchObject({
+      preferredImageSlug: 'iotex',
+      preferredImageCoingeckoId: 'iotex',
+      resolutionSource: 'image_alias_override',
+      fallbackOnly: false,
+    });
+
+    expect(resolvePreferredAssetImage({
+      canonicalAssetKey: 'MASK',
+      symbol: 'MASK',
+    })).toMatchObject({
+      preferredImageSlug: 'mask-network',
+      preferredImageCoingeckoId: 'mask-network',
+      resolutionSource: 'image_alias_override',
+      fallbackOnly: false,
+    });
+
+    expect(resolvePreferredAssetImage({
+      canonicalAssetKey: 'NXPC',
+      symbol: 'NXPC',
+    })).toMatchObject({
+      preferredImageSlug: 'nexpace',
+      preferredImageCoingeckoId: 'nexpace',
+      resolutionSource: 'image_alias_override',
+      fallbackOnly: false,
+    });
+
+    expect(resolvePreferredAssetImage({
+      canonicalAssetKey: 'SOPH',
+      symbol: 'SOPH',
+    })).toMatchObject({
+      preferredImageSlug: 'sophon',
+      preferredImageCoingeckoId: 'sophon',
+      resolutionSource: 'image_alias_override',
+      fallbackOnly: false,
+    });
+
+    expect(resolvePreferredAssetImage({
+      canonicalAssetKey: 'TRAC',
+      symbol: 'TRAC',
+    })).toMatchObject({
+      preferredImageSlug: 'origintrail',
+      preferredImageCoingeckoId: 'origintrail',
+      resolutionSource: 'image_alias_override',
+      fallbackOnly: false,
+    });
+
+    expect(resolvePreferredAssetImage({
+      canonicalAssetKey: 'ZRX',
+      symbol: 'ZRX',
+    })).toMatchObject({
+      preferredImageSlug: '0x',
+      preferredImageCoingeckoId: '0x',
+      resolutionSource: 'image_alias_override',
+      fallbackOnly: false,
+    });
+
+    expect(resolvePreferredAssetImage({
+      canonicalAssetKey: 'KITE',
+      symbol: 'KITE',
+    })).toMatchObject({
+      preferredImageSymbol: 'KITE',
+      imageMissingReason: 'missing_curated_mapping',
+      fallbackOnly: true,
+      manualCurationRecommended: true,
+    });
+
+    expect(resolvePreferredAssetImage({
+      canonicalAssetKey: 'BRETT',
+      symbol: 'BRETT',
+    })).toMatchObject({
+      preferredImageSymbol: 'BRETT',
+      imageMissingReason: 'missing_curated_mapping',
+      fallbackOnly: true,
+      manualCurationRecommended: true,
+    });
+
+    expect(resolvePreferredAssetImage({
+      canonicalAssetKey: 'BASED',
+      symbol: 'BASED',
+    })).toMatchObject({
+      preferredImageSymbol: 'BASED',
+      imageMissingReason: 'missing_curated_mapping',
+      fallbackOnly: true,
+      manualCurationRecommended: true,
+    });
+
+    expect(resolvePreferredAssetImage({
+      canonicalAssetKey: 'BOB',
+      symbol: 'BOB',
+    })).toMatchObject({
+      preferredImageSymbol: 'BOB',
+      imageMissingReason: 'missing_curated_mapping',
+      fallbackOnly: true,
+      manualCurationRecommended: true,
+    });
+
+    expect(resolvePreferredAssetImage({
+      exchange: 'binance',
+      canonicalAssetKey: 'EPIC',
+      symbol: 'EPIC',
+      rawSymbol: 'EPICUSDT',
+    })).toMatchObject({
+      preferredImageSymbol: 'EPIC',
+      imageMissingReason: 'missing_curated_mapping',
+      fallbackOnly: true,
+      manualCurationRecommended: true,
+    });
   });
 });
