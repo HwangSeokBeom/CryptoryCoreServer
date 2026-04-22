@@ -34,6 +34,11 @@ vi.mock('../src/modules/public-market/market.data.store', () => ({
 describe('market ticker row completeness', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    provider.exchange = 'upbit';
+    provider.metadata = {
+      displayName: '업비트',
+      quoteCurrency: 'KRW',
+    };
   });
 
   it('includes volume and a fallback sparkline when history is unavailable', async () => {
@@ -145,6 +150,79 @@ describe('market ticker row completeness', () => {
     expect(ticker.imageUrl).toBeTruthy();
     expect(ticker.imageURL).toBe(ticker.imageUrl);
     expect(ticker.assetImageUrl).toBe(ticker.imageUrl);
+  });
+
+  it('keeps provider market rows as unpriced instead of dropping them when ticker snapshot fetch fails', async () => {
+    provider.exchange = 'binance';
+    provider.metadata = {
+      displayName: '바이낸스',
+      quoteCurrency: 'USDT',
+    };
+    provider.listMarkets.mockResolvedValue([
+      {
+        symbol: 'BTC',
+        exchangeSymbol: 'BTCUSDT',
+        marketId: 'BTCUSDT',
+        market: 'BTC/USDT',
+        baseCurrency: 'BTC',
+        quoteCurrency: 'USDT',
+        rawSymbol: 'BTCUSDT',
+        tradable: true,
+      },
+      {
+        symbol: 'ETH',
+        exchangeSymbol: 'ETHUSDT',
+        marketId: 'ETHUSDT',
+        market: 'ETH/USDT',
+        baseCurrency: 'ETH',
+        quoteCurrency: 'USDT',
+        rawSymbol: 'ETHUSDT',
+        tradable: true,
+      },
+    ]);
+    provider.getTickerSnapshot.mockRejectedValue(new Error('binance request failed with HTTP 400 body={"code":-1121,"msg":"Invalid symbol."}'));
+    const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => logger);
+
+    const { getTickers } = await import('../src/domains/market-data/market-data.service');
+    const response = await getTickers({ exchange: 'binance' });
+
+    expect(response.items.map((item) => item.symbol)).toEqual(['BTC', 'ETH']);
+    expect(response.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        symbol: 'BTC',
+        price: null,
+        current: null,
+        currentPriceSource: 'unavailable',
+        change24h: null,
+        volume24h: null,
+        sparkline: [],
+      }),
+      expect.objectContaining({
+        symbol: 'ETH',
+        price: null,
+        current: null,
+        currentPriceSource: 'unavailable',
+      }),
+    ]));
+    expect(response.meta).toMatchObject({
+      sourceOfTruth: 'provider_market_universe',
+      providerMarketCount: 2,
+      returnedCount: 2,
+      totalAvailableCount: 2,
+      droppedSymbols: [],
+    });
+
+    const degradeLog = infoSpy.mock.calls.find(([payload, message]) =>
+      message?.includes('[MarketMergeDebug] action=degrade_to_unpriced')
+      && typeof payload === 'object'
+      && payload !== null
+      && 'exchange' in payload
+      && payload.exchange === 'binance');
+    expect(degradeLog?.[0]).toMatchObject({
+      exchange: 'binance',
+      action: 'degrade_to_unpriced',
+      affectedCount: 2,
+    });
   });
 
   it('keeps unresolved default placeholders as image misses with client-aligned log keys', async () => {

@@ -381,6 +381,7 @@ export class UpbitProvider
   async getOrderChance(symbol: string, context: ProviderContext): Promise<OrderChance> {
     const credentials = requireCredentials(this.exchange, context);
     const rawSymbol = toExchangeSymbol(this.exchange, symbol);
+    const canonicalSymbol = toCanonicalSymbol(symbol);
     const headers = this.signer.createAuthorizationHeader({
       accessKey: credentials.apiKey,
       secretKey: credentials.secretKey,
@@ -390,16 +391,59 @@ export class UpbitProvider
       query: { market: rawSymbol },
       headers,
     });
+    const upstreamOrderTypes = Array.isArray(response.market?.order_types)
+      ? response.market.order_types.map((type: unknown) => String(type).toLowerCase())
+      : [];
+    const upstreamOrderSides = Array.isArray(response.market?.order_sides)
+      ? response.market.order_sides.map((side: unknown) => String(side).toLowerCase())
+      : [];
+    const supportsLimit = upstreamOrderTypes.length === 0 || upstreamOrderTypes.includes('limit');
+    const supportsMarket =
+      upstreamOrderTypes.length === 0
+      || upstreamOrderTypes.includes('market')
+      || upstreamOrderTypes.includes('price');
+    const makerFee = safeNumber(response.bid_fee);
+    const takerFee = safeNumber(response.ask_fee);
+    const minTotal = safeNumber(response.market?.ask?.min_total ?? response.market?.bid?.min_total);
+    const maxTotal = safeNumber(response.market?.max_total);
+    const priceUnit = safeNumber(response.market?.bid?.price_unit ?? response.market?.ask?.price_unit);
+    const availableQuote = safeNumber(response.bid_account?.balance);
+    const availableBaseAsset = safeNumber(response.ask_account?.balance);
 
     return {
       exchange: this.exchange,
-      market: `${toCanonicalSymbol(symbol)}/KRW`,
-      symbol: toCanonicalSymbol(symbol),
+      market: `${canonicalSymbol}/KRW`,
+      symbol: canonicalSymbol,
       quoteCurrency: 'KRW',
-      minTotal: safeNumber(response.market?.ask?.min_total ?? response.market?.bid?.min_total),
-      makerFee: safeNumber(response.bid_fee),
-      takerFee: safeNumber(response.ask_fee),
-      supportedOrderTypes: ['limit', 'market'],
+      baseAsset: canonicalSymbol,
+      availableKRW: availableQuote,
+      availableQuote,
+      availableBaseAsset,
+      minTotal,
+      maxTotal,
+      makerFee,
+      takerFee,
+      supportedOrderTypes: [
+        ...(supportsLimit ? ['limit'] : []),
+        ...(supportsMarket ? ['market'] : []),
+      ],
+      fees: {
+        maker: makerFee,
+        taker: takerFee,
+      },
+      precision: {
+        priceUnit,
+      },
+      limits: {
+        minTotal,
+        maxTotal,
+      },
+      orderable: {
+        buy: upstreamOrderSides.length === 0 || upstreamOrderSides.includes('bid'),
+        sell: upstreamOrderSides.length === 0 || upstreamOrderSides.includes('ask'),
+        limit: supportsLimit,
+        market: supportsMarket,
+      },
     };
   }
 
@@ -591,11 +635,21 @@ export class UpbitProvider
   ): Promise<AssetHistoryRecord[]> {
     const fills = await this.listFills(symbol, limit, context);
     return fills.map((fill) => ({
+      id: fill.fillId,
       exchange: this.exchange,
+      assetSymbol: fill.symbol,
       symbol: fill.symbol,
+      eventType: 'trade',
       type: 'trade',
       amount: fill.side === 'buy' ? fill.quantity : -fill.quantity,
+      price: fill.price,
+      occurredAt: toIsoTimestamp(fill.timestamp),
       timestamp: fill.timestamp,
+      source: 'exchange_private_api',
+      sourceType: 'fill',
+      isSynthetic: false,
+      isVerifiedUserEvent: true,
+      orderId: fill.orderId,
       description: `${fill.side.toUpperCase()} ${fill.quantity} @ ${fill.price}`,
     }));
   }

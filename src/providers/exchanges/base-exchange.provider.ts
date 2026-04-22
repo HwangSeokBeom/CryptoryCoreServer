@@ -95,6 +95,7 @@ export abstract class BaseExchangeProvider {
     staleWhileRevalidate?: boolean;
     requestedMarketCount?: number;
     normalizedSymbolCount?: number;
+    totalAvailableCountOnError?: number;
     loader: () => Promise<T>;
     responseItemCount: (value: T) => number;
     symbolDiff?: RequestSymbolDiff<T>;
@@ -180,6 +181,7 @@ export abstract class BaseExchangeProvider {
       operation: string;
       requestedMarketCount?: number;
       normalizedSymbolCount?: number;
+      totalAvailableCountOnError?: number;
       responseItemCount: (value: T) => number;
       symbolDiff?: RequestSymbolDiff<T>;
     },
@@ -189,12 +191,17 @@ export abstract class BaseExchangeProvider {
   ) {
     const resolvedSymbols = value === undefined ? [] : params.symbolDiff?.resolvedSymbols(value) ?? [];
     const resolvedSymbolSet = new Set(resolvedSymbols);
-    const droppedSymbols = (params.symbolDiff?.requestedSymbols ?? [])
-      .filter((symbol) => !resolvedSymbolSet.has(symbol))
-      .map((symbol) => ({
-        symbol,
-        reason: params.symbolDiff?.droppedReason?.(symbol, value) ?? 'missing_from_response',
-      }));
+    const droppedSymbols = value === undefined
+      ? []
+      : (params.symbolDiff?.requestedSymbols ?? [])
+        .filter((symbol) => !resolvedSymbolSet.has(symbol))
+        .map((symbol) => ({
+          symbol,
+          reason: params.symbolDiff?.droppedReason?.(symbol, value) ?? 'missing_from_response',
+        }));
+    const responseCount = value === undefined ? 0 : params.responseItemCount(value);
+    const totalAvailableCount = value === undefined ? (params.totalAvailableCountOnError ?? 0) : responseCount;
+    const providerMarketCount = value === undefined ? totalAvailableCount : responseCount;
 
     logger.info(
       {
@@ -202,21 +209,22 @@ export abstract class BaseExchangeProvider {
         exchange: this.exchange,
         operation: params.operation,
         requestedMarketCount: params.requestedMarketCount ?? params.symbolDiff?.requestedSymbols.length ?? 0,
-        providerMarketCount: value === undefined ? 0 : params.responseItemCount(value),
+        providerMarketCount,
         normalizedSymbolCount: params.normalizedSymbolCount ?? resolvedSymbols.length,
-        returnedCount: value === undefined ? 0 : params.responseItemCount(value),
+        returnedCount: responseCount,
         cacheOutcome: outcome,
         externalProviderCalled: outcome === 'external_fetch' || outcome === 'external_error' || outcome === 'stale_cache_revalidate',
         cacheHit: outcome === 'cache_hit' || outcome === 'stale_cache_fallback' || outcome === 'stale_cache_revalidate',
         inFlightDeduped: outcome === 'inflight_dedupe',
         upstreamStatus: extractUpstreamStatus(error),
         rateLimited: isRateLimitError(error),
+        responseUnavailable: value === undefined,
         requestedSymbols: params.symbolDiff?.requestedSymbols,
         resolvedSymbols,
         droppedSymbols,
         droppedReasonsSummary: summarizeDroppedReasons(droppedSymbols),
         sourceOfTruth: 'provider_market_universe',
-        totalAvailableCount: value === undefined ? 0 : params.responseItemCount(value),
+        totalAvailableCount,
       },
       'Resolved exchange market request',
     );

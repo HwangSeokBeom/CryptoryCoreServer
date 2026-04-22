@@ -560,11 +560,21 @@ export class KorbitProvider
   ): Promise<AssetHistoryRecord[]> {
     const fills = await this.listFills(symbol, limit, context);
     return fills.map((fill) => ({
+      id: fill.fillId,
       exchange: this.exchange,
+      assetSymbol: fill.symbol,
       symbol: fill.symbol,
+      eventType: 'trade',
       type: 'trade',
       amount: fill.side === 'buy' ? fill.quantity : -fill.quantity,
+      price: fill.price,
+      occurredAt: toIsoTimestamp(fill.timestamp),
       timestamp: fill.timestamp,
+      source: 'exchange_private_api',
+      sourceType: 'fill',
+      isSynthetic: false,
+      isVerifiedUserEvent: true,
+      orderId: fill.orderId,
       description: `${fill.side.toUpperCase()} ${fill.quantity} @ ${fill.price}`,
     }));
   }

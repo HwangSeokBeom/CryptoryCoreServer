@@ -13,10 +13,14 @@ export const exchangeCredentialFieldSchema = z.object({
 export const exchangeCapabilitySummarySchema = z.object({
   canTestConnection: z.boolean(),
   canReadPortfolio: z.boolean(),
+  canReadOrderChance: z.boolean().optional(),
   canPlaceOrder: z.boolean(),
   canCancelOrder: z.boolean(),
   canReadOpenOrders: z.boolean(),
   canReadFills: z.boolean(),
+  canUsePrivateWebSocket: z.boolean().optional(),
+  privateWebSocketMode: z.enum(['server_side_polling', 'unsupported']).optional(),
+  requiredPermissionScopes: z.record(z.array(z.string())).optional(),
 });
 
 export const exchangeConnectionTestCodeSchema = z.enum([

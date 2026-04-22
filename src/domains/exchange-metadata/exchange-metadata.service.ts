@@ -6,6 +6,7 @@ import type {
   ExchangePermissionGuide,
 } from '../../modules/private-account/exchange-connections.contract';
 import { AppError } from '../../utils/errors';
+import { getTradingExchangeCapability } from '../trading/trading.capabilities';
 
 export type ExchangeGuide = {
   exchange: ExchangeId;
@@ -113,13 +114,23 @@ function hasCapability(exchange: ExchangeId, capability: string) {
 }
 
 export function getExchangeCapabilitySummary(exchange: ExchangeId): ExchangeCapabilitySummary {
+  const trading = getTradingExchangeCapability(exchange);
   return {
     canTestConnection: true,
     canReadPortfolio: hasCapability(exchange, 'portfolio:balances'),
+    canReadOrderChance: trading.chance.supported,
     canPlaceOrder: hasCapability(exchange, 'trading:create-order'),
     canCancelOrder: hasCapability(exchange, 'trading:cancel-order'),
-    canReadOpenOrders: hasCapability(exchange, 'trading:list-open-orders'),
-    canReadFills: hasCapability(exchange, 'trading:list-fills'),
+    canReadOpenOrders: trading.openOrders.supported,
+    canReadFills: trading.fills.supported,
+    canUsePrivateWebSocket: trading.privateWs.supported,
+    privateWebSocketMode: trading.privateWs.mode,
+    requiredPermissionScopes: {
+      chance: trading.chance.requiredPermissionScope,
+      openOrders: trading.openOrders.requiredPermissionScope,
+      fills: trading.fills.requiredPermissionScope,
+      privateWs: trading.privateWs.requiredPermissionScope,
+    },
   };
 }
 

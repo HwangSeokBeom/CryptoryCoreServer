@@ -15,6 +15,7 @@ describe('canonical market metadata', () => {
     ['bithumb', 'BTC_KRW', 'BTC'],
     ['coinone', 'BTC', 'BTC'],
     ['korbit', 'btc_krw', 'BTC'],
+    ['korbit', 'usdt_krw', 'USDT'],
   ] satisfies Array<[ExchangeId, string, string]>)('normalizes %s market symbols', (exchange, marketId, canonicalSymbol) => {
     const metadata = buildCanonicalMarketMetadata({
       exchange,
@@ -84,6 +85,48 @@ describe('canonical market metadata', () => {
       ok: false,
       reason: 'SYMBOL_NOT_FOUND',
       input: 'C',
+    });
+  });
+
+  it('treats pair-like stablecoin symbol inputs as market aliases instead of canonical symbols', () => {
+    const markets: ExchangeMarketDescriptor[] = [
+      {
+        symbol: 'USDT',
+        exchangeSymbol: 'usdt_krw',
+        marketId: 'usdt_krw',
+        market: 'USDT/KRW',
+        baseCurrency: 'USDT',
+        quoteCurrency: 'KRW',
+        rawSymbol: 'usdt_krw',
+        tradable: true,
+      },
+    ];
+
+    expect(resolveExchangeMarketInput({
+      exchange: 'korbit',
+      markets,
+      input: { symbol: 'USDT_KRW' },
+    })).toMatchObject({
+      ok: true,
+      metadata: {
+        marketId: 'usdt_krw',
+        canonicalMarketId: 'USDT/KRW',
+        canonicalSymbol: 'USDT',
+      },
+      matchSource: 'market_id',
+    });
+
+    expect(resolveExchangeMarketInput({
+      exchange: 'korbit',
+      markets,
+      input: { symbol: 'KRW-USDT' },
+    })).toMatchObject({
+      ok: true,
+      metadata: {
+        marketId: 'usdt_krw',
+        canonicalSymbol: 'USDT',
+      },
+      matchSource: 'market_alias',
     });
   });
 
@@ -208,5 +251,25 @@ describe('canonical market metadata', () => {
     expect(supportedIntervals).not.toContain('10m');
     expect(capabilities.supportedIntervals).toEqual(supportedIntervals);
     expect(capabilities.graphSupported).toBe(true);
+  });
+
+  it('keeps stablecoin base markets chart-capable when the provider supports candles', () => {
+    const capabilities = buildResolvedMarketCapabilityFlags({
+      exchange: 'korbit',
+      market: { symbol: 'USDT' },
+      capabilitySnapshot: {
+        websocketTickerSymbols: ['USDT'],
+        capabilitySymbols: {
+          tickers: ['USDT'],
+          orderbook: ['USDT'],
+          trades: ['USDT'],
+          candles: ['USDT'],
+        },
+      },
+    });
+
+    expect(capabilities.supportsCandles).toBe(true);
+    expect(capabilities.graphSupported).toBe(true);
+    expect(capabilities.unsupportedReason).toBeNull();
   });
 });

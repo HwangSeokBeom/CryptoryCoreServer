@@ -193,7 +193,8 @@ describe('trading service credential wiring', () => {
     const { getOrderChance } = await import('../src/domains/trading/trading.service');
 
     await expect(getOrderChance('user-1', 'upbit', 'BTC')).rejects.toMatchObject({
-      statusCode: 404,
+      statusCode: 409,
+      code: 'exchange_not_connected',
       message: expect.stringContaining('not connected'),
     });
   });

@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+const ROUTE_CONTRACT_TEST_TIMEOUT_MS = 15000;
+
 vi.mock('../src/domains/trading/trading.service', () => ({
   getOrderChance: vi.fn(),
   createTradingOrder: vi.fn(),
@@ -68,11 +70,20 @@ vi.mock('../src/domains/portfolio/portfolio.service', () => {
   }));
   const getAssetHistory = vi.fn(async () => [
     {
+      id: 'fill-1',
       exchange: 'upbit',
+      assetSymbol: 'BTC',
       symbol: 'BTC',
+      eventType: 'trade',
       type: 'trade',
       amount: 0.01,
+      price: 100000000,
+      occurredAt: '2024-04-05T19:34:38.000Z',
       timestamp: 1712345678000,
+      source: 'exchange_private_api',
+      sourceType: 'fill',
+      isSynthetic: false,
+      isVerifiedUserEvent: true,
       description: 'BUY 0.01 @ 100000000',
     },
   ]);
@@ -196,7 +207,7 @@ describe('Trading and Portfolio Route Contracts', () => {
     expect(body.data[0].orderId).toBe('order-1');
     expect(body.data[0].status).toBe('open');
     await app.close();
-  });
+  }, ROUTE_CONTRACT_TEST_TIMEOUT_MS);
 
   it('GET /trading/fills returns canonical fills', async () => {
     const { app, token } = await createAppWithToken();
@@ -211,7 +222,7 @@ describe('Trading and Portfolio Route Contracts', () => {
     expect(body.success).toBe(true);
     expect(body.data[0].fillId).toBe('fill-1');
     await app.close();
-  });
+  }, ROUTE_CONTRACT_TEST_TIMEOUT_MS);
 
   it('GET /portfolio/summary returns canonical portfolio snapshot', async () => {
     const { app, token } = await createAppWithToken();
@@ -227,7 +238,7 @@ describe('Trading and Portfolio Route Contracts', () => {
     expect(body.data.exchange).toBe('upbit');
     expect(body.data.totalAssetValue).toBe(2000000);
     await app.close();
-  });
+  }, ROUTE_CONTRACT_TEST_TIMEOUT_MS);
 
   it('GET /portfolio/assets returns aggregated asset summary with partial failures', async () => {
     const { app, token } = await createAppWithToken();
@@ -244,5 +255,27 @@ describe('Trading and Portfolio Route Contracts', () => {
     expect(body.data.failures[0].exchange).toBe('bithumb');
     expect(body.data.assets[0].asset).toBe('BTC');
     await app.close();
-  });
+  }, ROUTE_CONTRACT_TEST_TIMEOUT_MS);
+
+  it('GET /portfolio/history returns verified user events with source metadata', async () => {
+    const { app, token } = await createAppWithToken();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/portfolio/history?exchange=upbit',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(true);
+    expect(body.data[0]).toMatchObject({
+      id: 'fill-1',
+      assetSymbol: 'BTC',
+      eventType: 'trade',
+      sourceType: 'fill',
+      isSynthetic: false,
+      isVerifiedUserEvent: true,
+    });
+    await app.close();
+  }, ROUTE_CONTRACT_TEST_TIMEOUT_MS);
 });

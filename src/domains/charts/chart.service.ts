@@ -2,7 +2,7 @@ import { env } from '../../config/env';
 import { resolveExchangeInterval } from '../../core/exchange/interval.mapper';
 import { buildResolvedMarketCapabilityFlags } from '../../core/exchange/market.contract';
 import { exchangeProviderRegistry } from '../../core/exchange/registry.bootstrap';
-import { resolveExchangeMarketInput } from '../../core/exchange/market-metadata';
+import { normalizeMarketResolveInput, resolveExchangeMarketInput } from '../../core/exchange/market-metadata';
 import { toCanonicalMarket, toCanonicalSymbol } from '../../core/exchange/symbol.mapper';
 import type {
   CanonicalCandle,
@@ -128,6 +128,99 @@ function assertCanonicalSymbol(symbol: string) {
   return canonical;
 }
 
+function classifyCandleRejectReason(reason?: string | null) {
+  const normalized = reason?.trim().toLowerCase() ?? '';
+  if (
+    normalized.includes('not listed')
+    || normalized.includes('could not be resolved')
+    || normalized.includes('marketid')
+  ) {
+    return 'unknownMarket';
+  }
+  if (
+    normalized.includes('alias_normalized')
+    || normalized.includes('normalize')
+    || normalized.includes('symbol_required')
+  ) {
+    return 'normalizeMismatch';
+  }
+  if (
+    normalized.includes('provider_empty_response')
+    || normalized.includes('empty_response')
+    || normalized.includes('no_usable_candles')
+    || normalized.includes('no data')
+  ) {
+    return 'providerNoData';
+  }
+  if (
+    normalized.includes('insufficient')
+    || normalized.includes('point_count')
+    || normalized.includes('too_few')
+  ) {
+    return 'insufficientCandles';
+  }
+  return 'providerUnavailable';
+}
+
+function logCandleResolveDebug(params: {
+  exchange: ExchangeId;
+  inputSymbol?: string | null;
+  inputMarketId?: string | null;
+  resolvedMarketId: string;
+  canonicalSymbol: string;
+  providerSymbol: string;
+  interval: string;
+  baseAsset: string;
+  quoteAsset: QuoteCurrency;
+  matchSource?: string | null;
+}) {
+  logger.info(
+    {
+      domain: 'chart-live',
+      ...params,
+    },
+    `[CandleResolveDebug] exchange=${params.exchange} inputSymbol=${params.inputSymbol ?? 'null'} resolvedMarketId=${params.resolvedMarketId} canonicalSymbol=${params.canonicalSymbol} providerSymbol=${params.providerSymbol} interval=${params.interval}`,
+  );
+}
+
+function logCandleResponseDebug(params: {
+  exchange: ExchangeId;
+  requestKey: string;
+  candleCount: number;
+  firstTimestamp: number | null;
+  lastTimestamp: number | null;
+  source: string;
+  marketId: string;
+  canonicalSymbol: string;
+}) {
+  logger.info(
+    {
+      domain: 'chart-live',
+      ...params,
+    },
+    `[CandleResponseDebug] exchange=${params.exchange} requestKey=${params.requestKey} candleCount=${params.candleCount} source=${params.source}`,
+  );
+}
+
+function logCandleRejectDebug(params: {
+  exchange: ExchangeId;
+  inputSymbol?: string | null;
+  inputMarketId?: string | null;
+  marketId?: string | null;
+  canonicalSymbol?: string | null;
+  interval: string;
+  rejectReason: string;
+  reason?: string | null;
+}) {
+  logger.info(
+    {
+      domain: 'chart-live',
+      ...params,
+    },
+    `[CandleRejectDebug] exchange=${params.exchange} rejectReason=${params.rejectReason} marketId=${params.marketId ?? 'null'} interval=${params.interval}`,
+  );
+}
+
 function defaultCapabilitySnapshot(markets: ExchangeMarketDescriptor[]): MarketCapabilitySnapshot {
   const marketSymbols = Array.from(new Set(markets.map((market) => market.symbol)));
   return {
@@ -162,11 +255,13 @@ async function resolveChartMarketMetadata(
 ): Promise<{
   market: Pick<ExchangeMarketDescriptor, 'symbol' | 'marketId' | 'exchangeSymbol' | 'rawSymbol'>;
   metadata: CanonicalMarketMetadata;
+  matchSource: 'market_id' | 'market_alias' | 'symbol' | 'fallback';
 }> {
   try {
+    const normalizedRequest = normalizeMarketResolveInput(request);
     const provider = exchangeProviderRegistry.getMarketDataProvider(exchange);
     if (typeof provider.listMarkets !== 'function') {
-      const metadata = toCanonicalMarket(exchange, assertCanonicalSymbol(request.symbol ?? request.marketId ?? ''));
+      const metadata = toCanonicalMarket(exchange, assertCanonicalSymbol(normalizedRequest.symbol ?? normalizedRequest.marketId ?? ''));
       return {
         market: {
           symbol: metadata.canonicalSymbol,
@@ -175,6 +270,7 @@ async function resolveChartMarketMetadata(
           rawSymbol: metadata.rawSymbol,
         },
         metadata,
+        matchSource: 'fallback',
       };
     }
     const markets = (await provider.listMarkets()).filter((market) => market.tradable !== false);
@@ -184,7 +280,7 @@ async function resolveChartMarketMetadata(
     const resolved = resolveExchangeMarketInput({
       exchange,
       markets,
-      input: request,
+      input: normalizedRequest,
       capabilitiesBySymbol: buildChartCapabilityMap(
         exchange,
         capabilitySnapshot,
@@ -198,6 +294,14 @@ async function resolveChartMarketMetadata(
         : resolved.reason === 'SYMBOL_NOT_FOUND'
           ? `symbol ${resolved.input} could not be resolved to a listed ${exchange} market`
           : 'marketId or symbol is required';
+      logCandleRejectDebug({
+        exchange,
+        inputSymbol: request.symbol ?? null,
+        inputMarketId: request.marketId ?? null,
+        interval: 'n/a',
+        rejectReason: 'unknownMarket',
+        reason,
+      });
       throw new AppError(400, reason);
     }
 
@@ -230,6 +334,7 @@ async function resolveChartMarketMetadata(
     return {
       market: resolved.market,
       metadata: resolved.metadata,
+      matchSource: resolved.matchSource,
     };
   } catch (error) {
     if (error instanceof AppError) {
@@ -638,6 +743,8 @@ export async function getChartCandles(params: {
   const metadata = resolved.metadata;
   const marketSymbol = resolved.market.symbol;
   const requestedLimit = params.limit ?? 200;
+  const providerSymbol = resolved.market.rawSymbol ?? resolved.market.exchangeSymbol ?? metadata.rawSymbol;
+  const requestKey = `${params.exchange}:${metadata.marketId}:${params.interval}`;
 
   logger.info(
     {
@@ -651,6 +758,18 @@ export async function getChartCandles(params: {
     },
     `[CandleAPI] candle_request_resolved exchange=${params.exchange} marketId=${metadata.marketId} canonicalMarketId=${metadata.canonicalMarketId}`,
   );
+  logCandleResolveDebug({
+    exchange: params.exchange,
+    inputSymbol: params.symbol ?? null,
+    inputMarketId: params.marketId ?? null,
+    resolvedMarketId: metadata.marketId,
+    canonicalSymbol: metadata.canonicalSymbol,
+    providerSymbol,
+    interval: params.interval,
+    baseAsset: metadata.baseAsset,
+    quoteAsset: metadata.quoteAsset,
+    matchSource: resolved.matchSource,
+  });
 
   if (!metadata.candlesSupported) {
     logger.info(
@@ -663,6 +782,16 @@ export async function getChartCandles(params: {
       },
       `[CandleAPI] candle_unsupported_classified exchange=${params.exchange} marketId=${metadata.marketId} reason=${metadata.unsupportedReason ?? 'provider_not_supported'}`,
     );
+    logCandleRejectDebug({
+      exchange: params.exchange,
+      inputSymbol: params.symbol ?? null,
+      inputMarketId: params.marketId ?? null,
+      marketId: metadata.marketId,
+      canonicalSymbol: metadata.canonicalSymbol,
+      interval: params.interval,
+      rejectReason: 'providerUnsupported',
+      reason: metadata.unsupportedReason ?? 'provider_not_supported',
+    });
     return {
       ...buildChartResponseBase(metadata),
       requestedInterval: params.interval,
@@ -703,6 +832,16 @@ export async function getChartCandles(params: {
   });
   const effectiveInterval = snapshot.interval ?? snapshot.normalizedInterval;
   if (!effectiveInterval) {
+    logCandleRejectDebug({
+      exchange: params.exchange,
+      inputSymbol: params.symbol ?? null,
+      inputMarketId: params.marketId ?? null,
+      marketId: metadata.marketId,
+      canonicalSymbol: metadata.canonicalSymbol,
+      interval: params.interval,
+      rejectReason: classifyCandleRejectReason(snapshot.reason ?? 'interval_mapping_not_found'),
+      reason: snapshot.reason ?? 'interval_mapping_not_found',
+    });
     return {
       ...buildChartResponseBase(metadata),
       requestedInterval: params.interval,
@@ -807,6 +946,28 @@ export async function getChartCandles(params: {
     },
     `[CandleMetaDebug] symbol=${marketSymbol} freshnessState=${snapshot.meta.freshnessState} isRenderable=${isRenderable} pointCount=${pointCount} recommendedClientBehavior=${recommendedClientBehavior}`,
   );
+  if (!isRenderable) {
+    logCandleRejectDebug({
+      exchange: params.exchange,
+      inputSymbol: params.symbol ?? null,
+      inputMarketId: params.marketId ?? null,
+      marketId: metadata.marketId,
+      canonicalSymbol: metadata.canonicalSymbol,
+      interval: effectiveInterval,
+      rejectReason: historical.length === 0 && !liveState.candle ? 'insufficientCandles' : classifyCandleRejectReason(snapshot.reason),
+      reason: snapshot.reason ?? (historical.length === 0 && !liveState.candle ? 'insufficient_chart_points' : null),
+    });
+  }
+  logCandleResponseDebug({
+    exchange: params.exchange,
+    requestKey,
+    candleCount: pointCount,
+    firstTimestamp: historical[0]?.openTime ?? liveState.candle?.openTime ?? null,
+    lastTimestamp: liveState.candle?.closeTime ?? historical[historical.length - 1]?.closeTime ?? null,
+    source: liveState.candle ? `${snapshot.source}+live` : snapshot.source,
+    marketId: metadata.marketId,
+    canonicalSymbol: metadata.canonicalSymbol,
+  });
 
   return {
     ...buildChartResponseBase(metadata),

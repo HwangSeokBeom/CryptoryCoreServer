@@ -90,7 +90,7 @@ export function resolveMarketIdentitySpecialCase(params: {
 }): MarketIdentitySpecialCaseReason | null {
   const assetMetadata = getAssetRegistryMetadata(params.canonicalSymbol, params.canonicalSymbol);
 
-  if (assetMetadata.assetType === 'fiat' || assetMetadata.assetType === 'stablecoin') {
+  if (assetMetadata.assetType === 'fiat') {
     return 'quote_like_symbol';
   }
 
@@ -143,10 +143,7 @@ function resolveGraphUnsupportedReason(params: {
   canonicalSymbol: string;
 }): MarketContractUnsupportedReason | null {
   const assetMetadata = getAssetRegistryMetadata(params.canonicalSymbol, params.canonicalSymbol);
-  if (
-    assetMetadata.assetType === 'fiat'
-    || assetMetadata.assetType === 'stablecoin'
-  ) {
+  if (assetMetadata.assetType === 'fiat') {
     return 'quote_like_symbol';
   }
 

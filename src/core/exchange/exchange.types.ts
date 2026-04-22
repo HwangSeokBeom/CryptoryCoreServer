@@ -158,12 +158,37 @@ export interface OrderChance {
   market: string;
   symbol: string;
   quoteCurrency: QuoteCurrency;
+  availableKRW?: number;
+  availableQuote?: number;
+  availableBaseAsset?: number;
+  baseAsset?: string;
   minTotal?: number;
   minQuantity?: number;
   maxQuantity?: number;
+  maxTotal?: number;
   makerFee?: number;
   takerFee?: number;
   supportedOrderTypes: string[];
+  fees?: {
+    maker?: number;
+    taker?: number;
+  };
+  precision?: {
+    priceUnit?: number;
+    quantityUnit?: number;
+  };
+  limits?: {
+    minTotal?: number;
+    minQuantity?: number;
+    maxQuantity?: number;
+    maxTotal?: number;
+  };
+  orderable?: {
+    buy: boolean;
+    sell: boolean;
+    limit: boolean;
+    market: boolean;
+  };
 }
 
 export type CanonicalOrderSide = 'buy' | 'sell';
@@ -254,14 +279,40 @@ export interface PortfolioSnapshot {
   timestamp: number;
 }
 
+export type AssetHistoryEventType = 'deposit' | 'withdrawal' | 'trade' | 'transfer' | 'airdrop' | 'fee' | 'adjustment';
+export type AssetHistorySourceType =
+  | 'fill'
+  | 'deposit'
+  | 'withdrawal'
+  | 'transfer'
+  | 'airdrop'
+  | 'fee'
+  | 'adjustment'
+  | 'mock'
+  | 'seed'
+  | 'sample'
+  | 'synthetic_snapshot'
+  | 'snapshot_diff'
+  | 'unknown';
+
 export interface AssetHistoryRecord {
+  id?: string;
   exchange: ExchangeId;
+  assetSymbol?: string;
   symbol?: string;
-  type: 'deposit' | 'withdrawal' | 'trade' | 'airdrop' | 'fee' | 'adjustment';
+  eventType?: AssetHistoryEventType;
+  type: AssetHistoryEventType;
   amount: number;
+  price?: number | null;
   balanceAfter?: number;
+  occurredAt?: string | null;
   timestamp: number;
   description?: string;
+  source?: string | null;
+  sourceType?: AssetHistorySourceType;
+  isSynthetic?: boolean;
+  isVerifiedUserEvent?: boolean;
+  orderId?: string;
 }
 
 export interface UserExchangeCredentials {

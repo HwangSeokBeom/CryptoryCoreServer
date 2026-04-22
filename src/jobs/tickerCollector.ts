@@ -7,8 +7,15 @@ import { marketStreamingOrchestrator } from '../domains/market-data/market-strea
 import { logger } from '../utils/logger';
 
 let rateTask: cron.ScheduledTask | null = null;
+let collectorStarted = false;
 
 export function startTickerCollector() {
+  if (collectorStarted) {
+    logger.warn({ domain: 'market-streaming' }, 'Ticker collector start skipped because it is already running');
+    return;
+  }
+
+  collectorStarted = true;
   void marketStreamingOrchestrator.start();
   void startMarketSnapshotCache();
   startChartLiveService();
@@ -29,6 +36,11 @@ export function startTickerCollector() {
 }
 
 export async function stopTickerCollector() {
+  if (!collectorStarted) {
+    return;
+  }
+
+  collectorStarted = false;
   await Promise.allSettled([
     marketStreamingOrchestrator.stop(),
     stopMarketSnapshotCache(),
@@ -36,6 +48,8 @@ export async function stopTickerCollector() {
   stopChartLiveService();
   assetMetadataService.stop();
   rateTask?.stop();
+  const destroyTask = (rateTask as cron.ScheduledTask & { destroy?: () => void } | null)?.destroy;
+  destroyTask?.call(rateTask);
   rateTask = null;
   logger.info({ domain: 'market-streaming' }, 'Public market orchestrator stopped');
 }

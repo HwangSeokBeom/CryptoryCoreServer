@@ -47,6 +47,10 @@ const MARKET_CACHE_TTL_MS = 60_000;
 const MARKET_STALE_TTL_MS = 5 * 60_000;
 const TICKER_CACHE_TTL_MS = 1_000;
 const TICKER_STALE_TTL_MS = 20_000;
+const BITHUMB_PUBLIC_WS_HEARTBEAT_INTERVAL_MS = 20_000;
+const BITHUMB_PUBLIC_WS_RECONNECT_BASE_DELAY_MS = 1_500;
+const BITHUMB_PUBLIC_WS_RECONNECT_MAX_DELAY_MS = 45_000;
+const BITHUMB_PUBLIC_WS_RECONNECT_JITTER_RATIO = 0.25;
 
 function normalizeRequestedSymbols(symbols?: string[]) {
   return Array.from(new Set((symbols ?? []).map(toCanonicalSymbol)));
@@ -54,6 +58,31 @@ function normalizeRequestedSymbols(symbols?: string[]) {
 
 function toSortedSymbols(symbols: Iterable<string>) {
   return Array.from(new Set(symbols)).sort((left, right) => left.localeCompare(right));
+}
+
+function toBithumbPublicWebSocketCode(symbol: string) {
+  const canonical = toCanonicalSymbol(symbol);
+  return canonical ? `KRW-${canonical}` : '';
+}
+
+function resolveBithumbPublicWebSocketSymbol(code: unknown) {
+  return toCanonicalSymbol(String(code ?? ''));
+}
+
+function buildBithumbPublicTradeDateTime(tradeDate: unknown, tradeTime: unknown) {
+  const normalizedDate = String(tradeDate ?? '').trim();
+  const normalizedTime = String(tradeTime ?? '').trim();
+  if (!normalizedDate || !normalizedTime) {
+    return null;
+  }
+
+  const compactDate = normalizedDate.replace(/-/g, '');
+  const compactTime = normalizedTime.replace(/:/g, '');
+  if (!/^\d{8}$/.test(compactDate) || !/^\d{6}$/.test(compactTime)) {
+    return null;
+  }
+
+  return `${compactDate.slice(0, 4)}-${compactDate.slice(4, 6)}-${compactDate.slice(6, 8)} ${compactTime.slice(0, 2)}:${compactTime.slice(2, 4)}:${compactTime.slice(4, 6)}`;
 }
 
 export class BithumbProvider
@@ -279,6 +308,18 @@ export class BithumbProvider
     this.activeSubscriptions = subscriptions.filter((subscription) => subscription.exchange === this.exchange);
     if (this.activeSubscriptions.length === 0) return;
 
+    if (this.streamManager) {
+      logger.warn(
+        {
+          domain: 'market-streaming',
+          exchange: this.exchange,
+          streamDiagnostics: this.streamManager.getDiagnostics(),
+        },
+        'Bithumb public stream already active; skipping duplicate start',
+      );
+      return;
+    }
+
     await this.refreshSupportedStreamSymbols();
     const initialPlan = await this.buildActiveStreamPlan();
     this.logStreamPlan('start', initialPlan);
@@ -293,118 +334,131 @@ export class BithumbProvider
     this.streamManager = new WebSocketClientManager({
       name: 'bithumb-public',
       url: getExchangeConfig(this.exchange).publicWebSocketUrl,
+      heartbeatIntervalMs: BITHUMB_PUBLIC_WS_HEARTBEAT_INTERVAL_MS,
+      reconnectBaseDelayMs: BITHUMB_PUBLIC_WS_RECONNECT_BASE_DELAY_MS,
+      reconnectMaxDelayMs: BITHUMB_PUBLIC_WS_RECONNECT_MAX_DELAY_MS,
+      reconnectJitterRatio: BITHUMB_PUBLIC_WS_RECONNECT_JITTER_RATIO,
       onOpen: async (ctx) => {
         const plan = await this.buildActiveStreamPlan();
-        const tickerSymbols = plan.resolvedByChannel.tickers.map((symbol) => toExchangeSymbol(this.exchange, symbol));
-        const orderbookSymbols = plan.resolvedByChannel.orderbook.map((symbol) => toExchangeSymbol(this.exchange, symbol));
-        const tradeSymbols = plan.resolvedByChannel.trades.map((symbol) => toExchangeSymbol(this.exchange, symbol));
+        const requestPayload: Array<Record<string, unknown>> = [
+          { ticket: `bithumb-public-${Date.now()}` },
+        ];
+        const tickerSymbols = plan.resolvedByChannel.tickers.map(toBithumbPublicWebSocketCode);
+        const orderbookSymbols = plan.resolvedByChannel.orderbook.map(toBithumbPublicWebSocketCode);
+        const tradeSymbols = plan.resolvedByChannel.trades.map(toBithumbPublicWebSocketCode);
 
         if (tickerSymbols.length > 0) {
-          ctx.sendJson({ type: 'ticker', symbols: tickerSymbols, tickTypes: ['24H'], isOnlyRealtime: true });
+          requestPayload.push({ type: 'ticker', codes: tickerSymbols, isOnlyRealtime: true });
         }
         if (orderbookSymbols.length > 0) {
-          ctx.sendJson({ type: 'orderbooksnapshot', symbols: orderbookSymbols });
-          ctx.sendJson({ type: 'orderbookdepth', symbols: orderbookSymbols, isOnlyRealtime: true });
+          requestPayload.push({ type: 'orderbook', codes: orderbookSymbols, isOnlyRealtime: true });
         }
         if (tradeSymbols.length > 0) {
-          ctx.sendJson({ type: 'transaction', symbols: tradeSymbols, isOnlyRealtime: true });
+          requestPayload.push({ type: 'trade', codes: tradeSymbols, isOnlyRealtime: true });
+        }
+
+        if (requestPayload.length > 1) {
+          requestPayload.push({ format: 'DEFAULT' });
+          ctx.sendJson(requestPayload);
         }
       },
       onMessage: async (raw) => {
         const payload = JSON.parse(raw.toString());
-        if (payload.status === '0000') return;
+        if (payload?.error) {
+          logger.warn(
+            {
+              domain: 'market-streaming',
+              exchange: this.exchange,
+              errorName: payload.error?.name ?? null,
+              errorMessage: payload.error?.message ?? null,
+              payload,
+            },
+            'Bithumb public websocket returned an error payload',
+          );
+          return;
+        }
 
-        const type = String(payload.type ?? '');
-        const content = payload.content ?? {};
+        const type = String(payload.type ?? '').toLowerCase();
         if (type === 'ticker' && sink.onTicker) {
-          const symbol = toCanonicalSymbol(String(content.symbol ?? '').replace('_KRW', ''));
+          const symbol = resolveBithumbPublicWebSocketSymbol(payload.code);
+          if (!symbol) {
+            return;
+          }
+          const normalizedTimestamp = normalizeExchangeTimestampFromCandidates(
+            [payload.trade_timestamp, payload.timestamp, buildBithumbPublicTradeDateTime(payload.trade_date, payload.trade_time)],
+            { assumeTimezone: 'KST' },
+          );
           await sink.onTicker({
             ...toCanonicalMarket(this.exchange, symbol),
-            price: safeNumber(content.closePrice),
-            change24h: safeNumber(content.chgRate),
-            volume24h: safeNumber(content.value),
-            high24h: safeNumber(content.highPrice),
-            low24h: safeNumber(content.lowPrice),
-            timestamp: Date.now(),
+            price: safeNumber(payload.trade_price),
+            change24h: safeNumber(payload.signed_change_rate ?? payload.change_rate),
+            volume24h: safeNumber(payload.acc_trade_price_24h ?? payload.acc_trade_price),
+            high24h: safeNumber(payload.high_price),
+            low24h: safeNumber(payload.low_price),
+            timestamp: normalizedTimestamp.timestamp ?? Date.now(),
           });
           return;
         }
 
-        if (type === 'orderbooksnapshot') {
-          const rawSymbol = String(content.symbol ?? '');
+        if (type === 'orderbook' && sink.onOrderbook) {
+          const symbol = resolveBithumbPublicWebSocketSymbol(payload.code);
+          if (!symbol) {
+            return;
+          }
+          const normalizedTimestamp = normalizeExchangeTimestampFromCandidates([payload.timestamp], { assumeTimezone: 'UTC' });
           const asks = sortAsks(
-            (content.asks ?? []).map((ask: any) => ({
-              price: safeNumber(Array.isArray(ask) ? ask[0] : ask.price),
-              quantity: safeNumber(Array.isArray(ask) ? ask[1] : ask.quantity),
+            (payload.orderbook_units ?? []).map((unit: any) => ({
+              price: safeNumber(unit.ask_price),
+              quantity: safeNumber(unit.ask_size),
             })),
           );
           const bids = sortBids(
-            (content.bids ?? []).map((bid: any) => ({
-              price: safeNumber(Array.isArray(bid) ? bid[0] : bid.price),
-              quantity: safeNumber(Array.isArray(bid) ? bid[1] : bid.quantity),
+            (payload.orderbook_units ?? []).map((unit: any) => ({
+              price: safeNumber(unit.bid_price),
+              quantity: safeNumber(unit.bid_size),
             })),
           );
-          this.books.set(rawSymbol, {
-            asks: new Map(asks.map((entry) => [entry.price, entry.quantity])),
-            bids: new Map(bids.map((entry) => [entry.price, entry.quantity])),
+          await sink.onOrderbook({
+            ...toCanonicalMarket(this.exchange, symbol),
+            asks,
+            bids,
+            bestAsk: asks[0]?.price ?? 0,
+            bestBid: bids[0]?.price ?? 0,
+            spread: Math.max((asks[0]?.price ?? 0) - (bids[0]?.price ?? 0), 0),
+            timestamp: normalizedTimestamp.timestamp ?? Date.now(),
           });
-          await this.emitBook(rawSymbol, safeNumber(content.datetime ?? Date.now()), sink);
           return;
         }
 
-        if (type === 'orderbookdepth') {
-          const updates = content.list ?? [];
-          for (const update of updates) {
-            const rawSymbol = String(update.symbol ?? '');
-            const existing = this.books.get(rawSymbol) ?? { asks: new Map<number, number>(), bids: new Map<number, number>() };
-            const side = String(update.orderType ?? '').toLowerCase();
-            const price = safeNumber(update.price);
-            const quantity = safeNumber(update.quantity);
-            if (side === 'ask') {
-              if (quantity <= 0) existing.asks.delete(price);
-              else existing.asks.set(price, quantity);
-            } else {
-              if (quantity <= 0) existing.bids.delete(price);
-              else existing.bids.set(price, quantity);
-            }
-            this.books.set(rawSymbol, existing);
+        if (type === 'trade' && sink.onTrade) {
+          const symbol = resolveBithumbPublicWebSocketSymbol(payload.code);
+          if (!symbol) {
+            return;
           }
-          const rawSymbol = String(updates[0]?.symbol ?? '');
-          if (rawSymbol) {
-            await this.emitBook(rawSymbol, safeNumber(content.datetime ?? Date.now()), sink);
-          }
-          return;
-        }
-
-        if (type === 'transaction' && sink.onTrade) {
-          const trades = content.list ?? [];
-          for (const trade of trades) {
-            const symbol = toCanonicalSymbol(String(trade.symbol ?? '').replace('_KRW', ''));
-            const market = toCanonicalMarket(this.exchange, symbol);
-            const price = safeNumber(trade.contPrice ?? trade.price);
-            const quantity = safeNumber(trade.contQty ?? trade.quantity);
-            const normalizedTimestamp = normalizeExchangeTimestampFromCandidates(
-              [trade.contDtm, trade.transaction_date, trade.datetime, content.datetime],
-              { assumeTimezone: 'KST' },
+          const market = toCanonicalMarket(this.exchange, symbol);
+          const price = safeNumber(payload.trade_price);
+          const quantity = safeNumber(payload.trade_volume);
+          const normalizedTimestamp = normalizeExchangeTimestampFromCandidates(
+            [payload.trade_timestamp, payload.timestamp, buildBithumbPublicTradeDateTime(payload.trade_date, payload.trade_time)],
+            { assumeTimezone: 'KST' },
+          );
+          if (normalizedTimestamp.timestamp === null) {
+            logger.warn(
+              { domain: 'market-streaming', exchange: this.exchange, rawTimestamp: normalizedTimestamp.raw, reason: normalizedTimestamp.reason },
+              `[TradeTimestampAPI] exchange=${this.exchange} invalidTimestamp raw=${String(normalizedTimestamp.raw)} reason=${normalizedTimestamp.reason ?? 'unknown'}`,
             );
-            if (normalizedTimestamp.timestamp === null) {
-              logger.warn(
-                { domain: 'market-streaming', exchange: this.exchange, rawTimestamp: normalizedTimestamp.raw, reason: normalizedTimestamp.reason },
-                `[TradeTimestampAPI] exchange=${this.exchange} invalidTimestamp raw=${String(normalizedTimestamp.raw)} reason=${normalizedTimestamp.reason ?? 'unknown'}`,
-              );
-              continue;
-            }
-            await sink.onTrade({
-              ...market,
-              tradeId: String(trade.contNo ?? trade.transaction_date ?? `${symbol}:${normalizedTimestamp.timestamp}`),
-              side: String(trade.buySellGb ?? '') === '1' ? 'sell' : 'buy',
-              price,
-              quantity,
-              notional: price * quantity,
-              timestamp: normalizedTimestamp.timestamp,
-              executedAt: toIsoTimestamp(normalizedTimestamp.timestamp),
-            });
+            return;
           }
+          await sink.onTrade({
+            ...market,
+            tradeId: String(payload.sequential_id ?? `${symbol}:${normalizedTimestamp.timestamp}`),
+            side: String(payload.ask_bid ?? '').toLowerCase() === 'ask' ? 'sell' : 'buy',
+            price,
+            quantity,
+            notional: price * quantity,
+            timestamp: normalizedTimestamp.timestamp,
+            executedAt: toIsoTimestamp(normalizedTimestamp.timestamp),
+          });
         }
       },
       onReconnect: async (ctx) => {
@@ -417,13 +471,16 @@ export class BithumbProvider
   }
 
   async stopPublicStream() {
-    await this.streamManager?.stop();
+    await this.streamManager?.stop('provider_stop');
     this.streamManager = null;
+    this.books.clear();
+    this.activeSubscriptions = [];
   }
 
   async getOrderChance(symbol: string, context: ProviderContext): Promise<OrderChance> {
     const credentials = this.requireCredentials(context);
     const rawSymbol = toExchangeSymbol(this.exchange, symbol);
+    const canonicalSymbol = toCanonicalSymbol(symbol);
     const headers = this.signer.createAuthorizationHeader({
       accessKey: credentials.apiKey,
       secretKey: credentials.secretKey,
@@ -434,16 +491,59 @@ export class BithumbProvider
       query: { market: rawSymbol },
       headers,
     });
+    const upstreamOrderTypes = Array.isArray(response.market?.order_types)
+      ? response.market.order_types.map((type: unknown) => String(type).toLowerCase())
+      : [];
+    const upstreamOrderSides = Array.isArray(response.market?.order_sides)
+      ? response.market.order_sides.map((side: unknown) => String(side).toLowerCase())
+      : [];
+    const supportsLimit = upstreamOrderTypes.length === 0 || upstreamOrderTypes.includes('limit');
+    const supportsMarket =
+      upstreamOrderTypes.length === 0
+      || upstreamOrderTypes.includes('market')
+      || upstreamOrderTypes.includes('price');
+    const makerFee = safeNumber(response.maker_bid_fee ?? response.maker_ask_fee);
+    const takerFee = safeNumber(response.bid_fee ?? response.ask_fee);
+    const minTotal = safeNumber(response.market?.ask?.min_total ?? response.market?.bid?.min_total);
+    const maxTotal = safeNumber(response.market?.max_total);
+    const priceUnit = safeNumber(response.market?.bid?.price_unit ?? response.market?.ask?.price_unit);
+    const availableQuote = safeNumber(response.bid_account?.balance);
+    const availableBaseAsset = safeNumber(response.ask_account?.balance);
 
     return {
       exchange: this.exchange,
-      market: `${toCanonicalSymbol(symbol)}/KRW`,
-      symbol: toCanonicalSymbol(symbol),
+      market: `${canonicalSymbol}/KRW`,
+      symbol: canonicalSymbol,
       quoteCurrency: 'KRW',
-      minTotal: safeNumber(response.market?.ask?.min_total ?? response.market?.bid?.min_total),
-      makerFee: safeNumber(response.maker_bid_fee ?? response.maker_ask_fee),
-      takerFee: safeNumber(response.bid_fee ?? response.ask_fee),
-      supportedOrderTypes: ['limit', 'market'],
+      baseAsset: canonicalSymbol,
+      availableKRW: availableQuote,
+      availableQuote,
+      availableBaseAsset,
+      minTotal,
+      maxTotal,
+      makerFee,
+      takerFee,
+      supportedOrderTypes: [
+        ...(supportsLimit ? ['limit'] : []),
+        ...(supportsMarket ? ['market'] : []),
+      ],
+      fees: {
+        maker: makerFee,
+        taker: takerFee,
+      },
+      precision: {
+        priceUnit,
+      },
+      limits: {
+        minTotal,
+        maxTotal,
+      },
+      orderable: {
+        buy: upstreamOrderSides.length === 0 || upstreamOrderSides.includes('bid'),
+        sell: upstreamOrderSides.length === 0 || upstreamOrderSides.includes('ask'),
+        limit: supportsLimit,
+        market: supportsMarket,
+      },
     };
   }
 
@@ -655,11 +755,21 @@ export class BithumbProvider
   ): Promise<AssetHistoryRecord[]> {
     const fills = await this.listFills(symbol, limit, context);
     return fills.map((fill) => ({
+      id: fill.fillId,
       exchange: this.exchange,
+      assetSymbol: fill.symbol,
       symbol: fill.symbol,
+      eventType: 'trade',
       type: 'trade',
       amount: fill.side === 'buy' ? fill.quantity : -fill.quantity,
+      price: fill.price,
+      occurredAt: toIsoTimestamp(fill.timestamp),
       timestamp: fill.timestamp,
+      source: 'exchange_private_api',
+      sourceType: 'fill',
+      isSynthetic: false,
+      isVerifiedUserEvent: true,
+      orderId: fill.orderId,
       description: `${fill.side.toUpperCase()} ${fill.quantity} @ ${fill.price}`,
     }));
   }

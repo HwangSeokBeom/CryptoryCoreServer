@@ -98,6 +98,45 @@ function sanitizeUrlForLogs(rawUrl: string) {
   }
 }
 
+function isSensitiveQueryKey(key: string) {
+  return /(signature|token|secret|api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|jwt|nonce)/i.test(key);
+}
+
+function sanitizeUrlWithQueryForLogs(rawUrl: string) {
+  try {
+    const url = new URL(rawUrl);
+    for (const key of Array.from(url.searchParams.keys())) {
+      if (isSensitiveQueryKey(key)) {
+        url.searchParams.set(key, '[REDACTED]');
+      }
+    }
+    return sanitizeSensitiveText(url.toString());
+  } catch {
+    return sanitizeSensitiveText(rawUrl);
+  }
+}
+
+function buildQueryPreview(rawUrl: string, maxEntries = 6) {
+  try {
+    const url = new URL(rawUrl);
+    const entries = Array.from(url.searchParams.entries()).slice(0, maxEntries);
+    if (entries.length === 0) {
+      return null;
+    }
+
+    return entries
+      .map(([key, value]) => {
+        const preview = isSensitiveQueryKey(key)
+          ? '[REDACTED]'
+          : sanitizeSensitiveText(value.length > 120 ? `${value.slice(0, 120)}...` : value);
+        return `${key}=${preview}`;
+      })
+      .join('&');
+  } catch {
+    return null;
+  }
+}
+
 function buildFormBody(form?: RestRequestOptions['form']) {
   if (!form) return undefined;
   const params = new URLSearchParams();
@@ -181,7 +220,23 @@ export class RestClient {
     };
     const url = buildUrl(this.baseUrl, path, options.query);
     const logUrl = sanitizeUrlForLogs(url);
+    const debugUrl = sanitizeUrlWithQueryForLogs(url);
+    const queryPreview = buildQueryPreview(url);
     const formBody = buildFormBody(options.form);
+
+    if (queryPreview) {
+      logger.debug(
+        {
+          domain: 'exchange-rest',
+          owner: this.owner,
+          path,
+          url: logUrl,
+          requestUrlWithQuery: debugUrl,
+          queryPreview,
+        },
+        'Prepared exchange REST request with query parameters',
+      );
+    }
 
     for (let attempt = 1; attempt <= policy.maxAttempts; attempt += 1) {
       const controller = new AbortController();

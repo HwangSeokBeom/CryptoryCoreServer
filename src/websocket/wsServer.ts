@@ -1,8 +1,9 @@
 import { IncomingMessage, Server as HttpServer } from 'http';
 import type { Duplex } from 'stream';
 import { RawData, WebSocket, WebSocketServer } from 'ws';
-import type { ExchangeId } from '../core/exchange/exchange.types';
+import { EXCHANGE_IDS, type ExchangeId } from '../core/exchange/exchange.types';
 import { ensureChartLiveCandle } from '../domains/charts/chart.service';
+import { getPortfolioSnapshot } from '../domains/portfolio/portfolio.service';
 import { getOpenOrders, getRecentFills } from '../domains/trading/trading.service';
 import { marketEventBus } from '../modules/public-market/market.event-bus';
 import { publicMarketDataStore } from '../modules/public-market/market.data.store';
@@ -55,6 +56,7 @@ type PrivateSubscriptionState = {
   portfolio: Set<string>;
   pollTimer: NodeJS.Timeout | null;
   orderDigests: Map<string, string>;
+  portfolioDigests: Map<string, string>;
   sentFillIds: Set<string>;
 };
 
@@ -125,6 +127,7 @@ function createPrivateSubscriptionState(userId: string): PrivateSubscriptionStat
     portfolio: new Set<string>(),
     pollTimer: null,
     orderDigests: new Map<string, string>(),
+    portfolioDigests: new Map<string, string>(),
     sentFillIds: new Set<string>(),
   };
 }
@@ -458,6 +461,22 @@ function toPrivateUserContext(payload: unknown) {
   };
 }
 
+function getUpgradeRoute(request: IncomingMessage) {
+  return new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
+}
+
+function getPrivateExchangeContext(request: IncomingMessage) {
+  const parsedUrl = new URL(request.url ?? '/', 'http://127.0.0.1');
+  const exchanges = [
+    ...parsedUrl.searchParams.getAll('exchange'),
+    ...(parsedUrl.searchParams.get('exchanges')?.split(',') ?? []),
+  ]
+    .map((exchange) => exchange.trim().toLowerCase())
+    .filter(Boolean);
+
+  return exchanges.length > 0 ? exchanges : null;
+}
+
 function rejectPrivateUpgrade(
   request: IncomingMessage,
   socket: Duplex,
@@ -482,7 +501,11 @@ function rejectPrivateUpgrade(
     {
       domain: 'private-ws',
       event: 'websocket_upgrade_rejected',
+      route: '/ws/trading',
       path: request.url,
+      authResult: rejection.statusCode === 401 || rejection.code.startsWith('WS_AUTH') ? 'rejected' : 'not_applicable',
+      exchangeContext: getPrivateExchangeContext(request),
+      handshakeRejectReason: rejection.code,
       statusCode: rejection.statusCode,
       code: rejection.code,
       details: rejection.details,
@@ -608,6 +631,37 @@ async function pollPrivateFills(ws: PrivateClientSocket, state: PrivateSubscript
   }
 }
 
+async function pollPrivatePortfolio(ws: PrivateClientSocket, state: PrivateSubscriptionState) {
+  for (const exchange of state.portfolio.values()) {
+    try {
+      const snapshot = await getPortfolioSnapshot(state.userId, exchange as ExchangeId);
+      const digest = JSON.stringify(snapshot);
+      if (state.portfolioDigests.get(exchange) === digest) {
+        continue;
+      }
+      state.portfolioDigests.set(exchange, digest);
+      sendJson(ws, {
+        type: 'portfolio',
+        channel: 'portfolio',
+        exchange,
+        data: snapshot,
+      });
+    } catch (error) {
+      logger.warn(
+        {
+          domain: 'private-ws',
+          event: 'private_poll_failed',
+          channel: 'portfolio',
+          userId: state.userId,
+          exchange,
+          err: error,
+        },
+        'Private websocket portfolio poll failed',
+      );
+    }
+  }
+}
+
 async function pollPrivateClient(ws: PrivateClientSocket) {
   const state = privateClientSubscriptions.get(ws);
   if (!state || ws.readyState !== WebSocket.OPEN) {
@@ -617,6 +671,7 @@ async function pollPrivateClient(ws: PrivateClientSocket) {
   await Promise.allSettled([
     pollPrivateOrders(ws, state),
     pollPrivateFills(ws, state),
+    pollPrivatePortfolio(ws, state),
   ]);
 }
 
@@ -675,6 +730,16 @@ function handlePrivateClientMessage(ws: PrivateClientSocket, raw: RawData) {
     return;
   }
 
+  if (!EXCHANGE_IDS.includes(exchange as ExchangeId)) {
+    sendJson(ws, {
+      type: 'error',
+      code: 'INVALID_EXCHANGE',
+      message: 'Unsupported exchange for private websocket subscription.',
+      exchange,
+    });
+    return;
+  }
+
   if (channel === 'orders') {
     updatePrivateChannelSubscription(state.orders, exchange, symbol, action);
   } else if (channel === 'fills') {
@@ -683,6 +748,7 @@ function handlePrivateClientMessage(ws: PrivateClientSocket, raw: RawData) {
     state.portfolio.add(exchange);
   } else {
     state.portfolio.delete(exchange);
+    state.portfolioDigests.delete(exchange);
   }
 
   sendJson(ws, {
@@ -691,15 +757,28 @@ function handlePrivateClientMessage(ws: PrivateClientSocket, raw: RawData) {
     action,
     exchange,
     symbol: symbol === '*' ? null : symbol,
-    mode: channel === 'portfolio' ? 'keepalive' : 'server_side_polling',
+    mode: 'server_side_polling',
   });
+
+  logger.info(
+    {
+      domain: 'private-ws',
+      event: 'private_subscription_updated',
+      userId: state.userId,
+      channel,
+      action,
+      exchange,
+      symbol: symbol === '*' ? null : symbol,
+      attached: action === 'subscribe',
+    },
+    'Private websocket subscription updated',
+  );
 
   ensurePrivatePolling(ws);
 }
 
 async function verifyPrivateUpgradeRequest(request: IncomingMessage): Promise<PrivateUpgradeVerification> {
-  const parsedUrl = new URL(request.url ?? '/', 'http://127.0.0.1');
-  if (parsedUrl.pathname !== '/ws/trading') {
+  if (getUpgradeRoute(request) !== '/ws/trading') {
     return null;
   }
 
@@ -719,6 +798,18 @@ async function verifyPrivateUpgradeRequest(request: IncomingMessage): Promise<Pr
 
   const token = resolvePrivateAuthToken(request);
   if (!token) {
+    logger.warn(
+      {
+        domain: 'private-ws',
+        event: 'websocket_upgrade_auth_missing',
+        route: '/ws/trading',
+        path: request.url,
+        authResult: 'missing_token',
+        exchangeContext: getPrivateExchangeContext(request),
+        handshakeRejectReason: 'WS_AUTH_REQUIRED',
+      },
+      'Private websocket auth token missing',
+    );
     return {
       rejection: {
         statusCode: 401,
@@ -750,6 +841,18 @@ async function verifyPrivateUpgradeRequest(request: IncomingMessage): Promise<Pr
     const verified = await setupOptions.verifyJwt(token);
     const context = toPrivateUserContext(verified);
     if (!context) {
+      logger.warn(
+        {
+          domain: 'private-ws',
+          event: 'websocket_upgrade_auth_invalid_payload',
+          route: '/ws/trading',
+          path: request.url,
+          authResult: 'invalid_payload',
+          exchangeContext: getPrivateExchangeContext(request),
+          handshakeRejectReason: 'WS_AUTH_INVALID',
+        },
+        'Private websocket token payload invalid',
+      );
       return {
         rejection: {
           statusCode: 401,
@@ -765,7 +868,19 @@ async function verifyPrivateUpgradeRequest(request: IncomingMessage): Promise<Pr
 
     return { context };
   } catch (error) {
-    logger.warn({ domain: 'private-ws', event: 'ws_auth_failure', path: request.url, err: error }, 'Private websocket auth failed');
+    logger.warn(
+      {
+        domain: 'private-ws',
+        event: 'ws_auth_failure',
+        route: '/ws/trading',
+        path: request.url,
+        authResult: 'verification_failed',
+        exchangeContext: getPrivateExchangeContext(request),
+        handshakeRejectReason: 'WS_AUTH_INVALID',
+        err: error,
+      },
+      'Private websocket auth failed',
+    );
     return {
       rejection: {
         statusCode: 401,
@@ -815,7 +930,7 @@ export function setupWebSocket(server: HttpServer, options: SetupWebSocketOption
 
   attachedServer = server;
   setupOptions = options;
-  wss = new WebSocketServer({ server, path: '/ws/market' });
+  wss = new WebSocketServer({ noServer: true });
   privateWss = new WebSocketServer({ noServer: true });
 
   wss.on('connection', (socket) => {
@@ -852,7 +967,11 @@ export function setupWebSocket(server: HttpServer, options: SetupWebSocketOption
       {
         domain: 'private-ws',
         event: 'websocket_upgrade_accepted',
+        route: '/ws/trading',
         path: request.url,
+        authResult: 'accepted',
+        exchangeContext: getPrivateExchangeContext(request),
+        handshakeRejectReason: null,
         userId: context.userId,
       },
       'Private websocket upgrade accepted',
@@ -880,6 +999,43 @@ export function setupWebSocket(server: HttpServer, options: SetupWebSocketOption
 
   privateUpgradeListener = (request, socket, head) => {
     void (async () => {
+      const route = getUpgradeRoute(request);
+      if (route === '/ws/market') {
+        wss?.handleUpgrade(request, socket, head, (ws) => {
+          wss?.emit('connection', ws, request);
+        });
+        return;
+      }
+
+      if (route !== '/ws/trading') {
+        const body = JSON.stringify({
+          success: false,
+          error: 'WebSocket route not found.',
+          code: 'route_not_found',
+          details: { route },
+        });
+        logger.warn(
+          {
+            domain: 'websocket',
+            event: 'websocket_upgrade_unknown_route',
+            route,
+            path: request.url,
+            handshakeRejectReason: 'route_not_found',
+          },
+          'Websocket upgrade route not found',
+        );
+        socket.write(
+          'HTTP/1.1 404 Not Found\r\n'
+            + 'Connection: close\r\n'
+            + 'Content-Type: application/json; charset=utf-8\r\n'
+            + `Content-Length: ${Buffer.byteLength(body)}\r\n`
+            + '\r\n'
+            + body,
+        );
+        socket.destroy();
+        return;
+      }
+
       const verification = await verifyPrivateUpgradeRequest(request);
       if (!verification) {
         return;

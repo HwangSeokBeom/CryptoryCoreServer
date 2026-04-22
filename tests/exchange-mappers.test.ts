@@ -12,9 +12,12 @@ describe('Exchange Mappers', () => {
     expect(toExchangeSymbol('binance', 'btc')).toBe('BTCUSDT');
 
     expect(fromExchangeSymbol('upbit', 'KRW-BTC')).toBe('BTC');
+    expect(fromExchangeSymbol('upbit', 'KRW-USDT')).toBe('USDT');
     expect(fromExchangeSymbol('bithumb', 'BTC_KRW')).toBe('BTC');
+    expect(fromExchangeSymbol('bithumb', 'USDT_KRW')).toBe('USDT');
     expect(fromExchangeSymbol('coinone', 'btc')).toBe('BTC');
     expect(fromExchangeSymbol('korbit', 'btc_krw')).toBe('BTC');
+    expect(fromExchangeSymbol('korbit', 'usdt_krw')).toBe('USDT');
     expect(fromExchangeSymbol('binance', 'btcusdt')).toBe('BTC');
     expect(fromExchangeSymbol('binance', 'ETHUSDC')).toBe('ETH');
     expect(fromExchangeSymbol('binance', 'FDUSDUSDT')).toBe('FDUSD');

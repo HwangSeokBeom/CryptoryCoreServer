@@ -1,5 +1,6 @@
 import { COINS } from '../../config/constants';
 import { getExchangeConfig } from '../../config/exchange.config';
+import { ExchangeRequestError } from '../../core/exchange/errors';
 import { resolveExchangeInterval } from '../../core/exchange/interval.mapper';
 import type {
   CanonicalCandle,
@@ -34,13 +35,44 @@ const MARKET_CACHE_TTL_MS = 60_000;
 const MARKET_STALE_TTL_MS = 5 * 60_000;
 const TICKER_CACHE_TTL_MS = 2_000;
 const TICKER_STALE_TTL_MS = 30_000;
+const BINANCE_TICKER_BATCH_SIZE = 100;
 
 function normalizeRequestedSymbols(symbols?: string[]) {
-  return Array.from(new Set((symbols ?? []).map(toCanonicalSymbol)));
+  return Array.from(new Set((symbols ?? [])
+    .map((symbol) => {
+      const trimmed = String(symbol ?? '').trim();
+      if (!trimmed) {
+        return '';
+      }
+
+      if (/[-_/]/.test(trimmed)) {
+        const canonical = toCanonicalSymbol(trimmed);
+        return canonical ? canonical : '';
+      }
+
+      const upper = trimmed.toUpperCase();
+      if (upper === 'USDT') {
+        return '';
+      }
+      return upper.endsWith('USDT') && upper.length > 4 ? upper.slice(0, -4) : upper;
+    })
+    .filter((symbol): symbol is string => Boolean(symbol))));
 }
 
 function toSortedSymbols(symbols: Iterable<string>) {
   return Array.from(new Set(symbols)).sort((left, right) => left.localeCompare(right));
+}
+
+function chunkSymbols(symbols: string[], size: number) {
+  if (size <= 0 || symbols.length <= size) {
+    return [symbols];
+  }
+
+  const chunks: string[][] = [];
+  for (let index = 0; index < symbols.length; index += size) {
+    chunks.push(symbols.slice(index, index + size));
+  }
+  return chunks;
 }
 
 export class BinanceProvider
@@ -53,6 +85,43 @@ export class BinanceProvider
 
   constructor() {
     super('binance');
+  }
+
+  private logTickerDebug(
+    payload:
+      | {
+        action: 'request_built';
+        endpoint: string;
+        querySymbolCount: number;
+        queryPreview: string[];
+        requestUrl?: string | null;
+      }
+      | {
+        action: 'response_success';
+        endpoint: string;
+        itemCount: number;
+        requestUrl?: string | null;
+      }
+      | {
+        action: 'response_failure';
+        endpoint: string;
+        statusCode?: number;
+        responseSnippet: string | null;
+        requestUrl?: string | null;
+      },
+  ) {
+    logger.info(
+      {
+        domain: 'market-provider',
+        exchange: this.exchange,
+        ...payload,
+      },
+      payload.action === 'request_built'
+        ? `[BinanceTickerDebug] action=request_built endpoint=${payload.endpoint} querySymbolCount=${payload.querySymbolCount}`
+        : payload.action === 'response_success'
+          ? `[BinanceTickerDebug] action=response_success endpoint=${payload.endpoint} itemCount=${payload.itemCount}`
+          : `[BinanceTickerDebug] action=response_failure endpoint=${payload.endpoint} statusCode=${payload.statusCode ?? 'unknown'}`,
+    );
   }
 
   async listMarkets(): Promise<ExchangeMarketDescriptor[]> {
@@ -105,6 +174,14 @@ export class BinanceProvider
     const effectiveRequestedSymbols = requestedSymbols.length > 0 ? requestedSymbols : marketUniverse;
     const requestedSet = new Set(effectiveRequestedSymbols);
     const marketSymbols = new Set<string>(marketUniverse);
+    const listedMarketBySymbol = new Map(listedMarkets.map((market) => [market.symbol, market]));
+    const listedMarketByExchangeSymbol = new Map(
+      listedMarkets.map((market) => [
+        String(market.exchangeSymbol ?? market.marketId ?? market.rawSymbol ?? '').toUpperCase(),
+        market,
+      ]),
+    );
+    const requestableSymbols = effectiveRequestedSymbols.filter((symbol) => marketSymbols.has(symbol));
     const cacheKey = requestedSymbols.length > 0 ? `usdt:${effectiveRequestedSymbols.join(',')}` : 'usdt:all';
     const snapshots = await this.withRequestCache({
       operation: 'tickers',
@@ -113,23 +190,92 @@ export class BinanceProvider
       staleTtlMs: TICKER_STALE_TTL_MS,
       requestedMarketCount: effectiveRequestedSymbols.length,
       normalizedSymbolCount: effectiveRequestedSymbols.length,
+      totalAvailableCountOnError: marketUniverse.length,
       loader: async () => {
-        const requestSymbols = effectiveRequestedSymbols.map((symbol: string) => toExchangeSymbol(this.exchange, symbol));
-        const response = await this.restClient.request<any[]>('/api/v3/ticker/24hr', {
-          query: {
-            symbols: JSON.stringify(requestSymbols),
-          },
-        });
+        if (requestableSymbols.length === 0) {
+          this.logTickerDebug({
+            action: 'request_built',
+            endpoint: '/api/v3/ticker/24hr',
+            querySymbolCount: 0,
+            queryPreview: [],
+            requestUrl: null,
+          });
+          this.logTickerDebug({
+            action: 'response_success',
+            endpoint: '/api/v3/ticker/24hr',
+            itemCount: 0,
+            requestUrl: null,
+          });
+          return [];
+        }
 
-        return response.map((ticker) => ({
-          ...toCanonicalMarket(this.exchange, String(ticker.symbol).replace(/USDT$/i, '')),
-          price: safeNumber(ticker.lastPrice),
-          change24h: safeNumber(ticker.priceChangePercent),
-          volume24h: safeNumber(ticker.quoteVolume),
-          high24h: safeNumber(ticker.highPrice),
-          low24h: safeNumber(ticker.lowPrice),
-          timestamp: Date.now(),
+        const requestBatches = chunkSymbols(requestableSymbols, BINANCE_TICKER_BATCH_SIZE);
+        const responses = await Promise.all(requestBatches.map(async (symbolBatch) => {
+          const requestSymbols = symbolBatch.map((symbol: string) =>
+            listedMarketBySymbol.get(symbol)?.exchangeSymbol
+            ?? listedMarketBySymbol.get(symbol)?.marketId
+            ?? listedMarketBySymbol.get(symbol)?.rawSymbol
+            ?? toExchangeSymbol(this.exchange, symbol));
+          const query = {
+            symbols: JSON.stringify(requestSymbols),
+          };
+
+          this.logTickerDebug({
+            action: 'request_built',
+            endpoint: '/api/v3/ticker/24hr',
+            querySymbolCount: requestSymbols.length,
+            queryPreview: requestSymbols.slice(0, 5),
+          });
+
+          try {
+            const response = await this.restClient.requestDetailed<any[]>('/api/v3/ticker/24hr', { query });
+            this.logTickerDebug({
+              action: 'response_success',
+              endpoint: '/api/v3/ticker/24hr',
+              itemCount: Array.isArray(response.data) ? response.data.length : 0,
+              requestUrl: response.meta.requestUrl,
+            });
+            return response.data;
+          } catch (error) {
+            this.logTickerDebug({
+              action: 'response_failure',
+              endpoint: '/api/v3/ticker/24hr',
+              statusCode: error instanceof ExchangeRequestError ? error.statusCode : undefined,
+              responseSnippet: error instanceof ExchangeRequestError
+                ? error.responseBody?.slice(0, 240) ?? null
+                : error instanceof Error
+                  ? error.message
+                  : String(error),
+              requestUrl: error instanceof ExchangeRequestError ? error.requestUrl : null,
+            });
+            throw error;
+          }
         }));
+
+        return responses.flat().map((ticker) => {
+          const rawExchangeSymbol = String(ticker.symbol ?? '').toUpperCase();
+          const listedMarket = listedMarketByExchangeSymbol.get(rawExchangeSymbol);
+          const fallbackSymbol = String(ticker.symbol).replace(/USDT$/i, '');
+          const canonical = toCanonicalMarket(this.exchange, listedMarket?.symbol ?? fallbackSymbol);
+
+          return {
+            ...canonical,
+            marketId: listedMarket?.marketId ?? rawExchangeSymbol ?? canonical.marketId,
+            rawSymbol: listedMarket?.rawSymbol ?? listedMarket?.exchangeSymbol ?? rawExchangeSymbol ?? canonical.rawSymbol,
+            symbol: listedMarket?.symbol ?? canonical.symbol,
+            market: listedMarket?.market ?? canonical.market,
+            baseCurrency: listedMarket?.baseCurrency ?? listedMarket?.symbol ?? canonical.baseCurrency,
+            quoteCurrency: listedMarket?.quoteCurrency ?? canonical.quoteCurrency,
+            displaySymbol: listedMarket?.market ?? canonical.displaySymbol,
+            baseAsset: listedMarket?.baseCurrency ?? listedMarket?.symbol ?? canonical.baseAsset,
+            price: safeNumber(ticker.lastPrice),
+            change24h: safeNumber(ticker.priceChangePercent),
+            volume24h: safeNumber(ticker.quoteVolume),
+            high24h: safeNumber(ticker.highPrice),
+            low24h: safeNumber(ticker.lowPrice),
+            timestamp: Date.now(),
+          };
+        });
       },
       responseItemCount: (items) => items.length,
       symbolDiff: {

@@ -64,6 +64,17 @@ export function classifyExchangeValidationError(error: unknown): ClassifiedExcha
       };
     }
 
+    if (error.statusCode === 401 || error.statusCode === 403) {
+      return {
+        code: 'insufficient_permissions',
+        message: 'API 키 권한이 부족합니다.',
+        details: {
+          upstreamStatus: error.statusCode,
+          rawMessage: buildMessage('insufficient permissions', rawMessage),
+        },
+      };
+    }
+
     if (/signature|jwt|nonce|query_hash|invalid signature|signature for this request/i.test(normalized)) {
       return {
         code: 'signature_error',

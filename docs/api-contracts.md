@@ -221,8 +221,9 @@ Query:
 Policy:
 
 - This is the fastest market first-paint endpoint. It returns base row fields only and never waits for graph or kimchi hydration.
-- It reads the prepared exchange market snapshot and public ticker projection. Cold-cache requests may load the market universe, but they do not fetch sparkline or kimchi data.
+- It reads the prepared exchange market snapshot and public ticker projection. When `symbols` is provided and the prepared projection does not have a usable current price, the server performs a targeted ticker hydration for those symbols only.
 - `rejectedSymbols` are malformed or wildcard-like inputs. `unsupportedSymbols` are canonical symbols that are not in the selected exchange universe.
+- `currentPrice`, `tradePrice`, `currentPriceSource`, and `updatedAt` are the canonical order-header price fields for this endpoint.
 - Clients should render rows from this response immediately, then call `/market/sparkline` and `/kimchi-premium/batch` for visible or representative symbols.
 
 ```json
@@ -241,9 +242,12 @@ Policy:
         "selectedExchange": "upbit",
         "sourceExchange": "upbit",
         "symbol": "BTC",
+        "marketId": "KRW-BTC",
         "displaySymbol": "BTC/KRW",
         "displayName": "비트코인",
         "currentPrice": 100000000,
+        "tradePrice": 100000000,
+        "currentPriceSource": "provider_snapshot",
         "change24h": 1.25,
         "volume24h": 1234,
         "updatedAt": 1712345678000,
@@ -1188,6 +1192,37 @@ Query:
 - `limit?`
 
 Current history is trade-driven canonical history produced from private fills/completed orders.
+
+Policy:
+
+- `data` only contains verified user events. Mock, seed, sample, synthetic snapshot, and snapshot-diff rows are filtered out.
+- If the user has no verified event history, the server returns `[]`. It does not synthesize sample rows.
+- Each item includes source metadata so clients can explicitly render only verified user activity.
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "fill-1",
+      "exchange": "upbit",
+      "assetSymbol": "BTC",
+      "symbol": "BTC",
+      "eventType": "trade",
+      "type": "trade",
+      "amount": 0.01,
+      "price": 100000000,
+      "occurredAt": "2024-04-05T19:34:38.000Z",
+      "timestamp": 1712345678000,
+      "source": "exchange_private_api",
+      "sourceType": "fill",
+      "isSynthetic": false,
+      "isVerifiedUserEvent": true,
+      "description": "BUY 0.01 @ 100000000"
+    }
+  ]
+}
+```
 
 ## Exchange Connection Routes
 

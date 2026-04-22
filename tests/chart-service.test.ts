@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const provider = {
+  listMarkets: vi.fn(),
+  getMarketCapabilitySnapshot: vi.fn(),
   getCandles: vi.fn(),
 };
 
@@ -24,6 +26,27 @@ describe('chart service', () => {
     vi.resetModules();
     vi.clearAllMocks();
     vi.spyOn(Date, 'now').mockReturnValue(1_712_345_730_000);
+    provider.listMarkets.mockResolvedValue([
+      {
+        symbol: 'BTC',
+        exchangeSymbol: 'KRW-BTC',
+        marketId: 'KRW-BTC',
+        market: 'BTC/KRW',
+        baseCurrency: 'BTC',
+        quoteCurrency: 'KRW',
+        rawSymbol: 'KRW-BTC',
+        tradable: true,
+      },
+    ]);
+    provider.getMarketCapabilitySnapshot.mockResolvedValue({
+      websocketTickerSymbols: ['BTC'],
+      capabilitySymbols: {
+        tickers: ['BTC'],
+        orderbook: ['BTC'],
+        trades: ['BTC'],
+        candles: ['BTC'],
+      },
+    });
     provider.getCandles.mockResolvedValue([
       {
         exchange: 'upbit',
@@ -161,5 +184,103 @@ describe('chart service', () => {
     expect(second.source).toBe('stale_cache');
     expect(second.staleCacheUsed).toBe(true);
     expect(second.items).toHaveLength(2);
+  });
+
+  it('resolves pair-like Korbit stablecoin symbols to the listed market key for detail charts', async () => {
+    provider.listMarkets.mockResolvedValue([
+      {
+        symbol: 'USDT',
+        exchangeSymbol: 'usdt_krw',
+        marketId: 'usdt_krw',
+        market: 'USDT/KRW',
+        baseCurrency: 'USDT',
+        quoteCurrency: 'KRW',
+        rawSymbol: 'usdt_krw',
+        tradable: true,
+      },
+      {
+        symbol: 'XRP',
+        exchangeSymbol: 'xrp_krw',
+        marketId: 'xrp_krw',
+        market: 'XRP/KRW',
+        baseCurrency: 'XRP',
+        quoteCurrency: 'KRW',
+        rawSymbol: 'xrp_krw',
+        tradable: true,
+      },
+    ]);
+    provider.getMarketCapabilitySnapshot.mockResolvedValue({
+      websocketTickerSymbols: ['USDT', 'XRP'],
+      capabilitySymbols: {
+        tickers: ['USDT', 'XRP'],
+        orderbook: ['USDT', 'XRP'],
+        trades: ['USDT', 'XRP'],
+        candles: ['USDT', 'XRP'],
+      },
+    });
+    provider.getCandles.mockResolvedValueOnce([
+      {
+        exchange: 'korbit',
+        symbol: 'USDT',
+        market: 'USDT/KRW',
+        baseCurrency: 'USDT',
+        quoteCurrency: 'KRW',
+        rawSymbol: 'usdt_krw',
+        interval: '1h',
+        openTime: 1_712_338_800_000,
+        closeTime: 1_712_342_400_000,
+        open: 1450,
+        high: 1452,
+        low: 1448,
+        close: 1451,
+        volume: 1000,
+      },
+      {
+        exchange: 'korbit',
+        symbol: 'USDT',
+        market: 'USDT/KRW',
+        baseCurrency: 'USDT',
+        quoteCurrency: 'KRW',
+        rawSymbol: 'usdt_krw',
+        interval: '1h',
+        openTime: 1_712_342_400_000,
+        closeTime: 1_712_346_000_000,
+        open: 1451,
+        high: 1454,
+        low: 1450,
+        close: 1453,
+        volume: 900,
+      },
+      {
+        exchange: 'korbit',
+        symbol: 'USDT',
+        market: 'USDT/KRW',
+        baseCurrency: 'USDT',
+        quoteCurrency: 'KRW',
+        rawSymbol: 'usdt_krw',
+        interval: '1h',
+        openTime: 1_712_346_000_000,
+        closeTime: 1_712_349_600_000,
+        open: 1453,
+        high: 1455,
+        low: 1452,
+        close: 1454,
+        volume: 1100,
+      },
+    ]);
+
+    const { getChartCandles } = await import('../src/domains/charts/chart.service');
+    const response = await getChartCandles({
+      exchange: 'korbit',
+      symbol: 'USDT_KRW',
+      interval: '1h',
+      limit: 2,
+    });
+
+    expect(provider.getCandles).toHaveBeenCalledWith('USDT', '1h', 60);
+    expect(response.marketId).toBe('usdt_krw');
+    expect(response.canonicalSymbol).toBe('USDT');
+    expect(response.graphSupported).toBe(true);
+    expect(response.meta.isRenderable).toBe(true);
   });
 });

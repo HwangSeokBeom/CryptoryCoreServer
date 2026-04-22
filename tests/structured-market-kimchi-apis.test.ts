@@ -455,6 +455,35 @@ describe('Structured Market and Kimchi APIs', () => {
     expect(getAssetViewsMock).toHaveBeenCalled();
   });
 
+  it('hydrates requested Coinone symbols from provider snapshot when viewport cache has no current price', async () => {
+    const { getBaseMarketSnapshot } = await import('../src/domains/market-data/market-data.service');
+
+    providers.coinone.listMarkets.mockResolvedValueOnce(['HIGH'].map((symbol) => createMarket(symbol, 'coinone')));
+    providers.coinone.getTickerSnapshot.mockImplementationOnce(async (symbols?: string[]) =>
+      (symbols ?? []).map((symbol) => createTicker({
+        exchange: 'coinone',
+        symbol,
+        price: symbol === 'HIGH' ? 400.5 : 1,
+      })));
+    publicMarketDataStore.getTickers.mockReturnValueOnce([]);
+
+    const response = await getBaseMarketSnapshot({
+      exchange: 'coinone',
+      symbols: ['HIGH'],
+      scope: 'symbols',
+    });
+
+    expect(response.items).toHaveLength(1);
+    expect(response.items[0]).toMatchObject({
+      symbol: 'HIGH',
+      marketId: 'HIGH',
+      currentPrice: 400.5,
+      tradePrice: 400.5,
+      currentPriceSource: 'provider_snapshot',
+    });
+    expect(providers.coinone.getTickerSnapshot).toHaveBeenCalledWith(['HIGH']);
+  });
+
   it('keeps sourceExchange isolated when switching market exchanges', async () => {
     const { getMarketOverview } = await import('../src/domains/market-data/market-data.service');
 

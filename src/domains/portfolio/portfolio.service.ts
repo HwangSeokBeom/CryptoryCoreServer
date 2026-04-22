@@ -1,5 +1,12 @@
 import { ExchangeCapabilityError } from '../../core/exchange/errors';
-import type { ExchangeId, PortfolioSnapshot, QuoteCurrency } from '../../core/exchange/exchange.types';
+import type {
+  AssetHistoryEventType,
+  AssetHistoryRecord,
+  AssetHistorySourceType,
+  ExchangeId,
+  PortfolioSnapshot,
+  QuoteCurrency,
+} from '../../core/exchange/exchange.types';
 import { EXCHANGE_METADATA } from '../../core/exchange/exchange.metadata';
 import { exchangeProviderRegistry } from '../../core/exchange/registry.bootstrap';
 import { env } from '../../config/env';
@@ -85,7 +92,22 @@ export type PortfolioRouteResponse<T> = {
   pollingFallbackRecommended: boolean;
 };
 
+export type PortfolioHistoryItem = AssetHistoryRecord & {
+  id: string;
+  assetSymbol: string;
+  symbol: string;
+  eventType: AssetHistoryEventType;
+  price: number | null;
+  occurredAt: string;
+  source: string;
+  sourceType: AssetHistorySourceType;
+  isSynthetic: boolean;
+  isVerifiedUserEvent: boolean;
+};
+
 const inFlightPortfolioOperations = new Map<string, Promise<unknown>>();
+const MOCK_HISTORY_SOURCE_TYPES = new Set<AssetHistorySourceType>(['mock', 'seed', 'sample']);
+const SYNTHETIC_HISTORY_SOURCE_TYPES = new Set<AssetHistorySourceType>(['synthetic_snapshot', 'snapshot_diff']);
 
 function resolvePortfolioProvider(exchange: ExchangeId) {
   try {
@@ -198,6 +220,130 @@ function withSingleFlight<T>(key: string, operation: () => Promise<T>) {
   });
   inFlightPortfolioOperations.set(key, promise);
   return promise;
+}
+
+function resolveHistoryEventType(record: AssetHistoryRecord): AssetHistoryEventType {
+  return record.eventType ?? record.type;
+}
+
+function resolveHistorySourceType(record: AssetHistoryRecord, eventType: AssetHistoryEventType): AssetHistorySourceType {
+  if (record.sourceType) {
+    return record.sourceType;
+  }
+
+  switch (eventType) {
+    case 'trade':
+      return 'fill';
+    case 'deposit':
+      return 'deposit';
+    case 'withdrawal':
+      return 'withdrawal';
+    case 'transfer':
+      return 'transfer';
+    case 'airdrop':
+      return 'airdrop';
+    case 'fee':
+      return 'fee';
+    case 'adjustment':
+      return 'adjustment';
+    default:
+      return 'unknown';
+  }
+}
+
+function buildPortfolioHistoryId(record: AssetHistoryRecord, assetSymbol: string, eventType: AssetHistoryEventType) {
+  const explicitId = typeof record.id === 'string' ? record.id.trim() : '';
+  if (explicitId) {
+    return explicitId;
+  }
+
+  return [
+    record.exchange,
+    assetSymbol,
+    eventType,
+    record.timestamp,
+    record.amount,
+    record.price ?? 'na',
+    record.orderId ?? 'na',
+  ].join(':');
+}
+
+function normalizePortfolioHistoryRecords(params: {
+  userId: string;
+  exchange: ExchangeId;
+  symbol?: string;
+  limit?: number;
+  records: AssetHistoryRecord[];
+}): PortfolioHistoryItem[] {
+  const filtered: PortfolioHistoryItem[] = [];
+  let filteredMockCount = 0;
+  let filteredSyntheticCount = 0;
+  let filteredUnknownCount = 0;
+  const sourceTypeCounts = new Map<string, number>();
+
+  for (const record of params.records) {
+    const eventType = resolveHistoryEventType(record);
+    const assetSymbol = (record.assetSymbol ?? record.symbol ?? '').trim().toUpperCase();
+    const sourceType = resolveHistorySourceType(record, eventType);
+    sourceTypeCounts.set(sourceType, (sourceTypeCounts.get(sourceType) ?? 0) + 1);
+
+    if (MOCK_HISTORY_SOURCE_TYPES.has(sourceType)) {
+      filteredMockCount += 1;
+      continue;
+    }
+
+    const isSynthetic = record.isSynthetic ?? SYNTHETIC_HISTORY_SOURCE_TYPES.has(sourceType);
+    if (isSynthetic) {
+      filteredSyntheticCount += 1;
+      continue;
+    }
+
+    const isVerifiedUserEvent = record.isVerifiedUserEvent ?? sourceType !== 'unknown';
+    const hasValidTimestamp = Number.isFinite(record.timestamp) && record.timestamp > 0;
+    const hasValidAmount = Number.isFinite(record.amount) && record.amount !== 0;
+    if (!assetSymbol || !hasValidTimestamp || !hasValidAmount || !isVerifiedUserEvent) {
+      filteredUnknownCount += 1;
+      continue;
+    }
+
+    filtered.push({
+      ...record,
+      id: buildPortfolioHistoryId(record, assetSymbol, eventType),
+      assetSymbol,
+      symbol: assetSymbol,
+      eventType,
+      type: eventType,
+      price: typeof record.price === 'number' && Number.isFinite(record.price) ? record.price : null,
+      occurredAt: record.occurredAt ?? new Date(record.timestamp).toISOString(),
+      source: record.source ?? 'exchange_private_api',
+      sourceType,
+      isSynthetic: false,
+      isVerifiedUserEvent: true,
+    });
+  }
+
+  const returned = filtered
+    .sort((left, right) => right.timestamp - left.timestamp)
+    .slice(0, Math.max(params.limit ?? filtered.length, 0));
+
+  logger.info(
+    {
+      domain: 'portfolio',
+      event: 'portfolio_history_filter',
+      userId: params.userId,
+      exchange: params.exchange,
+      symbol: params.symbol ?? null,
+      rawCount: params.records.length,
+      returnedCount: returned.length,
+      filteredMockCount,
+      filteredSyntheticCount,
+      filteredUnknownCount,
+      sourceTypeSummary: Object.fromEntries(sourceTypeCounts),
+    },
+    `[PortfolioHistoryDebug] rawCount=${params.records.length} returnedCount=${returned.length} filteredMockCount=${filteredMockCount} filteredSyntheticCount=${filteredSyntheticCount} filteredUnknownCount=${filteredUnknownCount}`,
+  );
+
+  return returned;
 }
 
 function toExchangeGroup(snapshot: PortfolioSnapshot, usdKrwRate: number): ExchangePortfolioGroup {
@@ -372,9 +518,16 @@ export async function getAssetHistory(userId: string, exchange: ExchangeId, symb
   }
 
   return withSingleFlight(`history:${userId}:${exchange}:${symbol ?? '*'}:${limit ?? 50}`, () =>
-    executePortfolioOperation(userId, exchange, '자산 변동 내역 조회에 실패했습니다.', async () =>
-      provider.getAssetHistory!(symbol, limit, await getPortfolioContext(userId, exchange)),
-    ),
+    executePortfolioOperation(userId, exchange, '자산 변동 내역 조회에 실패했습니다.', async () => {
+      const records = await provider.getAssetHistory!(symbol, limit, await getPortfolioContext(userId, exchange));
+      return normalizePortfolioHistoryRecords({
+        userId,
+        exchange,
+        symbol,
+        limit,
+        records,
+      });
+    }),
   );
 }
 
@@ -432,7 +585,7 @@ export async function getAssetHistoryRouteResponse(
   exchange: ExchangeId,
   symbol?: string,
   limit?: number,
-): Promise<PortfolioRouteResponse<unknown[]>> {
+): Promise<PortfolioRouteResponse<PortfolioHistoryItem[]>> {
   try {
     return {
       data: await getAssetHistory(userId, exchange, symbol, limit),

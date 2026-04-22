@@ -262,6 +262,61 @@ describe('candle cache resilience', () => {
     });
   });
 
+  it('normalizes pair-like Korbit stablecoin symbol requests onto the listed market identity', async () => {
+    provider.listMarkets.mockResolvedValue([
+      {
+        symbol: 'USDT',
+        exchangeSymbol: 'usdt_krw',
+        marketId: 'usdt_krw',
+        market: 'USDT/KRW',
+        baseCurrency: 'USDT',
+        quoteCurrency: 'KRW',
+        rawSymbol: 'usdt_krw',
+        tradable: true,
+      },
+      {
+        symbol: 'XRP',
+        exchangeSymbol: 'xrp_krw',
+        marketId: 'xrp_krw',
+        market: 'XRP/KRW',
+        baseCurrency: 'XRP',
+        quoteCurrency: 'KRW',
+        rawSymbol: 'xrp_krw',
+        tradable: true,
+      },
+    ]);
+    provider.getMarketCapabilitySnapshot.mockResolvedValue({
+      websocketTickerSymbols: ['USDT', 'XRP'],
+      capabilitySymbols: {
+        tickers: ['USDT', 'XRP'],
+        orderbook: ['USDT', 'XRP'],
+        trades: ['USDT', 'XRP'],
+        candles: ['USDT', 'XRP'],
+      },
+    });
+    provider.getCandles.mockResolvedValueOnce(makeCandles(60, 1_712_345_000_000, {
+      symbol: 'USDT',
+      market: 'USDT/KRW',
+      rawSymbol: 'usdt_krw',
+      marketId: 'usdt_krw',
+    }));
+
+    const { getCandlesWithMeta } = await import('../src/domains/market-data/market-data.service');
+    const { resetCandleSnapshotCachesForTest } = await import('../src/domains/charts/candle.snapshot');
+    resetCandleSnapshotCachesForTest();
+
+    const response = await getCandlesWithMeta('korbit', { symbol: 'USDT_KRW' }, '1h', 12);
+
+    expect(provider.getCandles).toHaveBeenCalledWith('USDT', '1h', 60);
+    expect(response.items).toHaveLength(12);
+    expect(response.metadata).toMatchObject({
+      marketId: 'usdt_krw',
+      canonicalSymbol: 'USDT',
+      displaySymbol: 'USDT/KRW',
+      isChartAvailable: true,
+    });
+  });
+
   it('returns stale candle payloads from the market service instead of throwing 503 when only last known good data exists', async () => {
     provider.getCandles.mockResolvedValueOnce(makeCandles(12));
 

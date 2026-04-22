@@ -113,8 +113,11 @@ export interface PublicMarketCapabilityState {
     | 'active'
     | 'retryable'
     | 'blocked'
+    | 'bad_request'
     | 'unsupported'
     | 'malformed'
+    | 'upstream_error'
+    | 'empty_response'
     | 'temporarily_unavailable'
     | 'rate_limited'
     | 'cancelled';

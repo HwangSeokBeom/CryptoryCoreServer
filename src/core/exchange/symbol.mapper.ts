@@ -23,6 +23,10 @@ function normalizeSymbol(symbol: string) {
   return normalizeAssetToken(symbol);
 }
 
+function isFiatQuoteToken(value: string) {
+  return ['KRW', 'USD', 'EUR', 'TRY', 'BRL'].includes(compactAssetToken(value));
+}
+
 function isFiatOrStableQuoteToken(value: string) {
   return ['KRW', 'USD', 'USDT', 'USDC', 'FDUSD', 'BUSD', 'TUSD', 'USDP', 'DAI', 'EUR', 'TRY', 'BRL']
     .includes(compactAssetToken(value));
@@ -38,6 +42,14 @@ export function toCanonicalSymbol(symbol: string) {
   if (separatedPairMatch) {
     const left = compactAssetToken(separatedPairMatch[1]);
     const right = compactAssetToken(separatedPairMatch[2]);
+    if (isFiatOrStableQuoteToken(left) && isFiatOrStableQuoteToken(right)) {
+      const leftIsFiat = isFiatQuoteToken(left);
+      const rightIsFiat = isFiatQuoteToken(right);
+      if (leftIsFiat !== rightIsFiat) {
+        return leftIsFiat ? right : left;
+      }
+      return left || right;
+    }
     if (isFiatOrStableQuoteToken(left) && right) {
       return right;
     }
@@ -161,9 +173,8 @@ export function toCanonicalMarket(exchange: ExchangeId, symbol: string): Canonic
   const assetMetadata = getAssetRegistryMetadata(canonicalSymbol, canonicalSymbol);
   const rawSymbol = toExchangeSymbol(exchange, canonicalSymbol);
   const canonicalMarketId = `${canonicalSymbol}/${quoteCurrency}`;
-  const quoteLikeAsset = assetMetadata.assetType === 'fiat'
-    || assetMetadata.assetType === 'stablecoin';
-  const graphSupported = !quoteLikeAsset && assetMetadata.assetType !== 'synthetic' && assetMetadata.assetType !== 'exchange_only';
+  const quoteOnlyAsset = assetMetadata.assetType === 'fiat';
+  const graphSupported = !quoteOnlyAsset && assetMetadata.assetType !== 'synthetic' && assetMetadata.assetType !== 'exchange_only';
 
   return {
     exchange,
@@ -186,7 +197,7 @@ export function toCanonicalMarket(exchange: ExchangeId, symbol: string): Canonic
       supportedIntervals: getSupportedCandleIntervals(exchange),
       unsupportedReason: graphSupported
         ? null
-        : quoteLikeAsset
+        : quoteOnlyAsset
           ? 'quote_like_symbol'
           : 'synthetic_market',
     },
@@ -195,7 +206,7 @@ export function toCanonicalMarket(exchange: ExchangeId, symbol: string): Canonic
     supportedIntervals: getSupportedCandleIntervals(exchange),
     unsupportedReason: graphSupported
       ? null
-      : quoteLikeAsset
+      : quoteOnlyAsset
         ? 'quote_like_symbol'
         : 'synthetic_market',
     symbol: canonicalSymbol,

@@ -33,8 +33,11 @@ type PublicCapability = (typeof CAPABILITIES)[number];
 type CapabilityFailureKind =
   | 'active'
   | 'blocked'
+  | 'bad_request'
   | 'unsupported'
   | 'malformed'
+  | 'upstream_error'
+  | 'empty_response'
   | 'temporarily_unavailable'
   | 'rate_limited'
   | 'cancelled';
@@ -312,11 +315,20 @@ function classifyCapabilityError(error: unknown): {
     if (error.statusCode === 429) {
       return { kind: 'rate_limited', statusCode: error.statusCode, reason, retry: true };
     }
-    if ([400, 404, 405, 410, 422].includes(error.statusCode)) {
+    if ([400, 405, 422].includes(error.statusCode)) {
+      return { kind: 'bad_request', statusCode: error.statusCode, reason, retry: false };
+    }
+    if ([404, 410].includes(error.statusCode)) {
       return { kind: 'unsupported', statusCode: error.statusCode, reason, retry: false };
     }
     if ([408, 409, 425, 500, 502, 503, 504].includes(error.statusCode)) {
-      return { kind: 'temporarily_unavailable', statusCode: error.statusCode, reason, retry: true };
+      return { kind: 'upstream_error', statusCode: error.statusCode, reason, retry: true };
+    }
+    if (error.statusCode >= 500) {
+      return { kind: 'upstream_error', statusCode: error.statusCode, reason, retry: true };
+    }
+    if (!responseBody) {
+      return { kind: 'empty_response', statusCode: error.statusCode, reason, retry: true };
     }
     if (/html|<!doctype|payload/i.test(error.responseBody ?? '')) {
       return { kind: 'malformed', statusCode: error.statusCode, reason, retry: false };
@@ -344,10 +356,16 @@ function getSuppressMs(kind: Exclude<CapabilityFailureKind, 'active'>, failureCo
   switch (kind) {
     case 'blocked':
       return 5 * 60_000;
+    case 'bad_request':
+      return 2 * 60_000;
     case 'unsupported':
       return 2 * 60_000;
     case 'malformed':
       return 90_000;
+    case 'empty_response':
+      return Math.min(20_000 * Math.max(failureCount, 1), 90_000);
+    case 'upstream_error':
+      return Math.min(15_000 * 2 ** Math.max(failureCount - 1, 0), 5 * 60_000);
     case 'rate_limited':
       return Math.min(10_000 * Math.max(failureCount, 1), 60_000);
     case 'cancelled':

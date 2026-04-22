@@ -10,6 +10,7 @@ import { buildResolvedMarketCapabilityFlags } from '../../core/exchange/market.c
 import { exchangeProviderRegistry } from '../../core/exchange/registry.bootstrap';
 import { resolveExchangeInterval } from '../../core/exchange/interval.mapper';
 import { resolveCanonicalAssetKey as resolveCanonicalAssetImageKey, toCanonicalMarket, toCanonicalSymbol } from '../../core/exchange/symbol.mapper';
+import { ExchangeRequestError } from '../../core/exchange/errors';
 import { EXCHANGE_IDS } from '../../core/exchange/exchange.types';
 import {
   assetMetadataService,
@@ -40,6 +41,7 @@ import type {
 } from '../../core/exchange/exchange.types';
 import {
   buildCanonicalMarketMetadataFromDescriptor,
+  normalizeMarketResolveInput,
   resolveExchangeMarketInput,
 } from '../../core/exchange/market-metadata';
 import type { ExchangeMarketDataProvider } from '../../core/exchange/provider.interfaces';
@@ -47,6 +49,7 @@ import {
   createFreshnessMetadata,
   getExchangeTickerLoads,
   resolveTickerDataMode,
+  type TickerSnapshotSource,
 } from './ticker-snapshot.resolver';
 import { resolveCandleSnapshot, type CandleResponseMeta } from '../charts/candle.snapshot';
 import { marketIngestHealth } from './market.ingest-health';
@@ -114,6 +117,12 @@ export type MarketSummaryResponse = {
   metadata: MarketResponseMetadata;
   latestTicker: FreshMarketData<CanonicalTickerSnapshot> | null;
   market: MarketResponseMetadata;
+  exchange: ExchangeId;
+  symbol: string;
+  marketId: string;
+  currentPrice: number | null;
+  tradePrice: number | null;
+  currentPriceSource: TickerSnapshotSource | 'unavailable';
   updatedAt: number | null;
 };
 
@@ -128,6 +137,7 @@ type MarketSparklineResponseSource = 'fresh_cache' | 'stale_cache' | 'provider_f
 type MarketSparklineSymbolSource = Exclude<MarketSparklineResponseSource, 'mixed'>;
 type MarketSparklineRenderPriority = 'live' | 'cached' | 'stale' | 'unavailable';
 type MarketSparklineLatencyBucket = 'instant' | 'fast' | 'delayed' | 'unavailable';
+type CurrentPriceSource = TickerSnapshotSource | 'unavailable';
 type MarketSparklineFallbackReason =
   | 'provider_slow'
   | 'provider_empty'
@@ -152,13 +162,20 @@ type MarketSparklineSymbolMeta = {
   fallbackReason?: MarketSparklineFallbackReason;
 };
 
-type MarketTickerRow = FreshMarketData<CanonicalTickerSnapshot> & {
-  current: number;
-  percent: number;
+type MarketTickerRow = Omit<FreshMarketData<CanonicalTickerSnapshot>, 'price' | 'change24h' | 'volume24h' | 'high24h' | 'low24h' | 'timestamp'> & {
+  price: number | null;
+  change24h: number | null;
+  volume24h: number | null;
+  high24h: number | null;
+  low24h: number | null;
+  timestamp: number | null;
+  current: number | null;
+  percent: number | null;
   previousPrice24h: number | null;
   sparkline: number[];
   sparklinePoints: SparklinePoint[];
-  sparklineSource: TickerSparklineSource;
+  sparklineSource: TickerSparklineSource | 'unavailable';
+  currentPriceSource: CurrentPriceSource;
 };
 
 function assertSupportedSymbol(symbol: string) {
@@ -169,24 +186,101 @@ function assertSupportedSymbol(symbol: string) {
   return normalized;
 }
 
-function looksLikeExplicitMarketId(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return false;
-  }
-
-  return /[-_/]/.test(trimmed)
-    || /^[a-z0-9]+_(krw|usd|usdt|usdc|fdusd|busd|tusd|usdp|dai|eur|try|brl)$/i.test(trimmed);
+function normalizeMarketLookupRequest(input: MarketLookupRequest): { symbol?: string; marketId?: string } {
+  return normalizeMarketResolveInput(input);
 }
 
-function normalizeMarketLookupRequest(input: MarketLookupRequest): { symbol?: string; marketId?: string } {
-  if (typeof input !== 'string') {
-    return input;
+function classifyCandleRejectReason(reason?: string | null) {
+  const normalized = reason?.trim().toLowerCase() ?? '';
+  if (
+    normalized.includes('not listed')
+    || normalized.includes('could not be resolved')
+    || normalized.includes('marketid')
+  ) {
+    return 'unknownMarket';
   }
+  if (
+    normalized.includes('alias_normalized')
+    || normalized.includes('normalize')
+    || normalized.includes('symbol_required')
+  ) {
+    return 'normalizeMismatch';
+  }
+  if (
+    normalized.includes('provider_empty_response')
+    || normalized.includes('empty_response')
+    || normalized.includes('no_usable_candles')
+    || normalized.includes('no data')
+  ) {
+    return 'providerNoData';
+  }
+  if (
+    normalized.includes('insufficient')
+    || normalized.includes('point_count')
+    || normalized.includes('too_few')
+  ) {
+    return 'insufficientCandles';
+  }
+  return 'providerUnavailable';
+}
 
-  return looksLikeExplicitMarketId(input)
-    ? { marketId: input }
-    : { symbol: input };
+function logCandleResolveDebug(params: {
+  exchange: ExchangeId;
+  inputSymbol?: string | null;
+  inputMarketId?: string | null;
+  resolvedMarketId: string;
+  canonicalSymbol: string;
+  providerSymbol: string;
+  interval: string;
+  baseAsset: string;
+  quoteAsset: QuoteCurrency;
+  matchSource?: string | null;
+}) {
+  logger.info(
+    {
+      domain: 'market-routes',
+      ...params,
+    },
+    `[CandleResolveDebug] exchange=${params.exchange} inputSymbol=${params.inputSymbol ?? 'null'} resolvedMarketId=${params.resolvedMarketId} canonicalSymbol=${params.canonicalSymbol} providerSymbol=${params.providerSymbol} interval=${params.interval}`,
+  );
+}
+
+function logCandleResponseDebug(params: {
+  exchange: ExchangeId;
+  requestKey: string;
+  candleCount: number;
+  firstTimestamp: number | null;
+  lastTimestamp: number | null;
+  source: string;
+  marketId: string;
+  canonicalSymbol: string;
+}) {
+  logger.info(
+    {
+      domain: 'market-routes',
+      ...params,
+    },
+    `[CandleResponseDebug] exchange=${params.exchange} requestKey=${params.requestKey} candleCount=${params.candleCount} source=${params.source}`,
+  );
+}
+
+function logCandleRejectDebug(params: {
+  exchange: ExchangeId;
+  inputSymbol?: string | null;
+  inputMarketId?: string | null;
+  marketId?: string | null;
+  canonicalSymbol?: string | null;
+  interval: string;
+  rejectReason: string;
+  reason?: string | null;
+}) {
+  logger.info(
+    {
+      domain: 'market-routes',
+      ...params,
+    },
+    `[CandleRejectDebug] exchange=${params.exchange} rejectReason=${params.rejectReason} marketId=${params.marketId ?? 'null'} interval=${params.interval}`,
+  );
 }
 
 function buildAvailability(metadata: CanonicalMarketMetadata, unavailable?: {
@@ -255,6 +349,8 @@ async function resolveMarketForRequest(
   market: ExchangeMarketDescriptor;
   metadata: CanonicalMarketMetadata;
   responseMetadata: MarketResponseMetadata;
+  matchSource: 'market_id' | 'market_alias' | 'symbol';
+  identitySpecialCase: string | null;
 }> {
   const provider = exchangeProviderRegistry.getMarketDataProvider(exchange);
   let markets: ExchangeMarketDescriptor[];
@@ -285,6 +381,16 @@ async function resolveMarketForRequest(
       : resolved.reason === 'SYMBOL_NOT_FOUND'
         ? `symbol ${resolved.input} could not be resolved to a listed ${exchange} market`
         : 'marketId or symbol is required';
+    if (target === 'candles') {
+      logCandleRejectDebug({
+        exchange,
+        inputSymbol: typeof request === 'string' ? request : request.symbol ?? null,
+        inputMarketId: typeof request === 'string' ? null : request.marketId ?? null,
+        interval: 'n/a',
+        rejectReason: 'unknownMarket',
+        reason,
+      });
+    }
     throw buildMarketDataError({
       code: 'MARKET_DATA_UNSUPPORTED',
       target,
@@ -331,6 +437,8 @@ async function resolveMarketForRequest(
     market: resolved.market,
     metadata: resolved.metadata,
     responseMetadata: buildAvailability(resolved.metadata),
+    matchSource: resolved.matchSource,
+    identitySpecialCase: resolved.identitySpecialCase,
   };
 }
 
@@ -423,6 +531,7 @@ function withFreshness<T>(
 function withTickerCompletenessFromSource(
   ticker: CanonicalTickerSnapshot,
   dataMode: 'streaming' | 'snapshot' | 'cached_snapshot',
+  currentPriceSource?: CurrentPriceSource,
 ): MarketTickerRow {
   const freshness = withFreshness(ticker, ticker.timestamp, dataMode);
   const sparkline = buildTickerSparkline(ticker, freshness.sourceTimestamp ?? ticker.timestamp);
@@ -435,16 +544,158 @@ function withTickerCompletenessFromSource(
     sparkline: sparkline.points.map((point) => point.price),
     sparklinePoints: sparkline.points,
     sparklineSource: sparkline.source,
+    currentPriceSource:
+      currentPriceSource
+      ?? (dataMode === 'streaming'
+        ? 'public_store_cache'
+        : dataMode === 'snapshot'
+          ? 'provider_snapshot'
+          : 'public_store_stale'),
   };
+}
+
+function createUnavailableTickerRow(
+  market: MarketUniverseItem,
+  source: TickerSnapshotSource = 'provider_snapshot',
+): MarketTickerRow {
+  const freshness = createFreshnessMetadata({
+    dataMode: resolveTickerDataMode(source),
+    sourceTimestamp: null,
+  });
+
+  return {
+    exchange: market.exchange,
+    marketId: market.marketId,
+    canonicalMarketId: market.canonicalMarketId,
+    rawSymbol: market.rawSymbol,
+    canonicalSymbol: market.canonicalSymbol,
+    baseAsset: market.baseAsset,
+    quoteAsset: market.quoteAsset,
+    displaySymbol: market.displaySymbol,
+    koreanName: market.koreanName ?? null,
+    englishName: market.englishName ?? null,
+    iconUrl: market.iconUrl,
+    isActive: market.isActive,
+    capabilities: market.capabilities,
+    candlesSupported: market.candlesSupported,
+    graphSupported: market.graphSupported,
+    supportedIntervals: [...market.supportedIntervals],
+    unsupportedReason: market.unsupportedReason,
+    symbol: market.symbol,
+    market: market.market,
+    baseCurrency: market.baseCurrency,
+    quoteCurrency: market.quoteCurrency,
+    price: null,
+    change24h: null,
+    volume24h: null,
+    high24h: null,
+    low24h: null,
+    timestamp: null,
+    ...freshness,
+    current: null,
+    percent: null,
+    previousPrice24h: null,
+    sparkline: [],
+    sparklinePoints: [],
+    sparklineSource: 'unavailable',
+    currentPriceSource: 'unavailable',
+  };
+}
+
+function hasUsableCurrentPrice(value: number | null | undefined) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+function classifyTickerSnapshotFailureKind(error?: unknown, reason?: string | null) {
+  if (error instanceof ExchangeRequestError) {
+    if ([400, 405, 422].includes(error.statusCode)) {
+      return 'bad_request';
+    }
+    if ([404, 410].includes(error.statusCode)) {
+      return 'unsupported';
+    }
+    if (error.statusCode === 429) {
+      return 'rate_limited';
+    }
+    if (error.statusCode >= 500 || [408, 409, 425, 504].includes(error.statusCode)) {
+      return 'upstream_error';
+    }
+  }
+
+  const normalized = reason?.trim().toLowerCase() ?? '';
+  if (!normalized) {
+    return 'ticker_snapshot_unavailable';
+  }
+  if (normalized.includes('timed out') || normalized.includes('timeout')) {
+    return 'upstream_error';
+  }
+  if (normalized.includes('unsupported')) {
+    return 'unsupported';
+  }
+  if (normalized.includes('rate limit') || normalized.includes('429')) {
+    return 'rate_limited';
+  }
+  if (normalized.includes('400') || normalized.includes('bad request') || normalized.includes('invalid symbol')) {
+    return 'bad_request';
+  }
+  if (normalized.includes('empty response')) {
+    return 'empty_response';
+  }
+  return 'ticker_snapshot_unavailable';
+}
+
+function logMarketMergeDebug(params: {
+  exchange: ExchangeId;
+  sourceOfTruth?: 'provider_market_universe';
+  universeCount?: number;
+  tickerCount?: number;
+  pricedCount?: number;
+  droppedCount?: number;
+  action?: 'degrade_to_unpriced';
+  reason?: string;
+  affectedCount?: number;
+}) {
+  logger.info(
+    {
+      domain: 'market-routes',
+      ...params,
+    },
+    params.action === 'degrade_to_unpriced'
+      ? `[MarketMergeDebug] action=degrade_to_unpriced exchange=${params.exchange} reason=${params.reason ?? 'unknown'} affectedCount=${params.affectedCount ?? 0}`
+      : `[MarketMergeDebug] exchange=${params.exchange} sourceOfTruth=${params.sourceOfTruth ?? 'provider_market_universe'} universeCount=${params.universeCount ?? 0} tickerCount=${params.tickerCount ?? 0} pricedCount=${params.pricedCount ?? 0} droppedCount=${params.droppedCount ?? 0}`,
+  );
+}
+
+function logCurrentPriceDebug(params: {
+  exchange: ExchangeId;
+  symbol: string;
+  marketId?: string | null;
+  resolvedMarketKey: string;
+  currentPrice: number | null;
+  source: CurrentPriceSource;
+}) {
+  logger.info(
+    {
+      domain: 'market-routes',
+      exchange: params.exchange,
+      symbol: params.symbol,
+      marketId: params.marketId ?? null,
+      resolvedMarketKey: params.resolvedMarketKey,
+      currentPriceFound: hasUsableCurrentPrice(params.currentPrice),
+      currentPrice: params.currentPrice,
+      source: params.source,
+    },
+    `[CurrentPriceDebug] exchange=${params.exchange} symbol=${params.symbol} marketId=${params.marketId ?? 'null'} resolvedMarketKey=${params.resolvedMarketKey} currentPriceFound=${hasUsableCurrentPrice(params.currentPrice)} source=${params.source}`,
+  );
 }
 
 function summarizeTickerFieldCoverage(items: MarketTickerRow[]) {
   return {
     total: items.length,
-    price: items.filter((item) => Number.isFinite(item.price) && item.price > 0).length,
+    price: items.filter((item) => typeof item.price === 'number' && Number.isFinite(item.price) && item.price > 0).length,
     change24h: items.filter((item) => Number.isFinite(item.change24h)).length,
     volume24h: items.filter((item) => Number.isFinite(item.volume24h)).length,
-    timestamp: items.filter((item) => Number.isFinite(item.timestamp) && item.timestamp > 0).length,
+    timestamp: items.filter((item) => typeof item.timestamp === 'number' && Number.isFinite(item.timestamp) && item.timestamp > 0).length,
     sparkline: items.filter((item) => item.sparkline.length >= 2).length,
     sparklineFallback: items.filter((item) => item.sparklineSource !== 'history').length,
   };
@@ -782,6 +1033,8 @@ export type MarketSnapshotItem = {
   baseCurrency: string | null;
   quoteCurrency: QuoteCurrency | null;
   price: number | null;
+  tradePrice: number | null;
+  currentPriceSource: CurrentPriceSource;
   change24h: number | null;
   signedChangeRate: number | null;
   volume24h: number | null;
@@ -866,6 +1119,8 @@ export type MarketViewportRow = {
   baseCurrency: string | null;
   quoteCurrency: QuoteCurrency | null;
   currentPrice: number | null;
+  tradePrice: number | null;
+  currentPriceSource: CurrentPriceSource;
   change24h: number | null;
   signedChangeRate: number | null;
   volume24h: number | null;
@@ -1040,6 +1295,8 @@ export type MarketBaseSnapshotItem = {
   baseCurrency: string | null;
   quoteCurrency: QuoteCurrency | null;
   currentPrice: number | null;
+  tradePrice: number | null;
+  currentPriceSource: CurrentPriceSource;
   change24h: number | null;
   signedChangeRate: number | null;
   volume24h: number | null;
@@ -1794,7 +2051,7 @@ async function refreshMarketSparklineRows(params: {
       const row = buildMarketViewportRow({
         exchange: params.exchange,
         market,
-        tickerRow: withTickerCompletenessFromSource(load.ticker, resolveTickerDataMode(load.source)),
+        tickerRow: withTickerCompletenessFromSource(load.ticker, resolveTickerDataMode(load.source), load.source),
         representativeSymbols: params.representativeSymbols,
         includeSparkline: true,
         debug: params.debug,
@@ -1924,6 +2181,8 @@ function createSnapshotItemFromTicker(market: MarketUniverseItem, ticker: Market
     baseCurrency: ticker.baseCurrency,
     quoteCurrency: ticker.quoteCurrency,
     price: ticker.price,
+    tradePrice: ticker.price,
+    currentPriceSource: ticker.currentPriceSource,
     change24h: ticker.change24h,
     signedChangeRate: ticker.change24h,
     volume24h: ticker.volume24h,
@@ -1994,6 +2253,8 @@ function createPendingSnapshotItem(
     baseCurrency: market.baseCurrency,
     quoteCurrency: market.quoteCurrency,
     price: null,
+    tradePrice: null,
+    currentPriceSource: 'unavailable',
     change24h: null,
     signedChangeRate: null,
     volume24h: null,
@@ -2036,6 +2297,86 @@ function summarizeSnapshotFreshness(items: MarketSnapshotItem[]) {
     asOf: asOfValues.length > 0 ? Math.max(...asOfValues) : null,
     staleItemCount: items.filter((item) => item.marketStatus === 'stale').length,
     pendingItemCount: items.filter((item) => item.marketStatus === 'pending').length,
+  };
+}
+
+function createTickerItemFromRow(market: MarketUniverseItem, tickerRow: MarketTickerRow): MarketTickerItem {
+  return {
+    ...tickerRow,
+    exchangeName: market.exchangeName,
+    marketId: market.marketId,
+    canonicalMarketId: market.canonicalMarketId,
+    canonicalSymbol: market.canonicalSymbol,
+    baseAsset: market.baseAsset,
+    quoteAsset: market.quoteAsset,
+    displaySymbol: market.displaySymbol,
+    koreanName: market.koreanName,
+    englishName: market.englishName,
+    iconUrl: market.iconUrl,
+    isActive: market.isActive,
+    candlesSupported: market.candlesSupported,
+    graphSupported: market.graphSupported,
+    supportedIntervals: [...market.supportedIntervals],
+    unsupportedReason: market.unsupportedReason,
+    canonicalAssetKey: market.canonicalAssetKey,
+    exchangeSymbol: market.exchangeSymbol,
+    tradable: market.tradable,
+    capabilities: market.capabilities,
+    isChartAvailable: market.isChartAvailable,
+    isOrderBookAvailable: market.isOrderBookAvailable,
+    isTradesAvailable: market.isTradesAvailable,
+    unavailableReason: market.unavailableReason,
+    kimchiComparable: market.kimchiComparable,
+    kimchiComparisonReason: market.kimchiComparisonReason,
+    nameKo: market.nameKo,
+    nameEn: market.nameEn,
+    registryMapped: market.registryMapped,
+    assetSupportStatus: market.assetSupportStatus,
+    imageUrl: null,
+    imageURL: null,
+    hasImage: false,
+    assetImageUrl: null,
+    imageAvailability: 'pending',
+    imageFailureReason: null,
+    imageMissingReason: null,
+    fallbackType: null,
+    assetType: null,
+    canonicalName: null,
+    fallbackColor: null,
+    fallbackInitials: null,
+    assetSlug: market.assetSlug ?? null,
+    imageFallbackKey: market.imageFallbackKey ?? resolveStableAssetFallbackKey({
+      exchange: market.exchange,
+      symbol: market.symbol,
+      rawSymbol: market.rawSymbol,
+      marketId: market.marketId,
+      canonicalAssetKey: market.canonicalAssetKey,
+      assetSlug: market.assetSlug ?? null,
+    }),
+    fallbackKey: market.fallbackKey ?? market.imageFallbackKey ?? resolveStableAssetFallbackKey({
+      exchange: market.exchange,
+      symbol: market.symbol,
+      rawSymbol: market.rawSymbol,
+      marketId: market.marketId,
+      canonicalAssetKey: market.canonicalAssetKey,
+      assetSlug: market.assetSlug ?? null,
+    }),
+    stableImageKey: market.stableImageKey ?? market.imageFallbackKey ?? resolveStableAssetFallbackKey({
+      exchange: market.exchange,
+      symbol: market.symbol,
+      rawSymbol: market.rawSymbol,
+      marketId: market.marketId,
+      canonicalAssetKey: market.canonicalAssetKey,
+      assetSlug: market.assetSlug ?? null,
+    }),
+    imageLookupKey: market.imageLookupKey ?? market.imageFallbackKey ?? resolveStableAssetFallbackKey({
+      exchange: market.exchange,
+      symbol: market.symbol,
+      rawSymbol: market.rawSymbol,
+      marketId: market.marketId,
+      canonicalAssetKey: market.canonicalAssetKey,
+      assetSlug: market.assetSlug ?? null,
+    }),
   };
 }
 
@@ -2254,6 +2595,8 @@ function buildMarketViewportRow(params: {
     baseCurrency: params.market.baseCurrency,
     quoteCurrency: params.market.quoteCurrency,
     currentPrice: params.tickerRow.price,
+    tradePrice: params.tickerRow.price,
+    currentPriceSource: params.tickerRow.currentPriceSource,
     change24h: params.tickerRow.change24h,
     signedChangeRate: params.tickerRow.change24h,
     volume24h: params.tickerRow.volume24h,
@@ -2334,6 +2677,8 @@ function buildMarketViewportRowFromSnapshotItem(params: {
     baseCurrency: params.item.baseCurrency,
     quoteCurrency: params.item.quoteCurrency,
     currentPrice: params.item.price,
+    tradePrice: params.item.tradePrice,
+    currentPriceSource: params.item.currentPriceSource,
     change24h: params.item.change24h,
     signedChangeRate: params.item.signedChangeRate,
     volume24h: params.item.volume24h,
@@ -2396,6 +2741,8 @@ function buildBaseSnapshotItem(params: {
     baseCurrency: params.item.baseCurrency,
     quoteCurrency: params.item.quoteCurrency,
     currentPrice: params.item.price,
+    tradePrice: params.item.tradePrice,
+    currentPriceSource: params.item.currentPriceSource,
     change24h: params.item.change24h,
     signedChangeRate: params.item.signedChangeRate,
     volume24h: params.item.volume24h,
@@ -3438,7 +3785,7 @@ async function loadTickerRowsFromSources(bundle: ProviderMarketUniverseBundle) {
       missingReasons.set(symbol, load?.reason ?? 'missing_from_provider_snapshot');
       continue;
     }
-    rows.set(symbol, withTickerCompletenessFromSource(load.ticker, resolveTickerDataMode(load.source)));
+    rows.set(symbol, withTickerCompletenessFromSource(load.ticker, resolveTickerDataMode(load.source), load.source));
   }
 
   return { rows, missingReasons };
@@ -4102,7 +4449,7 @@ async function resolveMarketViewportRows(params: {
     }
 
     staleReused ||= load.source === 'public_store_stale' || load.source === 'public_store_expired';
-    const tickerRow = withTickerCompletenessFromSource(load.ticker, resolveTickerDataMode(load.source));
+    const tickerRow = withTickerCompletenessFromSource(load.ticker, resolveTickerDataMode(load.source), load.source);
     rows.push(buildMarketViewportRow({
       exchange: params.exchange,
       market,
@@ -4232,6 +4579,86 @@ function logMarketViewportResponse(params: {
   );
 }
 
+async function hydrateRequestedSnapshotItemsCurrentPrice(params: {
+  exchange: ExchangeId;
+  entry: ExchangeMarketSnapshotCacheEntry;
+  requestedSymbols: string[];
+  snapshotItems: MarketSnapshotItem[];
+}) {
+  const itemMap = new Map(params.snapshotItems.map((item) => [item.symbol, item]));
+  const symbolsToHydrate = params.requestedSymbols.filter((symbol) =>
+    params.entry.marketBySymbol.has(symbol) && !hasUsableCurrentPrice(itemMap.get(symbol)?.price));
+  if (symbolsToHydrate.length === 0) {
+    return params.snapshotItems;
+  }
+
+  try {
+    const loads = await getExchangeTickerLoads(params.exchange, symbolsToHydrate, {
+      freshnessTargetMs: PRIORITY_FRESHNESS_TARGET_MS.snapshotTop,
+      prioritySymbols: symbolsToHydrate,
+      priorityFreshnessTargetMs: PRIORITY_FRESHNESS_TARGET_MS.snapshotTop,
+      providerTimeoutMs: 900,
+    });
+
+    for (const symbol of symbolsToHydrate) {
+      const market = params.entry.marketBySymbol.get(symbol);
+      const existing = itemMap.get(symbol);
+      const load = loads.get(symbol);
+      const currentPrice = hasUsableCurrentPrice(load?.ticker?.price) ? load?.ticker?.price ?? null : null;
+      const currentPriceSource = load?.ticker ? load.source : 'unavailable';
+      const resolvedMarketKey = `${params.exchange}:${market?.marketId ?? symbol}`;
+
+      logCurrentPriceDebug({
+        exchange: params.exchange,
+        symbol,
+        marketId: market?.marketId ?? null,
+        resolvedMarketKey,
+        currentPrice,
+        source: currentPriceSource,
+      });
+
+      if (!market || !load?.ticker || !hasUsableCurrentPrice(load.ticker.price)) {
+        continue;
+      }
+      if (existing && hasUsableCurrentPrice(existing.price)) {
+        continue;
+      }
+
+      itemMap.set(
+        symbol,
+        createSnapshotItemFromTicker(
+          market,
+          withTickerCompletenessFromSource(load.ticker, resolveTickerDataMode(load.source), load.source),
+        ),
+      );
+    }
+  } catch (error) {
+    logger.warn(
+      {
+        domain: 'market-routes',
+        exchange: params.exchange,
+        requestedSymbols: symbolsToHydrate,
+        err: error,
+      },
+      'Requested symbol current-price hydration failed',
+    );
+
+    for (const symbol of symbolsToHydrate) {
+      const market = params.entry.marketBySymbol.get(symbol);
+      logCurrentPriceDebug({
+        exchange: params.exchange,
+        symbol,
+        marketId: market?.marketId ?? null,
+        resolvedMarketKey: `${params.exchange}:${market?.marketId ?? symbol}`,
+        currentPrice: null,
+        source: 'unavailable',
+      });
+    }
+  }
+
+  return params.snapshotItems.map((item) => itemMap.get(item.symbol) ?? item);
+}
+
 export async function getBaseMarketSnapshot(params: {
   exchange: ExchangeId;
   symbols?: string[];
@@ -4307,6 +4734,12 @@ export async function getBaseMarketSnapshot(params: {
       const index = entry.itemIndexBySymbol.get(symbol);
       const item = index !== undefined ? entry.fullItems[index] : null;
       return item ? [item] : [];
+    });
+    snapshotItems = await hydrateRequestedSnapshotItemsCurrentPrice({
+      exchange: params.exchange,
+      entry,
+      requestedSymbols: normalized.symbols,
+      snapshotItems,
     });
   } else {
     snapshotItems = orderSnapshotItemsForScope(entry.fullItems, scope);
@@ -4834,7 +5267,7 @@ export async function getMarketSparkline(params: {
         const row = buildMarketViewportRow({
           exchange: params.exchange,
           market,
-          tickerRow: withTickerCompletenessFromSource(load.ticker, resolveTickerDataMode(load.source)),
+          tickerRow: withTickerCompletenessFromSource(load.ticker, resolveTickerDataMode(load.source), load.source),
           representativeSymbols,
           includeSparkline: true,
           debug: Boolean(params.debug),
@@ -5201,6 +5634,7 @@ export async function getTickers(params: {
 
   const items: MarketTickerItem[] = [];
   const droppedSymbols: DroppedSymbolEntry[] = [];
+  const degradedSymbols: DroppedSymbolEntry[] = [];
   const resolvedExchanges: ExchangeId[] = [];
   let requestedMarketCount = 0;
   let providerMarketCount = 0;
@@ -5270,6 +5704,7 @@ export async function getTickers(params: {
     resolvedExchanges.push(provider.exchange);
     const marketItemMap = new Map(bundle.items.map((item) => [item.symbol, item]));
     const returnedSymbols: string[] = [];
+    const pricedSymbols: string[] = [];
 
     for (const symbol of requestedSymbols) {
       const market = marketItemMap.get(symbol);
@@ -5284,6 +5719,19 @@ export async function getTickers(params: {
 
       const load = tickerLoads.get(symbol);
       if (!load?.ticker) {
+        if (load?.error) {
+          returnedSymbols.push(symbol);
+          degradedSymbols.push({
+            exchange: provider.exchange,
+            symbol,
+            reason: load.reason ?? 'ticker_snapshot_unavailable',
+          });
+          items.push(createTickerItemFromRow(
+            market,
+            createUnavailableTickerRow(market, load.source),
+          ));
+          continue;
+        }
         droppedSymbols.push({
           exchange: provider.exchange,
           symbol,
@@ -5293,86 +5741,15 @@ export async function getTickers(params: {
       }
 
       returnedSymbols.push(symbol);
-      items.push({
-        ...withTickerCompletenessFromSource(load.ticker, resolveTickerDataMode(load.source)),
-        exchangeName: market.exchangeName,
-        marketId: market.marketId,
-        canonicalMarketId: market.canonicalMarketId,
-        canonicalSymbol: market.canonicalSymbol,
-        baseAsset: market.baseAsset,
-        quoteAsset: market.quoteAsset,
-        displaySymbol: market.displaySymbol,
-        koreanName: market.koreanName,
-        englishName: market.englishName,
-        iconUrl: market.iconUrl,
-        isActive: market.isActive,
-        candlesSupported: market.candlesSupported,
-        graphSupported: market.graphSupported,
-        supportedIntervals: [...market.supportedIntervals],
-        unsupportedReason: market.unsupportedReason,
-        canonicalAssetKey: market.canonicalAssetKey,
-        exchangeSymbol: market.exchangeSymbol,
-        tradable: market.tradable,
-        capabilities: market.capabilities,
-        isChartAvailable: market.isChartAvailable,
-        isOrderBookAvailable: market.isOrderBookAvailable,
-        isTradesAvailable: market.isTradesAvailable,
-        unavailableReason: market.unavailableReason,
-        kimchiComparable: market.kimchiComparable,
-        kimchiComparisonReason: market.kimchiComparisonReason,
-        nameKo: market.nameKo,
-        nameEn: market.nameEn,
-        registryMapped: market.registryMapped,
-        assetSupportStatus: market.assetSupportStatus,
-        imageUrl: null,
-        imageURL: null,
-        hasImage: false,
-        assetImageUrl: null,
-        imageAvailability: 'pending',
-        imageFailureReason: null,
-        imageMissingReason: null,
-        fallbackType: null,
-        assetType: null,
-        canonicalName: null,
-        fallbackColor: null,
-        fallbackInitials: null,
-        assetSlug: market.assetSlug ?? null,
-        imageFallbackKey: market.imageFallbackKey ?? resolveStableAssetFallbackKey({
-          exchange: provider.exchange,
-          symbol: market.symbol,
-          rawSymbol: market.rawSymbol,
-          marketId: market.marketId,
-          canonicalAssetKey: market.canonicalAssetKey,
-          assetSlug: market.assetSlug ?? null,
-        }),
-        fallbackKey: market.fallbackKey ?? market.imageFallbackKey ?? resolveStableAssetFallbackKey({
-          exchange: provider.exchange,
-          symbol: market.symbol,
-          rawSymbol: market.rawSymbol,
-          marketId: market.marketId,
-          canonicalAssetKey: market.canonicalAssetKey,
-          assetSlug: market.assetSlug ?? null,
-        }),
-        stableImageKey: market.stableImageKey ?? market.imageFallbackKey ?? resolveStableAssetFallbackKey({
-          exchange: provider.exchange,
-          symbol: market.symbol,
-          rawSymbol: market.rawSymbol,
-          marketId: market.marketId,
-          canonicalAssetKey: market.canonicalAssetKey,
-          assetSlug: market.assetSlug ?? null,
-        }),
-        imageLookupKey: market.imageLookupKey ?? market.imageFallbackKey ?? resolveStableAssetFallbackKey({
-          exchange: provider.exchange,
-          symbol: market.symbol,
-          rawSymbol: market.rawSymbol,
-          marketId: market.marketId,
-          canonicalAssetKey: market.canonicalAssetKey,
-          assetSlug: market.assetSlug ?? null,
-        }),
-      });
+      pricedSymbols.push(symbol);
+      items.push(createTickerItemFromRow(
+        market,
+        withTickerCompletenessFromSource(load.ticker, resolveTickerDataMode(load.source), load.source),
+      ));
     }
 
     const providerDroppedSymbols = droppedSymbols.filter((item) => item.exchange === provider.exchange);
+    const providerDegradedSymbols = degradedSymbols.filter((item) => item.exchange === provider.exchange);
     logger.info(
       {
         domain: 'market-routes',
@@ -5383,6 +5760,7 @@ export async function getTickers(params: {
         providerMarketCount: bundle.marketSymbols.length,
         normalizedSymbolCount: requestedSymbols.length,
         returnedCount: returnedSymbols.length,
+        pricedCount: pricedSymbols.length,
         registryMappedCount: bundle.registryMappedCount,
         registryUnmappedCount: bundle.registryUnmappedCount,
         droppedSymbols: providerDroppedSymbols.map((item) => ({ symbol: item.symbol, reason: item.reason })),
@@ -5400,6 +5778,27 @@ export async function getTickers(params: {
       },
       'Resolved market ticker request',
     );
+    logMarketMergeDebug({
+      exchange: provider.exchange,
+      sourceOfTruth: 'provider_market_universe',
+      universeCount: bundle.marketSymbols.length,
+      tickerCount: returnedSymbols.length,
+      pricedCount: pricedSymbols.length,
+      droppedCount: providerDroppedSymbols.length,
+    });
+    const degradedReasonSummary = providerDegradedSymbols.reduce<Record<string, number>>((summary, item) => {
+      const reason = classifyTickerSnapshotFailureKind(undefined, item.reason);
+      summary[reason] = (summary[reason] ?? 0) + 1;
+      return summary;
+    }, {});
+    for (const [reason, affectedCount] of Object.entries(degradedReasonSummary)) {
+      logMarketMergeDebug({
+        exchange: provider.exchange,
+        action: 'degrade_to_unpriced',
+        reason,
+        affectedCount,
+      });
+    }
   }
 
   if (resolvedExchanges.length === 0) {
@@ -6299,7 +6698,11 @@ export async function getCandlesWithMeta(
   interval: string,
   limit?: number,
 ): Promise<MarketCandlesResponse> {
+  const inputSymbol = typeof request === 'string' ? request : request.symbol ?? null;
+  const inputMarketId = typeof request === 'string' ? null : request.marketId ?? null;
   const resolved = await resolveMarketForRequest(exchange, request, 'candles');
+  const providerSymbol = resolved.market.rawSymbol ?? resolved.market.exchangeSymbol ?? resolved.metadata.rawSymbol;
+  const requestKey = `${exchange}:${resolved.metadata.marketId}:${interval}`;
   logger.info(
     {
       domain: 'market-routes',
@@ -6325,6 +6728,18 @@ export async function getCandlesWithMeta(
     },
     `[CandleAPI] candle_request_resolved exchange=${exchange} marketId=${resolved.metadata.marketId} canonicalMarketId=${resolved.metadata.canonicalMarketId}`,
   );
+  logCandleResolveDebug({
+    exchange,
+    inputSymbol,
+    inputMarketId,
+    resolvedMarketId: resolved.metadata.marketId,
+    canonicalSymbol: resolved.metadata.canonicalSymbol,
+    providerSymbol,
+    interval,
+    baseAsset: resolved.metadata.baseAsset,
+    quoteAsset: resolved.metadata.quoteAsset,
+    matchSource: resolved.matchSource,
+  });
 
   if (!resolved.metadata.candlesSupported) {
     logger.info(
@@ -6337,6 +6752,16 @@ export async function getCandlesWithMeta(
       },
       `[CandleAPI] candle_unsupported_classified exchange=${exchange} marketId=${resolved.metadata.marketId} reason=${resolved.metadata.unsupportedReason ?? 'provider_not_supported'}`,
     );
+    logCandleRejectDebug({
+      exchange,
+      inputSymbol,
+      inputMarketId,
+      marketId: resolved.metadata.marketId,
+      canonicalSymbol: resolved.metadata.canonicalSymbol,
+      interval,
+      rejectReason: 'providerUnsupported',
+      reason: resolved.metadata.unsupportedReason ?? 'provider_not_supported',
+    });
     throw buildMarketDataError({
       code: 'MARKET_DATA_UNSUPPORTED',
       target: 'candles',
@@ -6365,6 +6790,16 @@ export async function getCandlesWithMeta(
           item.closeTime,
           'cached_snapshot',
         ));
+      logCandleResponseDebug({
+        exchange,
+        requestKey,
+        candleCount: items.length,
+        firstTimestamp: items[0]?.openTime ?? null,
+        lastTimestamp: items[items.length - 1]?.closeTime ?? null,
+        source: `${snapshot.source}:unsupported_fallback`,
+        marketId: resolved.metadata.marketId,
+        canonicalSymbol: resolved.metadata.canonicalSymbol,
+      });
 
       return {
         items,
@@ -6387,6 +6822,16 @@ export async function getCandlesWithMeta(
       },
       `[CandleAPI] candle_unsupported_classified exchange=${exchange} marketId=${resolved.metadata.marketId} reason=${snapshot.reason ?? `${interval} is unsupported`}`,
     );
+    logCandleRejectDebug({
+      exchange,
+      inputSymbol,
+      inputMarketId,
+      marketId: resolved.metadata.marketId,
+      canonicalSymbol: resolved.metadata.canonicalSymbol,
+      interval,
+      rejectReason: 'providerUnsupported',
+      reason: snapshot.reason ?? `${interval} is unsupported`,
+    });
 
     throw buildMarketDataError({
       code: 'MARKET_DATA_UNSUPPORTED',
@@ -6400,6 +6845,16 @@ export async function getCandlesWithMeta(
   }
 
   if (snapshot.status === 'unavailable' || snapshot.status === 'failed') {
+    logCandleRejectDebug({
+      exchange,
+      inputSymbol,
+      inputMarketId,
+      marketId: resolved.metadata.marketId,
+      canonicalSymbol: resolved.metadata.canonicalSymbol,
+      interval,
+      rejectReason: classifyCandleRejectReason(snapshot.reason ?? snapshot.status),
+      reason: snapshot.reason ?? snapshot.status,
+    });
     throw buildMarketDataError({
       code: 'MARKET_DATA_UNAVAILABLE',
       target: 'candles',
@@ -6411,6 +6866,16 @@ export async function getCandlesWithMeta(
   }
 
   if (snapshot.status === 'empty' || snapshot.items.length === 0 || !snapshot.meta.isRenderable) {
+    logCandleRejectDebug({
+      exchange,
+      inputSymbol,
+      inputMarketId,
+      marketId: resolved.metadata.marketId,
+      canonicalSymbol: resolved.metadata.canonicalSymbol,
+      interval,
+      rejectReason: snapshot.status === 'empty' ? 'providerNoData' : 'insufficientCandles',
+      reason: snapshot.reason ?? 'no_usable_candles',
+    });
     throw buildMarketDataError({
       code: 'MARKET_DATA_UNAVAILABLE',
       target: 'candles',
@@ -6444,6 +6909,16 @@ export async function getCandlesWithMeta(
     },
     `[CandleAPI] candle_response_summary exchange=${exchange} marketId=${resolved.metadata.marketId} count=${items.length} interval=${snapshot.interval ?? interval}`,
   );
+  logCandleResponseDebug({
+    exchange,
+    requestKey,
+    candleCount: items.length,
+    firstTimestamp: items[0]?.openTime ?? null,
+    lastTimestamp: items[items.length - 1]?.closeTime ?? null,
+    source: snapshot.source,
+    marketId: resolved.metadata.marketId,
+    canonicalSymbol: resolved.metadata.canonicalSymbol,
+  });
 
   return {
     items,
@@ -6462,6 +6937,7 @@ export async function getMarketSummary(params: {
     marketId: params.marketId,
   }, 'summary');
   let latestTicker: FreshMarketData<CanonicalTickerSnapshot> | null = null;
+  let currentPriceSource: CurrentPriceSource = 'unavailable';
 
   try {
     const loads = await getExchangeTickerLoads(params.exchange, [resolved.metadata.canonicalSymbol], {
@@ -6472,6 +6948,7 @@ export async function getMarketSummary(params: {
     });
     const load = loads.get(resolved.metadata.canonicalSymbol);
     if (load?.ticker) {
+      currentPriceSource = load.source;
       latestTicker = withFreshness(
         applyMetadataToCanonicalMarket(load.ticker, resolved.metadata),
         load.ticker.timestamp,
@@ -6492,10 +6969,25 @@ export async function getMarketSummary(params: {
     );
   }
 
+  logCurrentPriceDebug({
+    exchange: params.exchange,
+    symbol: resolved.metadata.canonicalSymbol,
+    marketId: resolved.metadata.marketId,
+    resolvedMarketKey: `${params.exchange}:${resolved.metadata.marketId}`,
+    currentPrice: hasUsableCurrentPrice(latestTicker?.price) ? latestTicker?.price ?? null : null,
+    source: currentPriceSource,
+  });
+
   return {
+    exchange: params.exchange,
+    symbol: resolved.metadata.canonicalSymbol,
+    marketId: resolved.metadata.marketId,
     metadata: resolved.responseMetadata,
     market: resolved.responseMetadata,
     latestTicker,
+    currentPrice: hasUsableCurrentPrice(latestTicker?.price) ? latestTicker?.price ?? null : null,
+    tradePrice: hasUsableCurrentPrice(latestTicker?.price) ? latestTicker?.price ?? null : null,
+    currentPriceSource,
     updatedAt: latestTicker?.sourceTimestamp ?? latestTicker?.timestamp ?? null,
   };
 }

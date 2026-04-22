@@ -59,6 +59,38 @@ export function toCanonicalMarketCapabilities(
   };
 }
 
+export function looksLikeExplicitMarketId(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  return /[-_/]/.test(trimmed)
+    || /^[a-z0-9]+_(krw|usd|usdt|usdc|fdusd|busd|tusd|usdp|dai|eur|try|brl)$/i.test(trimmed);
+}
+
+export function normalizeMarketResolveInput(input: MarketResolveInput | string): MarketResolveInput {
+  const normalizedInput = typeof input === 'string'
+    ? { symbol: input }
+    : input;
+  const marketId = normalizedInput.marketId?.trim();
+  const symbol = normalizedInput.symbol?.trim();
+
+  if (marketId) {
+    return symbol
+      ? { marketId, symbol }
+      : { marketId };
+  }
+
+  if (!symbol) {
+    return {};
+  }
+
+  return looksLikeExplicitMarketId(symbol)
+    ? { marketId: symbol }
+    : { symbol };
+}
+
 export function buildCanonicalMarketMetadata(params: {
   exchange: ExchangeId;
   symbol?: string;
@@ -134,8 +166,9 @@ export function resolveExchangeMarketInput(params: {
   input: MarketResolveInput;
   capabilitiesBySymbol?: Map<string, MarketCapabilityFlags | CanonicalMarketCapabilities>;
 }): MarketResolveResult {
-  const marketId = params.input.marketId?.trim();
-  const symbol = params.input.symbol?.trim();
+  const normalizedInput = normalizeMarketResolveInput(params.input);
+  const marketId = normalizedInput.marketId?.trim();
+  const symbol = normalizedInput.symbol?.trim();
 
   if (marketId) {
     const normalizedMarketId = normalizeMarketIdentity(marketId);
