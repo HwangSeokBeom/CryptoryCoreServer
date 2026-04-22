@@ -51,10 +51,11 @@ type CoinGeckoCoinDetailItem = {
 };
 
 type CuratedAssetOverride = {
-  coingeckoId: string;
+  coingeckoId?: string;
   aliases?: string[];
   fallbackImageUrl?: string;
   assetSlug?: string;
+  lookupDisabledReason?: 'coingecko_id_unverified';
 };
 
 type AssetMetadataCacheEntry = {
@@ -142,6 +143,12 @@ type CoinDetailFetchResult = {
   failedIds: Set<string>;
 };
 
+type CoinGeckoNotFoundCacheEntry = {
+  expiresAt: number;
+  firstSeenAt: number;
+  hitCount: number;
+};
+
 type MissingImageStats = {
   canonicalAssetKey: string;
   symbol: string | null;
@@ -162,6 +169,7 @@ const ASSET_METADATA_POSITIVE_USABLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const ASSET_METADATA_NEGATIVE_TTL_MS = 6 * 60 * 60 * 1000;
 const ASSET_METADATA_NEGATIVE_USABLE_TTL_MS = 12 * 60 * 60 * 1000;
 const ASSET_METADATA_FALLBACK_STALE_TTL_MS = 15 * 60 * 1000;
+const COINGECKO_NOT_FOUND_NEGATIVE_TTL_MS = 30 * 60 * 1000;
 const COINGECKO_MARKETS_BATCH_LIMIT = 100;
 const PRIORITY_WARMUP_ASSET_KEYS = ['BTC', 'ETH', 'XRP', 'ADA', 'SOL', 'DOGE', 'USDT', 'USDC', 'BNB', 'TRX'] as const;
 const TOP_SYMBOL_COVERAGE_ASSET_KEYS = Array.from(new Set([
@@ -287,7 +295,11 @@ const CURATED_ASSET_OVERRIDES: Record<string, CuratedAssetOverride> = {
   USDC: { coingeckoId: 'usd-coin', aliases: ['usd coin', 'usdc'], fallbackImageUrl: buildKnownIconUrl('usdc') },
   FDUSD: { coingeckoId: 'first-digital-usd', aliases: ['first digital usd', 'fdusd'] },
   RLUSD: { coingeckoId: 'ripple-usd', aliases: ['ripple usd', 'rlusd'] },
-  USD1: { coingeckoId: 'world-liberty-financial-usd', aliases: ['world liberty financial usd', 'usd1'] },
+  USD1: {
+    aliases: ['world liberty financial usd', 'usd1'],
+    assetSlug: 'usd1',
+    lookupDisabledReason: 'coingecko_id_unverified',
+  },
   WBTC: { coingeckoId: 'wrapped-bitcoin', aliases: ['wrapped bitcoin', 'wbtc'], fallbackImageUrl: buildKnownIconUrl('btc') },
   BNB: { coingeckoId: 'binancecoin', aliases: ['bnb', 'binance coin'], fallbackImageUrl: buildKnownIconUrl('bnb') },
   TRX: { coingeckoId: 'tron', aliases: ['tron'], fallbackImageUrl: buildKnownIconUrl('trx') },
@@ -530,6 +542,14 @@ export function hasCuratedAssetMetadata(canonicalAssetKey?: string | null) {
   return Boolean(canonicalAssetKey && CURATED_ASSET_OVERRIDES[toCanonicalSymbol(canonicalAssetKey)]);
 }
 
+function getCuratedCoinGeckoId(canonicalAssetKey: string) {
+  return CURATED_ASSET_OVERRIDES[canonicalAssetKey]?.coingeckoId ?? null;
+}
+
+function getCoinGeckoLookupDisabledReason(canonicalAssetKey: string) {
+  return CURATED_ASSET_OVERRIDES[canonicalAssetKey]?.lookupDisabledReason ?? null;
+}
+
 function normalizeComparableText(value?: string | null) {
   return value
     ?.trim()
@@ -702,6 +722,7 @@ class AssetMetadataService {
   private readonly memoryCache = new Map<string, AssetMetadataCacheEntry>();
   private readonly missingImageStats = new Map<string, MissingImageStats>();
   private readonly pendingResolutions = new Map<string, AssetResolveRequest>();
+  private readonly coingeckoNotFoundCache = new Map<string, CoinGeckoNotFoundCacheEntry>();
   private readonly coingeckoClient = new RestClient('coingecko', env.COINGECKO_API_BASE_URL ?? 'https://api.coingecko.com/api/v3');
 
   private started = false;
@@ -921,6 +942,7 @@ class AssetMetadataService {
     this.memoryCache.clear();
     this.missingImageStats.clear();
     this.pendingResolutions.clear();
+    this.coingeckoNotFoundCache.clear();
     this.coinListBySymbol.clear();
     this.coinListLoadedAt = 0;
     this.coinListRefreshInFlight = null;
@@ -1144,7 +1166,7 @@ class AssetMetadataService {
     const normalizedImageUrl = normalizeAssetImageUrl(
       override?.fallbackImageUrl ?? curatedIconUrl ?? DEFAULT_COIN_PLACEHOLDER_ICON_URL,
     ) ?? DEFAULT_COIN_PLACEHOLDER_ICON_URL;
-    const aliasHit = Boolean(override || curatedIconUrl);
+    const aliasHit = Boolean(override?.coingeckoId || override?.fallbackImageUrl || curatedIconUrl);
     const fallbackType = aliasHit
       ? 'symbol_alias' as const
       : getAssetRegistryMetadata(canonicalAssetKey, originalSymbol).imagePolicy === 'fiat_initials'
@@ -1156,7 +1178,7 @@ class AssetMetadataService {
       coingeckoId: coingeckoId ?? override?.coingeckoId ?? identity.preferredImageCoingeckoId ?? null,
       source: aliasHit ? 'alias_fallback' as const : 'placeholder' as const,
       fallbackType,
-      confidence: override ? 'high' as const : 'low' as const,
+      confidence: aliasHit ? 'high' as const : 'low' as const,
       assetType: identity.assetType,
       canonicalName: identity.canonicalName,
       fallbackColor: identity.fallbackColor,
@@ -1235,6 +1257,26 @@ class AssetMetadataService {
     );
   }
 
+  private logMappingOverrideUsed(params: {
+    canonicalAssetKey: string;
+    attemptedCoinGeckoId: string | null;
+    fallbackUsed: boolean;
+    reason: string;
+  }) {
+    logger.info(
+      {
+        domain: 'asset-image',
+        action: 'mapping_override_used',
+        canonicalAssetKey: params.canonicalAssetKey,
+        attemptedCoinGeckoId: params.attemptedCoinGeckoId,
+        retryable: !params.fallbackUsed,
+        fallbackUsed: params.fallbackUsed,
+        reason: params.reason,
+      },
+      `[AssetImageDebug] action=mapping_override_used canonicalAssetKey=${params.canonicalAssetKey} attemptedCoinGeckoId=${params.attemptedCoinGeckoId ?? 'null'} fallbackUsed=${params.fallbackUsed} reason=${params.reason}`,
+    );
+  }
+
   private logMappingFailed(params: { symbol: string; reason: string }) {
     logger.info(
       {
@@ -1268,8 +1310,11 @@ class AssetMetadataService {
         source: params.source,
         reason: params.reason,
         coingeckoId: params.coingeckoId ?? null,
+        attemptedCoinGeckoId: params.coingeckoId ?? null,
+        retryable: false,
+        fallbackUsed: true,
       },
-      `[AssetImageDebug] action=fallback_hit canonicalAssetKey=${params.canonicalAssetKey} fallbackType=${params.fallbackType} source=${params.source} reason=${params.reason}`,
+      `[AssetImageDebug] action=fallback_hit canonicalAssetKey=${params.canonicalAssetKey} fallbackType=${params.fallbackType} source=${params.source} reason=${params.reason} attemptedCoinGeckoId=${params.coingeckoId ?? 'null'} fallbackUsed=true`,
     );
   }
 
@@ -1362,6 +1407,81 @@ class AssetMetadataService {
     );
   }
 
+  private readCoinGeckoNotFoundCache(coingeckoId: string, now: number) {
+    const normalizedId = coingeckoId.trim();
+    const cached = this.coingeckoNotFoundCache.get(normalizedId);
+    if (!cached) {
+      return null;
+    }
+    if (cached.expiresAt <= now) {
+      this.coingeckoNotFoundCache.delete(normalizedId);
+      return null;
+    }
+    return cached;
+  }
+
+  private rememberCoinGeckoNotFound(params: {
+    canonicalAssetKey: string | null;
+    attemptedCoinGeckoId: string;
+    reason: string;
+    now: number;
+  }) {
+    const normalizedId = params.attemptedCoinGeckoId.trim();
+    const existing = this.readCoinGeckoNotFoundCache(normalizedId, params.now);
+    if (existing) {
+      existing.hitCount += 1;
+      return;
+    }
+
+    this.coingeckoNotFoundCache.set(normalizedId, {
+      firstSeenAt: params.now,
+      expiresAt: params.now + COINGECKO_NOT_FOUND_NEGATIVE_TTL_MS,
+      hitCount: 1,
+    });
+    this.logCoinGeckoNotFoundNonRetryable({
+      ...params,
+      attemptedCoinGeckoId: normalizedId,
+    });
+  }
+
+  private logCoinGeckoNotFoundNonRetryable(params: {
+    canonicalAssetKey: string | null;
+    attemptedCoinGeckoId: string;
+    reason: string;
+  }) {
+    logger.info(
+      {
+        domain: 'asset-image',
+        action: 'coingecko_not_found_non_retryable',
+        canonicalAssetKey: params.canonicalAssetKey,
+        attemptedCoinGeckoId: params.attemptedCoinGeckoId,
+        retryable: false,
+        fallbackUsed: true,
+        reason: params.reason,
+      },
+      `[AssetImageDebug] action=coingecko_not_found_non_retryable canonicalAssetKey=${params.canonicalAssetKey ?? 'null'} attemptedCoinGeckoId=${params.attemptedCoinGeckoId} retryable=false fallbackUsed=true reason=${params.reason}`,
+    );
+  }
+
+  private logNegativeCacheHit(params: {
+    canonicalAssetKey: string | null;
+    attemptedCoinGeckoId: string;
+    reason: string;
+  }) {
+    logger.info(
+      {
+        domain: 'asset-image',
+        action: 'negative_cache_hit',
+        canonicalAssetKey: params.canonicalAssetKey,
+        attemptedCoinGeckoId: params.attemptedCoinGeckoId,
+        retryable: false,
+        fallbackUsed: true,
+        reason: params.reason,
+      },
+      `[AssetImageDebug] action=negative_cache_hit canonicalAssetKey=${params.canonicalAssetKey ?? 'null'} attemptedCoinGeckoId=${params.attemptedCoinGeckoId} retryable=false fallbackUsed=true reason=${params.reason}`,
+    );
+  }
+
   private logCoinGeckoRequest(params: {
     path: string;
     requestUrl: string | null;
@@ -1370,7 +1490,11 @@ class AssetMetadataService {
     failed: boolean;
     err?: unknown;
   }) {
-    const level = params.failed ? logger.warn.bind(logger) : logger.info.bind(logger);
+    const retryable = params.statusCode === null
+      ? params.failed
+      : [408, 409, 425, 429, 500, 502, 503, 504].includes(params.statusCode);
+    const nonRetryableNotFound = params.failed && params.statusCode === 404;
+    const level = params.failed && !nonRetryableNotFound ? logger.warn.bind(logger) : logger.info.bind(logger);
     level(
       {
         domain: 'asset-image',
@@ -1381,9 +1505,10 @@ class AssetMetadataService {
         statusCode: params.statusCode,
         responseSnippet: params.responseSnippet,
         failed: params.failed,
-        err: params.failed ? params.err : undefined,
+        retryable,
+        err: params.failed && !nonRetryableNotFound ? params.err : undefined,
       },
-      `[AssetImageDebug] action=coingecko_request owner=coingecko path=${params.path} statusCode=${params.statusCode ?? 'null'} failed=${params.failed} finalRequestUrl=${params.requestUrl ?? 'null'}`,
+      `[AssetImageDebug] action=coingecko_request owner=coingecko path=${params.path} statusCode=${params.statusCode ?? 'null'} failed=${params.failed} retryable=${retryable} finalRequestUrl=${params.requestUrl ?? 'null'}`,
     );
   }
 
@@ -1509,7 +1634,9 @@ class AssetMetadataService {
       usedStale: false,
       failed: false,
     };
-    if (requests.some((request) => !CURATED_ASSET_OVERRIDES[request.canonicalAssetKey])) {
+    if (requests.some((request) =>
+      !getCuratedCoinGeckoId(request.canonicalAssetKey)
+      && !getCoinGeckoLookupDisabledReason(request.canonicalAssetKey))) {
       coinListStatus = await this.ensureCoinListLoaded();
     }
     const now = Date.now();
@@ -1535,9 +1662,31 @@ class AssetMetadataService {
         continue;
       }
 
+      const lookupDisabledReason = getCoinGeckoLookupDisabledReason(request.canonicalAssetKey);
+      if (lookupDisabledReason) {
+        this.logMappingOverrideUsed({
+          canonicalAssetKey: request.canonicalAssetKey,
+          attemptedCoinGeckoId: null,
+          fallbackUsed: true,
+          reason: lookupDisabledReason,
+        });
+        await this.persistFallbackEntry({
+          request,
+          now,
+          failureReason: 'coingecko_fetch_failed',
+        });
+        continue;
+      }
+
       const curated = this.resolveFromCuratedOverride(request);
       if (curated) {
         matchedIds.set(request.canonicalAssetKey, curated);
+        this.logMappingOverrideUsed({
+          canonicalAssetKey: request.canonicalAssetKey,
+          attemptedCoinGeckoId: curated.coingeckoId,
+          fallbackUsed: false,
+          reason: curated.source === 'curated' ? 'curated_mapping' : 'registry_mapping',
+        });
         this.logMappingResolved({
           symbol: request.symbol ?? request.canonicalAssetKey,
           canonicalAssetKey: request.canonicalAssetKey,
@@ -1610,19 +1759,48 @@ class AssetMetadataService {
       );
     }
 
-    const marketIds = Array.from(new Set(Array.from(matchedIds.values()).map((item) => item.coingeckoId)));
-    if (marketIds.length === 0) {
+    const fetchableMatchedIds = new Map<string, { coingeckoId: string; confidence: AssetMetadataConfidence; name: string | null; source: AssetMetadataSource }>();
+    for (const [canonicalAssetKey, matched] of matchedIds.entries()) {
+      if (this.readCoinGeckoNotFoundCache(matched.coingeckoId, now)) {
+        this.logNegativeCacheHit({
+          canonicalAssetKey,
+          attemptedCoinGeckoId: matched.coingeckoId,
+          reason: 'coingecko_not_found',
+        });
+        await this.persistFallbackEntry({
+          request: {
+            canonicalAssetKey,
+            displayName: matched.name,
+          },
+          now,
+          coingeckoId: matched.coingeckoId,
+          name: matched.name,
+          failureReason: 'coingecko_fetch_failed',
+        });
+        continue;
+      }
+      fetchableMatchedIds.set(canonicalAssetKey, matched);
+    }
+
+    const fetchableMarketIds = Array.from(new Set(Array.from(fetchableMatchedIds.values()).map((item) => item.coingeckoId)));
+    if (fetchableMarketIds.length === 0) {
       return;
     }
 
-    const marketResults = await this.fetchCoinMarketsByIds(marketIds);
+    const marketResults = await this.fetchCoinMarketsByIds(fetchableMarketIds);
     const marketById = new Map(marketResults.items.map((item) => [item.id, item]));
-    const detailIds = marketIds.filter((id) => !extractCoinGeckoImageUrl({ market: marketById.get(id) ?? null }));
+    const detailIds = fetchableMarketIds.filter((id) => !extractCoinGeckoImageUrl({ market: marketById.get(id) ?? null }));
+    const canonicalAssetKeysByCoinGeckoId = new Map<string, string[]>();
+    for (const [canonicalAssetKey, matched] of fetchableMatchedIds.entries()) {
+      const keys = canonicalAssetKeysByCoinGeckoId.get(matched.coingeckoId) ?? [];
+      keys.push(canonicalAssetKey);
+      canonicalAssetKeysByCoinGeckoId.set(matched.coingeckoId, keys);
+    }
     const detailResults = detailIds.length > 0
-      ? await this.fetchCoinDetailsByIds(detailIds)
+      ? await this.fetchCoinDetailsByIds(detailIds, canonicalAssetKeysByCoinGeckoId)
       : { items: new Map<string, CoinGeckoCoinDetailItem>(), failedIds: new Set<string>() };
 
-    for (const [canonicalAssetKey, matched] of matchedIds.entries()) {
+    for (const [canonicalAssetKey, matched] of fetchableMatchedIds.entries()) {
       const market = marketById.get(matched.coingeckoId);
       const detail = detailResults.items.get(matched.coingeckoId) ?? null;
       logger.info(
@@ -1630,8 +1808,12 @@ class AssetMetadataService {
           domain: 'asset-image',
           action: 'coingecko_lookup',
           canonicalAssetKey,
+          attemptedCoinGeckoId: matched.coingeckoId,
+          retryable: true,
+          fallbackUsed: false,
+          reason: 'live_lookup',
         },
-        `[AssetImageDebug] action=coingecko_lookup canonicalAssetKey=${canonicalAssetKey}`,
+        `[AssetImageDebug] action=coingecko_lookup canonicalAssetKey=${canonicalAssetKey} attemptedCoinGeckoId=${matched.coingeckoId} retryable=true fallbackUsed=false reason=live_lookup`,
       );
 
       const normalizedImageUrl = extractCoinGeckoImageUrl({ market, detail });
@@ -1751,12 +1933,13 @@ class AssetMetadataService {
       rawSymbol: request.exchangeSymbol,
     });
     const override = CURATED_ASSET_OVERRIDES[request.canonicalAssetKey];
-    if (!override && !preferredImage.preferredImageCoingeckoId) {
+    const coingeckoId = preferredImage.preferredImageCoingeckoId ?? override?.coingeckoId ?? null;
+    if (!coingeckoId) {
       return null;
     }
 
     return {
-      coingeckoId: preferredImage.preferredImageCoingeckoId ?? override!.coingeckoId,
+      coingeckoId,
       confidence: 'high' as const,
       name: request.displayName ?? COIN_MAP.get(request.canonicalAssetKey)?.nameEn ?? null,
       source: 'curated' as const,
@@ -1932,12 +2115,27 @@ class AssetMetadataService {
     };
   }
 
-  private async fetchCoinDetailsByIds(ids: string[]): Promise<CoinDetailFetchResult> {
+  private async fetchCoinDetailsByIds(
+    ids: string[],
+    canonicalAssetKeysByCoinGeckoId: Map<string, string[]> = new Map(),
+  ): Promise<CoinDetailFetchResult> {
     const headers = this.buildCoinGeckoHeaders();
     const items = new Map<string, CoinGeckoCoinDetailItem>();
     const failedIds = new Set<string>();
 
     for (const id of ids) {
+      const canonicalAssetKey = canonicalAssetKeysByCoinGeckoId.get(id)?.[0] ?? null;
+      const now = Date.now();
+      if (this.readCoinGeckoNotFoundCache(id, now)) {
+        failedIds.add(id);
+        this.logNegativeCacheHit({
+          canonicalAssetKey,
+          attemptedCoinGeckoId: id,
+          reason: 'coingecko_not_found',
+        });
+        continue;
+      }
+
       try {
         const detail = await this.requestCoinGecko<CoinGeckoCoinDetailItem>(`/coins/${encodeURIComponent(id)}`, {
           headers,
@@ -1957,11 +2155,22 @@ class AssetMetadataService {
         items.set(id, detail);
       } catch (error) {
         failedIds.add(id);
+        const details = readExchangeErrorDetails(error);
+        if (details?.statusCode === 404) {
+          this.rememberCoinGeckoNotFound({
+            canonicalAssetKey,
+            attemptedCoinGeckoId: id,
+            reason: 'coingecko_not_found',
+            now: Date.now(),
+          });
+          continue;
+        }
         logger.warn(
           {
             domain: 'asset-image',
             action: 'coin_detail_failed',
             id,
+            canonicalAssetKey,
             err: error,
           },
           `[AssetImageDebug] action=coin_detail_failed id=${id}`,

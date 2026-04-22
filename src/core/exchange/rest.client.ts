@@ -202,6 +202,10 @@ function isAbortError(error: unknown) {
   return error instanceof Error && error.name === 'AbortError';
 }
 
+function isExchangeRequestError(error: unknown): error is ExchangeRequestError {
+  return error instanceof ExchangeRequestError;
+}
+
 export class RestClient {
   constructor(
     private readonly owner: ExchangeId | 'fx' | 'coingecko',
@@ -318,6 +322,10 @@ export class RestClient {
             `${this.owner} request timed out`,
           );
         }
+        if (isExchangeRequestError(error) && !policy.retryableStatusCodes.includes(error.statusCode)) {
+          throw error;
+        }
+
         if (attempt >= policy.maxAttempts) {
           throw error;
         }

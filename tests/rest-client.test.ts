@@ -63,4 +63,43 @@ describe('RestClient URL joining', () => {
       expect.any(Object),
     );
   });
+
+  it('does not retry non-retryable HTTP 404 responses', async () => {
+    fetchMock.mockResolvedValue(new Response('not found', { status: 404 }));
+    const client = new RestClient('coingecko', 'https://api.coingecko.com/api/v3');
+
+    await expect(client.request('/coins/missing-token', {
+      retryPolicy: {
+        maxAttempts: 3,
+        baseDelayMs: 0,
+        maxDelayMs: 0,
+      },
+    })).rejects.toMatchObject({
+      statusCode: 404,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('continues to retry retryable CoinGecko status codes', async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response('rate limited', { status: 429 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+        },
+      }));
+    const client = new RestClient('coingecko', 'https://api.coingecko.com/api/v3');
+
+    await expect(client.request('/coins/list', {
+      retryPolicy: {
+        maxAttempts: 2,
+        baseDelayMs: 0,
+        maxDelayMs: 0,
+      },
+    })).resolves.toEqual({ ok: true });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });

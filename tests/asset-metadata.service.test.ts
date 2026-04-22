@@ -61,6 +61,7 @@ describe('asset metadata service', () => {
   afterEach(async () => {
     const { assetMetadataService } = await import('../src/domains/assets/asset-metadata.service');
     assetMetadataService.resetForTests();
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -251,6 +252,99 @@ describe('asset metadata service', () => {
       assetSlug: 'world-liberty-financial',
       imageFallbackKey: 'coingecko:world-liberty-financial',
     });
+  });
+
+  it('keeps USD1 fallback-only without calling the unverified CoinGecko id', async () => {
+    requestMock.mockImplementation(async (path: string) => {
+      throw new Error(`Unexpected path ${path}`);
+    });
+
+    const { assetMetadataService } = await import('../src/domains/assets/asset-metadata.service');
+    assetMetadataService.start();
+
+    const views = await assetMetadataService.getAssetViewsEager([
+      { exchange: 'upbit', symbol: 'USD1', exchangeSymbol: 'KRW-USD1', displayName: 'USD1' },
+    ]);
+
+    expect(views.get('USD1')).toMatchObject({
+      canonicalAssetKey: 'USD1',
+      assetImageUrl: DEFAULT_PLACEHOLDER_IMAGE_URL,
+      coingeckoId: null,
+      fallbackHit: true,
+      failureReason: 'coingecko_fetch_failed',
+      assetSlug: 'usd1',
+      imageFallbackKey: 'asset:usd1',
+    });
+    expect(requestMock).not.toHaveBeenCalled();
+  });
+
+  it('negative-caches CoinGecko detail 404s and avoids repeated warn floods', async () => {
+    const { logger } = await import('../src/utils/logger');
+    const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => logger);
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => logger);
+
+    requestMock.mockImplementation(async (path: string, options?: { query?: { ids?: string } }) => {
+      if (path === '/coins/markets') {
+        expect(options?.query?.ids).toContain('world-liberty-financial');
+        return [];
+      }
+      if (path === '/coins/world-liberty-financial') {
+        const error = new Error('coingecko request failed with HTTP 404');
+        Object.assign(error, {
+          exchange: 'coingecko',
+          statusCode: 404,
+          requestUrl: 'https://api.coingecko.com/api/v3/coins/world-liberty-financial',
+          responseBody: 'not found',
+        });
+        throw error;
+      }
+      throw new Error(`Unexpected path ${path}`);
+    });
+
+    const { assetMetadataService } = await import('../src/domains/assets/asset-metadata.service');
+    assetMetadataService.start();
+
+    const first = await assetMetadataService.getAssetViewsEager([
+      { exchange: 'upbit', symbol: 'WLFI', exchangeSymbol: 'KRW-WLFI', displayName: 'World Liberty Financial' },
+    ]);
+    expect(first.get('WLFI')).toMatchObject({
+      canonicalAssetKey: 'WLFI',
+      assetImageUrl: DEFAULT_PLACEHOLDER_IMAGE_URL,
+      coingeckoId: 'world-liberty-financial',
+      fallbackHit: true,
+      failureReason: 'coingecko_fetch_failed',
+    });
+
+    await vi.advanceTimersByTimeAsync(16 * 60 * 1000);
+
+    const second = await assetMetadataService.getAssetViewsEager([
+      { exchange: 'upbit', symbol: 'WLFI', exchangeSymbol: 'KRW-WLFI', displayName: 'World Liberty Financial' },
+    ]);
+
+    expect(second.get('WLFI')).toMatchObject({
+      canonicalAssetKey: 'WLFI',
+      assetImageUrl: DEFAULT_PLACEHOLDER_IMAGE_URL,
+      coingeckoId: 'world-liberty-financial',
+      fallbackHit: true,
+      failureReason: 'coingecko_fetch_failed',
+    });
+    expect(requestMock.mock.calls.filter(([path]) => path === '/coins/world-liberty-financial')).toHaveLength(1);
+    expect(requestMock.mock.calls.filter(([path]) => path === '/coins/markets')).toHaveLength(1);
+    expect(infoSpy.mock.calls.some(([payload]) =>
+      typeof payload === 'object'
+      && payload !== null
+      && (payload as { action?: string }).action === 'coingecko_not_found_non_retryable'
+    )).toBe(true);
+    expect(infoSpy.mock.calls.some(([payload]) =>
+      typeof payload === 'object'
+      && payload !== null
+      && (payload as { action?: string }).action === 'negative_cache_hit'
+    )).toBe(true);
+    expect(warnSpy.mock.calls.some(([payload]) =>
+      typeof payload === 'object'
+      && payload !== null
+      && (payload as { action?: string }).action === 'coin_detail_failed'
+    )).toBe(false);
   });
 
   it('refreshes cached placeholder entries when a curated image slug becomes available', async () => {
