@@ -68,5 +68,98 @@ describe('market symbol support metadata', () => {
       kimchiComparisonReason: 'BINANCE_REFERENCE_MISSING',
     });
     expect(response.items.find((item) => item.symbol === 'XRP')).toBeUndefined();
-  });
+  }, 10000);
+
+  it('builds exchange coverage audit entries with deterministic fallback keys', async () => {
+    upbitProvider.listMarkets.mockResolvedValue([
+      {
+        symbol: 'BTC',
+        exchangeSymbol: 'KRW-BTC',
+        market: 'BTC/KRW',
+        baseCurrency: 'BTC',
+        quoteCurrency: 'KRW',
+        rawSymbol: 'KRW-BTC',
+        tradable: true,
+      },
+      {
+        symbol: '???',
+        exchangeSymbol: '???',
+        market: '???/KRW',
+        baseCurrency: '???',
+        quoteCurrency: 'KRW',
+        rawSymbol: '???',
+        tradable: true,
+      },
+    ]);
+    binanceProvider.listMarkets.mockResolvedValue([
+      { symbol: 'BTC', market: 'BTC/USDT', rawSymbol: 'BTCUSDT' },
+    ]);
+    upbitProvider.getTickerSnapshot.mockResolvedValue([
+      {
+        exchange: 'upbit',
+        symbol: 'BTC',
+        market: 'BTC/KRW',
+        baseCurrency: 'BTC',
+        quoteCurrency: 'KRW',
+        rawSymbol: 'KRW-BTC',
+        price: 100000000,
+        change24h: 1.5,
+        volume24h: 1000,
+        high24h: 101000000,
+        low24h: 99000000,
+        timestamp: 1712345678000,
+      },
+    ]);
+    binanceProvider.getTickerSnapshot.mockResolvedValue([
+      {
+        exchange: 'binance',
+        symbol: 'BTC',
+        market: 'BTC/USDT',
+        baseCurrency: 'BTC',
+        quoteCurrency: 'USDT',
+        rawSymbol: 'BTCUSDT',
+        price: 70000,
+        change24h: 1.1,
+        volume24h: 2000,
+        high24h: 71000,
+        low24h: 69000,
+        timestamp: 1712345678000,
+      },
+    ]);
+
+    const { getAssetCoverageAudit } = await import('../src/domains/market-data/market-data.service');
+    const response = await getAssetCoverageAudit({ exchange: 'upbit', refresh: true });
+
+    expect(response.summary[0]).toMatchObject({
+      exchange: 'upbit',
+      totalAssets: 2,
+      canonicalMappedCount: 1,
+      fallbackKeyAvailableCount: 2,
+      unsupportedCount: 1,
+      canonicalMissingCount: 1,
+    });
+    expect(response.items.find((item) => item.marketId === 'KRW-BTC')).toMatchObject({
+      fallbackKey: 'coingecko:bitcoin',
+      assetSupportStatus: 'supported',
+      preferredImageSymbol: 'BTC',
+    });
+    expect(response.items.find((item) => item.marketId === '???')).toMatchObject({
+      canonicalAssetKey: null,
+      assetSupportStatus: 'unsupported',
+      diagnosticReasons: expect.arrayContaining(['canonical_missing', 'unsupported_asset', 'image_url_missing']),
+      fallbackKey: 'unresolved:upbit:raw-3f3f3f',
+      stableAssetKey: 'unresolved:upbit:raw-3f3f3f',
+      manualCurationRecommended: false,
+    });
+    expect(response.details[0]).toMatchObject({
+      exchange: 'upbit',
+      priorityRankedMissingImageCandidates: [
+        expect.objectContaining({
+          marketId: '???',
+          fallbackOnly: true,
+        }),
+      ],
+      manualCurationRecommended: [],
+    });
+  }, 10000);
 });

@@ -175,6 +175,7 @@ describe('market ticker row completeness', () => {
     expect(ticker.hasImage).toBe(false);
     expect(ticker.imageAvailability).toBe('pending');
     expect(ticker.imageFailureReason).toBe('missing_metadata');
+    expect(ticker.imageMissingReason).toBe('missing_curated_mapping');
     expect(ticker.imageUrl).toBeNull();
     expect(ticker.imageURL).toBeNull();
     expect(ticker.assetImageUrl).toBeNull();
@@ -191,7 +192,7 @@ describe('market ticker row completeness', () => {
       symbol: 'FAKE',
       clientSymbolKey: 'upbit:FAKE',
       canonicalAssetKey: 'FAKE',
-      reason: 'metadata_missing',
+      reason: 'missing_curated_mapping',
     });
 
     const coverageLog = infoSpy.mock.calls.find(([payload]) =>
@@ -206,7 +207,7 @@ describe('market ticker row completeness', () => {
       withImageCount: 0,
       coverage: 0,
       falseReasonStats: {
-        metadata_missing: 1,
+        missing_curated_mapping: 1,
       },
     });
   });

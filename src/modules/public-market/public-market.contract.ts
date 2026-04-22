@@ -19,6 +19,14 @@ const marketCapabilitiesDtoSchema = z.object({
   supportsTrades: z.boolean(),
 });
 
+const imageDebugDtoSchema = z.object({
+  canonicalSymbol: z.string(),
+  assetSlug: z.string().nullable(),
+  preferredImageSlug: z.string().nullable(),
+  imageResolutionSource: z.string().nullable(),
+  imageMissingReason: z.string().nullable(),
+});
+
 const marketMetadataShape = {
   marketId: z.string(),
   canonicalSymbol: z.string(),
@@ -49,11 +57,18 @@ export const tickerDtoSchema = z.object({
   hasImage: z.boolean().optional(),
   imageAvailability: z.enum(['available', 'fallback', 'pending', 'lookup_failed', 'unavailable']).optional(),
   imageFailureReason: z.string().nullable().optional(),
+  imageMissingReason: z.string().nullable().optional(),
   fallbackType: z.string().nullable().optional(),
   assetType: z.string().nullable().optional(),
   canonicalName: z.string().nullable().optional(),
   fallbackColor: z.string().nullable().optional(),
   fallbackInitials: z.string().nullable().optional(),
+  assetSlug: z.string().nullable().optional(),
+  imageFallbackKey: z.string().nullable().optional(),
+  fallbackKey: z.string().nullable().optional(),
+  stableImageKey: z.string().nullable().optional(),
+  imageLookupKey: z.string().nullable().optional(),
+  imageDebug: imageDebugDtoSchema.optional(),
   market: z.string(),
   baseCurrency: z.string(),
   quoteCurrency: z.string(),
@@ -192,6 +207,13 @@ export const kimchiPremiumResponseDtoSchema = z.object({
       symbol: z.string(),
       canonicalAssetKey: z.string().nullable().optional(),
       assetImageUrl: z.string().url().nullable().optional(),
+      assetSlug: z.string().nullable().optional(),
+      imageFallbackKey: z.string().nullable().optional(),
+      fallbackKey: z.string().nullable().optional(),
+      stableImageKey: z.string().nullable().optional(),
+      imageLookupKey: z.string().nullable().optional(),
+      imageMissingReason: z.string().nullable().optional(),
+      imageDebug: imageDebugDtoSchema.optional(),
       nameKo: z.string(),
       nameEn: z.string(),
       status: z.enum(['loaded', 'stale', 'partial', 'unavailable', 'failed']),
@@ -420,11 +442,18 @@ export function serializeTickerDto(ticker: NormalizedMarketTicker) {
     hasImage: ticker.hasImage ?? Boolean(ticker.assetImageUrl ?? ticker.iconUrl),
     imageAvailability: ticker.imageAvailability,
     imageFailureReason: ticker.imageFailureReason ?? null,
+    imageMissingReason: ticker.imageMissingReason ?? null,
     fallbackType: ticker.fallbackType ?? null,
     assetType: ticker.assetType ?? null,
     canonicalName: ticker.canonicalName ?? null,
     fallbackColor: ticker.fallbackColor ?? null,
     fallbackInitials: ticker.fallbackInitials ?? null,
+    assetSlug: ticker.assetSlug ?? null,
+    imageFallbackKey: ticker.imageFallbackKey ?? (ticker.canonicalAssetKey ? `symbol:${ticker.canonicalAssetKey}` : null),
+    fallbackKey: ticker.fallbackKey ?? ticker.imageFallbackKey ?? (ticker.canonicalAssetKey ? `symbol:${ticker.canonicalAssetKey}` : null),
+    stableImageKey: ticker.stableImageKey ?? ticker.imageFallbackKey ?? (ticker.canonicalAssetKey ? `symbol:${ticker.canonicalAssetKey}` : null),
+    imageLookupKey: ticker.imageLookupKey ?? ticker.imageFallbackKey ?? (ticker.canonicalAssetKey ? `symbol:${ticker.canonicalAssetKey}` : null),
+    imageDebug: ticker.imageDebug,
     market: ticker.market,
     baseCurrency: ticker.baseCurrency,
     quoteCurrency: ticker.quoteCurrency,
@@ -590,6 +619,12 @@ export function serializeKimchiPremiumResponse(items: Array<{
   symbol: string;
   canonicalAssetKey?: string | null;
   assetImageUrl?: string | null;
+  assetSlug?: string | null;
+  imageFallbackKey?: string | null;
+  fallbackKey?: string | null;
+  stableImageKey?: string | null;
+  imageLookupKey?: string | null;
+  imageMissingReason?: string | null;
   nameKo: string;
   nameEn: string;
   status?: 'loaded' | 'stale' | 'partial' | 'unavailable' | 'failed';
@@ -651,6 +686,13 @@ export function serializeKimchiPremiumResponse(items: Array<{
       symbol: item.symbol,
       canonicalAssetKey: item.canonicalAssetKey ?? item.symbol,
       assetImageUrl: item.assetImageUrl ?? null,
+      assetSlug: item.assetSlug ?? null,
+      imageFallbackKey: item.imageFallbackKey ?? `symbol:${item.canonicalAssetKey ?? item.symbol}`,
+      fallbackKey: item.fallbackKey ?? item.imageFallbackKey ?? `symbol:${item.canonicalAssetKey ?? item.symbol}`,
+      stableImageKey: item.stableImageKey ?? item.imageFallbackKey ?? `symbol:${item.canonicalAssetKey ?? item.symbol}`,
+      imageLookupKey: item.imageLookupKey ?? item.imageFallbackKey ?? `symbol:${item.canonicalAssetKey ?? item.symbol}`,
+      imageMissingReason: item.imageMissingReason ?? null,
+      imageDebug: (item as { imageDebug?: z.infer<typeof imageDebugDtoSchema> }).imageDebug,
       nameKo: item.nameKo,
       nameEn: item.nameEn,
       status: item.status ?? 'loaded',

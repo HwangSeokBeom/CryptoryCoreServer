@@ -39,6 +39,12 @@ class LiveExchangeConnectionValidator implements ExchangeConnectionValidator {
         message: `${this.exchange} private API credentials verified successfully.`,
         details: {
           verifiedAgainst: this.exchange,
+          requestedPermission: credentials.permission ?? 'read_only',
+          permissionScope: credentials.permission === 'trade_enabled' ? ['read', 'trade'] : ['read'],
+          withdrawPermissionAllowed: false,
+          scopeVerification: credentials.permission === 'trade_enabled'
+            ? 'read_endpoint_verified_trade_scope_enforced_on_order_api'
+            : 'read_endpoint_verified',
         },
         checkedAt: new Date().toISOString(),
       };

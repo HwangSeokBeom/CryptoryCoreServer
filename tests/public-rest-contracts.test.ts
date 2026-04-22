@@ -10,6 +10,13 @@ vi.mock('../src/modules/public-market/public-market.service', () => ({
       symbol: 'BTC',
       canonicalAssetKey: 'BTC',
       assetImageUrl: 'https://assets.example.com/btc.png',
+      imageDebug: {
+        canonicalSymbol: 'BTC',
+        assetSlug: 'bitcoin',
+        preferredImageSlug: 'bitcoin',
+        imageResolutionSource: 'direct_slug',
+        imageMissingReason: null,
+      },
       market: 'BTC/KRW',
       baseCurrency: 'BTC',
       quoteCurrency: 'KRW',
@@ -133,9 +140,30 @@ describe('Public REST Contracts', () => {
     expect(body.data.items[0].displaySymbol).toBe('BTC/KRW');
     expect(body.data.items[0].canonicalAssetKey).toBe('BTC');
     expect(body.data.items[0].assetImageUrl).toBe('https://assets.example.com/btc.png');
+    expect(body.data.items[0].imageFallbackKey).toBe('symbol:BTC');
+    expect(body.data.items[0].fallbackKey).toBe('symbol:BTC');
+    expect(body.data.items[0].imageLookupKey).toBe('symbol:BTC');
     expect(body.data.total).toBe(1);
     await app.close();
-  });
+  }, 20000);
+
+  it('GET /api/v1/public/tickers accepts image provenance fields on debug requests', async () => {
+    const app = await createApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/v1/public/tickers?exchange=upbit&symbol=BTC&debug=1',
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.data.items[0].imageDebug).toMatchObject({
+      canonicalSymbol: 'BTC',
+      assetSlug: 'bitcoin',
+      preferredImageSlug: 'bitcoin',
+      imageResolutionSource: 'direct_slug',
+    });
+    await app.close();
+  }, 15000);
 
   it('GET /api/v1/public/orderbook returns the fixed orderbook schema', async () => {
     const app = await createApp();

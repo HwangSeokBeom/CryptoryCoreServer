@@ -13,6 +13,7 @@ const validationMessages: Record<string, string> = {
   INVALID_PASSWORD_LENGTH: '비밀번호는 8자 이상 72자 이하로 입력해야 합니다.',
   INVALID_REQUEST: '요청 값을 확인해주세요.',
 };
+const AUTH_REGISTER_FAILED = 'AUTH_REGISTER_FAILED';
 
 function normalizeValidationCode(issue: ZodIssue) {
   return Object.prototype.hasOwnProperty.call(validationMessages, issue.message) ? issue.message : 'INVALID_REQUEST';
@@ -75,24 +76,54 @@ async function handleRegister(app: FastifyInstance, request: FastifyRequest, rep
       .send(createErrorResponse(validationError.message, validationError.details, validationError.code));
   }
 
+  logger.info({ domain: 'auth', route: request.url }, 'Auth register dto validated');
+
   try {
     const user = await registerUser(parsed.data);
-    const token = issueAuthToken(app, user);
-    const data = AuthSessionResponse.parse({ user, token });
-    logger.info({ domain: 'auth', route: request.url, userId: user.id }, 'Auth register succeeded');
-    return createSuccessResponse(data);
+    logger.info({ domain: 'auth', route: request.url, userId: user.id }, 'Auth register user create succeeded');
+
+    let token: string;
+    try {
+      token = issueAuthToken(app, user);
+      logger.info({ domain: 'auth', route: request.url, userId: user.id }, 'Auth register token issue succeeded');
+    } catch (err) {
+      logger.error({ domain: 'auth', route: request.url, userId: user.id, err }, 'Auth register token issue failed');
+      return reply
+        .status(500)
+        .send(createErrorResponse('회원가입 처리 중 오류가 발생했습니다.', undefined, AUTH_REGISTER_FAILED));
+    }
+
+    let data;
+    try {
+      data = AuthSessionResponse.parse({ user, token });
+      logger.info({ domain: 'auth', route: request.url, userId: user.id }, 'Auth register response serialized');
+    } catch (err) {
+      logger.error(
+        { domain: 'auth', route: request.url, userId: user.id, err },
+        'Auth register response serialization failed',
+      );
+      return reply
+        .status(500)
+        .send(createErrorResponse('회원가입 처리 중 오류가 발생했습니다.', undefined, AUTH_REGISTER_FAILED));
+    }
+
+    logger.info({ domain: 'auth', route: request.url, userId: user.id }, 'Auth register success response sent');
+    return reply.status(200).send(createSuccessResponse(data));
   } catch (err) {
     if (err instanceof AppError) {
+      const message = err.code === 'EMAIL_ALREADY_EXISTS'
+        ? 'Auth register duplicate email'
+        : 'Auth register failed with handled error';
       logger.warn(
         { domain: 'auth', route: request.url, statusCode: err.statusCode, code: err.code },
-        'Auth register failed',
+        message,
       );
       return reply.status(err.statusCode).send(createErrorResponse(err.message, err.details, err.code));
     }
-    logger.error({ domain: 'auth', route: request.url, err }, 'Auth register failed unexpectedly');
+    logger.error({ domain: 'auth', route: request.url, err }, 'Auth register failed with unhandled error');
     return reply
       .status(500)
-      .send(createErrorResponse('회원가입 처리 중 오류가 발생했습니다.', undefined, 'INTERNAL_SERVER_ERROR'));
+      .send(createErrorResponse('회원가입 처리 중 오류가 발생했습니다.', undefined, AUTH_REGISTER_FAILED));
   }
 }
 

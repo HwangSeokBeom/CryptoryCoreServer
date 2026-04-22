@@ -20,6 +20,7 @@ const CANDLE_PERSISTENT_CACHE_TTL_MS = 30 * 60_000;
 const CANDLE_USABLE_STALE_TTL_MS = CANDLE_PERSISTENT_CACHE_TTL_MS;
 const CANDLE_NEGATIVE_COOLDOWN_BASE_MS = 3_000;
 const CANDLE_NEGATIVE_COOLDOWN_MAX_MS = 30_000;
+const CANDLE_UNSUPPORTED_CAPABILITY_TTL_MS = 6 * 60 * 60_000;
 const CANDLE_REFRESH_CONCURRENCY = 4;
 const CANDLE_REDIS_KEY_PREFIX = 'cryptory:candles:v2';
 const MIN_PROVIDER_CANDLE_FETCH_LIMIT = 60;
@@ -93,12 +94,19 @@ type CandleFailureState = {
   reason: string;
 };
 
+type CandleUnsupportedCapabilityState = {
+  markedAt: number;
+  expiresAt: number;
+  reason: string;
+};
+
 type CandleRefreshOutcome = {
   status: Extract<CandleSnapshotStatus, 'loaded' | 'empty' | 'unavailable' | 'failed'>;
   entry: CachedCandleSnapshot | null;
   reason: string | null;
   errorType?: CandleErrorType;
   retryAfterMs?: number;
+  support?: CandleRequestSupport;
 };
 
 type CandleRefreshJob = {
@@ -118,6 +126,7 @@ type CandleInFlightRefresh = {
 const candleSnapshotCache = new Map<string, CachedCandleSnapshot>();
 const candleSnapshotInFlight = new Map<string, CandleInFlightRefresh>();
 const candleFailureCooldown = new Map<string, CandleFailureState>();
+const candleUnsupportedCapabilityCache = new Map<string, CandleUnsupportedCapabilityState>();
 
 class CandleRefreshCoordinator {
   private activeCount = 0;
@@ -190,8 +199,8 @@ function clampCandleLimit(limit?: number) {
   return Math.max(1, Math.min(Math.trunc(limit), MAX_CANDLE_LIMIT));
 }
 
-function candleCacheKey(exchange: ExchangeId, symbol: string, interval: string) {
-  return `${exchange}:${symbol}:${interval}`;
+function candleCacheKey(exchange: ExchangeId, marketIdentifier: string, interval: string) {
+  return `${exchange}:${marketIdentifier}:${interval}`;
 }
 
 function resolveProviderCandleFetchLimit(requestedLimit: number) {
@@ -430,6 +439,31 @@ function clearCandleFailure(cacheKey: string) {
   candleFailureCooldown.delete(cacheKey);
 }
 
+function registerUnsupportedCandleCapability(cacheKey: string, reason: string) {
+  const markedAt = Date.now();
+  candleUnsupportedCapabilityCache.set(cacheKey, {
+    markedAt,
+    expiresAt: markedAt + CANDLE_UNSUPPORTED_CAPABILITY_TTL_MS,
+    reason,
+  });
+}
+
+function clearUnsupportedCandleCapability(cacheKey: string) {
+  candleUnsupportedCapabilityCache.delete(cacheKey);
+}
+
+function getActiveUnsupportedCandleCapability(cacheKey: string) {
+  const state = candleUnsupportedCapabilityCache.get(cacheKey);
+  if (!state) {
+    return null;
+  }
+  if (state.expiresAt <= Date.now()) {
+    candleUnsupportedCapabilityCache.delete(cacheKey);
+    return null;
+  }
+  return state;
+}
+
 function getActiveCandleFailure(cacheKey: string) {
   const state = candleFailureCooldown.get(cacheKey);
   if (!state) {
@@ -609,6 +643,7 @@ function buildResultFromCache(params: {
   fallbackReason?: string | null;
   retryAfterMs?: number;
   refreshPriority: CandleRefreshPriority;
+  supportOverride?: CandleRequestSupport;
 }) {
   return buildCandleSnapshotResult({
     exchange: params.exchange,
@@ -619,7 +654,7 @@ function buildResultFromCache(params: {
     interval: params.resolvedInterval,
     requestedLimit: params.requestedLimit,
     limit: params.requestedLimit,
-    support: params.fallbackApplied ? 'fallback' : 'supported',
+    support: params.supportOverride ?? (params.fallbackApplied ? 'fallback' : 'supported'),
     status: params.stale ? 'stale' : 'loaded',
     source: params.stale ? 'stale_cache' : 'fresh_cache',
     metaSource: params.metaSource,
@@ -645,6 +680,7 @@ function buildResultFromRefreshOutcome(params: {
   outcome: CandleRefreshOutcome;
   refreshPriority: CandleRefreshPriority;
   lastSuccessfulAt?: number | null;
+  supportOverride?: CandleRequestSupport;
 }) {
   if (params.outcome.entry) {
     return buildCandleSnapshotResult({
@@ -656,7 +692,7 @@ function buildResultFromRefreshOutcome(params: {
       interval: params.resolvedInterval,
       requestedLimit: params.requestedLimit,
       limit: params.requestedLimit,
-      support: params.fallbackApplied ? 'fallback' : 'supported',
+      support: params.supportOverride ?? params.outcome.support ?? (params.fallbackApplied ? 'fallback' : 'supported'),
       status: 'loaded',
       source: 'provider',
       metaSource: 'refreshed',
@@ -678,7 +714,7 @@ function buildResultFromRefreshOutcome(params: {
     interval: params.resolvedInterval,
     requestedLimit: params.requestedLimit,
     limit: params.requestedLimit,
-    support: params.fallbackApplied ? 'fallback' : 'supported',
+    support: params.supportOverride ?? params.outcome.support ?? (params.fallbackApplied ? 'fallback' : 'supported'),
     status: params.outcome.status,
     source: 'provider',
     metaSource: 'fallback',
@@ -749,6 +785,7 @@ async function writeRedisCandleSnapshot(cacheKey: string, entry: CachedCandleSna
 async function fetchAndStoreCandleSnapshot(params: {
   exchange: ExchangeId;
   symbol: string;
+  marketId?: string | null;
   rawSymbol: string;
   requestedInterval: string;
   normalizedInterval: string;
@@ -782,6 +819,7 @@ async function fetchAndStoreCandleSnapshot(params: {
       };
       candleSnapshotCache.set(params.cacheKey, entry);
       clearCandleFailure(params.cacheKey);
+      clearUnsupportedCandleCapability(params.cacheKey);
       void writeRedisCandleSnapshot(params.cacheKey, entry);
       logCandlePhase({
         exchange: params.exchange,
@@ -827,6 +865,35 @@ async function fetchAndStoreCandleSnapshot(params: {
     };
   } catch (error) {
     const classified = classifyCandleFailure(error);
+    if (classified.errorType === 'unsupported') {
+      clearCandleFailure(params.cacheKey);
+      registerUnsupportedCandleCapability(params.cacheKey, classified.reason);
+      logCandlePhase({
+        exchange: params.exchange,
+        symbol: params.symbol,
+        interval: params.requestedInterval,
+        phase: 'response_unsupported',
+        mappedInterval: params.resolvedInterval,
+        mappedSymbol: params.rawSymbol,
+        reason: classified.reason,
+      });
+      logCandleRefreshDebug({
+        action: 'refresh_fail',
+        exchange: params.exchange,
+        symbol: params.symbol,
+        interval: params.requestedInterval,
+        errorType: classified.errorType,
+        reason: classified.reason,
+      });
+      return {
+        status: 'unavailable',
+        support: 'unsupported',
+        entry: null,
+        reason: classified.reason,
+        errorType: classified.errorType,
+      };
+    }
+
     const failure = registerCandleFailure(params.cacheKey, classified.errorType, classified.reason);
     logCandlePhase({
       exchange: params.exchange,
@@ -859,6 +926,7 @@ function startCandleRefresh(params: {
   cacheKey: string;
   exchange: ExchangeId;
   symbol: string;
+  marketId?: string | null;
   rawSymbol: string;
   requestedInterval: string;
   normalizedInterval: string;
@@ -911,25 +979,28 @@ function startCandleRefresh(params: {
 export async function resolveCandleSnapshot(params: {
   exchange: ExchangeId;
   symbol: string;
+  marketId?: string | null;
+  rawSymbol?: string | null;
   interval: string;
   limit?: number;
   allowStale?: boolean;
 }): Promise<CandleSnapshotResult> {
-  const canonicalSymbol = toCanonicalSymbol(params.symbol);
-  if (!canonicalSymbol) {
+  const marketSymbol = toCanonicalSymbol(params.symbol);
+  if (!marketSymbol) {
     throw new AppError(400, 'symbol is required');
   }
 
   const resolved = resolveExchangeInterval(params.exchange, params.interval);
   const normalizedInterval = resolved?.normalizedInterval ?? params.interval.trim().toLowerCase();
-  const rawSymbol = toExchangeSymbol(params.exchange, canonicalSymbol);
+  const rawSymbol = params.rawSymbol?.trim() || toExchangeSymbol(params.exchange, marketSymbol);
+  const marketIdentifier = (params.marketId?.trim() || rawSymbol).toLowerCase();
   const requestedLimit = clampCandleLimit(params.limit);
   const providerFetchLimit = resolveProviderCandleFetchLimit(requestedLimit);
-  const foregroundPriority = resolveCandleRefreshPriority(canonicalSymbol, true);
+  const foregroundPriority = resolveCandleRefreshPriority(marketSymbol, true);
 
   logCandlePhase({
     exchange: params.exchange,
-    symbol: canonicalSymbol,
+    symbol: marketSymbol,
     interval: params.interval,
     phase: 'request_start',
     limit: requestedLimit,
@@ -938,14 +1009,14 @@ export async function resolveCandleSnapshot(params: {
   if (!resolved) {
     logCandlePhase({
       exchange: params.exchange,
-      symbol: canonicalSymbol,
+      symbol: marketSymbol,
       interval: params.interval,
       phase: 'response_unsupported',
       reason: 'interval_mapping_not_found',
     });
     return buildCandleSnapshotResult({
       exchange: params.exchange,
-      symbol: canonicalSymbol,
+      symbol: marketSymbol,
       rawSymbol,
       requestedInterval: params.interval,
       normalizedInterval,
@@ -968,14 +1039,14 @@ export async function resolveCandleSnapshot(params: {
 
   logCandlePhase({
     exchange: params.exchange,
-    symbol: canonicalSymbol,
+    symbol: marketSymbol,
     interval: params.interval,
     phase: 'normalized',
     mappedInterval: resolved.resolvedInterval,
     mappedSymbol: rawSymbol,
   });
 
-  const cacheKey = candleCacheKey(params.exchange, canonicalSymbol, resolved.resolvedInterval);
+  const cacheKey = candleCacheKey(params.exchange, marketIdentifier, resolved.resolvedInterval);
   const now = Date.now();
   let cached = candleSnapshotCache.get(cacheKey) ?? null;
   let cachedSource: Extract<CandleMetaSource, 'memory' | 'redis'> = 'memory';
@@ -984,7 +1055,7 @@ export async function resolveCandleSnapshot(params: {
     logCandleCacheDebug({
       action: 'memory_hit',
       exchange: params.exchange,
-      symbol: canonicalSymbol,
+      symbol: marketSymbol,
       interval: params.interval,
       freshness: 'live',
       cachedPointCount: cached.items.length,
@@ -992,7 +1063,7 @@ export async function resolveCandleSnapshot(params: {
     });
     return buildResultFromCache({
       exchange: params.exchange,
-      symbol: canonicalSymbol,
+      symbol: marketSymbol,
       rawSymbol,
       requestedInterval: params.interval,
       normalizedInterval: resolved.normalizedInterval,
@@ -1010,7 +1081,7 @@ export async function resolveCandleSnapshot(params: {
     logCandleCacheDebug({
       action: 'cache_miss',
       exchange: params.exchange,
-      symbol: canonicalSymbol,
+      symbol: marketSymbol,
       interval: params.interval,
       freshness: 'live',
       reason: 'cached_point_count_below_requested_limit',
@@ -1028,7 +1099,7 @@ export async function resolveCandleSnapshot(params: {
       logCandleCacheDebug({
         action: 'redis_hit',
         exchange: params.exchange,
-        symbol: canonicalSymbol,
+        symbol: marketSymbol,
         interval: params.interval,
         freshness: redisCached.expiresAt > now ? 'live' : 'stale',
         cachedPointCount: redisCached.items.length,
@@ -1037,7 +1108,7 @@ export async function resolveCandleSnapshot(params: {
       if (redisCached.expiresAt > now && redisCached.items.length >= requestedLimit) {
         return buildResultFromCache({
           exchange: params.exchange,
-          symbol: canonicalSymbol,
+          symbol: marketSymbol,
           rawSymbol,
           requestedInterval: params.interval,
           normalizedInterval: resolved.normalizedInterval,
@@ -1054,7 +1125,7 @@ export async function resolveCandleSnapshot(params: {
         logCandleCacheDebug({
           action: 'cache_miss',
           exchange: params.exchange,
-          symbol: canonicalSymbol,
+          symbol: marketSymbol,
           interval: params.interval,
           freshness: 'live',
           reason: 'redis_point_count_below_requested_limit',
@@ -1063,6 +1134,59 @@ export async function resolveCandleSnapshot(params: {
         });
       }
     }
+  }
+
+  const activeUnsupported = getActiveUnsupportedCandleCapability(cacheKey);
+  if (activeUnsupported) {
+    if (cached && resolveCandleUsableUntil(cached) > now && params.allowStale !== false) {
+      logCandleCacheDebug({
+        action: 'stale_fallback',
+        exchange: params.exchange,
+        symbol: marketSymbol,
+        interval: params.interval,
+        freshness: 'stale',
+        reason: 'unsupported_capability_cached',
+      });
+      return buildResultFromCache({
+        exchange: params.exchange,
+        symbol: marketSymbol,
+        rawSymbol,
+        requestedInterval: params.interval,
+        normalizedInterval: resolved.normalizedInterval,
+        resolvedInterval: resolved.resolvedInterval,
+        requestedLimit,
+        fallbackApplied: resolved.fallbackApplied,
+        entry: cached,
+        stale: true,
+        metaSource: cached.staleUntil > now ? cachedSource : 'fallback',
+        fallbackReason: activeUnsupported.reason,
+        refreshPriority: resolveCandleRefreshPriority(marketSymbol, false),
+        supportOverride: 'unsupported',
+      });
+    }
+
+    return buildCandleSnapshotResult({
+      exchange: params.exchange,
+      symbol: marketSymbol,
+      rawSymbol,
+      requestedInterval: params.interval,
+      normalizedInterval: resolved.normalizedInterval,
+      interval: resolved.resolvedInterval,
+      requestedLimit,
+      limit: requestedLimit,
+      support: 'unsupported',
+      status: 'unavailable',
+      source: 'provider',
+      metaSource: 'fallback',
+      fallbackApplied: resolved.fallbackApplied,
+      staleCacheUsed: false,
+      items: [],
+      capturedAt: null,
+      reason: activeUnsupported.reason,
+      fallbackReason: 'unsupported_capability_cached',
+      refreshPriority: foregroundPriority,
+      lastSuccessfulAt: cached?.capturedAt ?? null,
+    });
   }
 
   if (cached && resolveCandleUsableUntil(cached) > now && params.allowStale !== false) {
@@ -1077,7 +1201,7 @@ export async function resolveCandleSnapshot(params: {
       logCandleCacheDebug({
         action: 'stale_fallback',
         exchange: params.exchange,
-        symbol: canonicalSymbol,
+        symbol: marketSymbol,
         interval: params.interval,
         freshness: 'stale',
         reason: activeFailure.errorType,
@@ -1085,7 +1209,7 @@ export async function resolveCandleSnapshot(params: {
       });
       return buildResultFromCache({
         exchange: params.exchange,
-        symbol: canonicalSymbol,
+        symbol: marketSymbol,
         rawSymbol,
         requestedInterval: params.interval,
         normalizedInterval: resolved.normalizedInterval,
@@ -1097,7 +1221,7 @@ export async function resolveCandleSnapshot(params: {
         metaSource: 'fallback',
         fallbackReason,
         retryAfterMs: activeFailure.retryAfterMs,
-        refreshPriority: resolveCandleRefreshPriority(canonicalSymbol, false),
+        refreshPriority: resolveCandleRefreshPriority(marketSymbol, false),
       });
     }
 
@@ -1106,7 +1230,7 @@ export async function resolveCandleSnapshot(params: {
       logCandleCacheDebug({
         action: 'singleflight_join',
         exchange: params.exchange,
-        symbol: canonicalSymbol,
+        symbol: marketSymbol,
         interval: params.interval,
         freshness: 'stale',
         cachedPointCount: existing.limit,
@@ -1116,20 +1240,21 @@ export async function resolveCandleSnapshot(params: {
       void startCandleRefresh({
         cacheKey,
         exchange: params.exchange,
-        symbol: canonicalSymbol,
+        symbol: marketSymbol,
+        marketId: params.marketId,
         rawSymbol,
         requestedInterval: params.interval,
         normalizedInterval: resolved.normalizedInterval,
         resolvedInterval: resolved.resolvedInterval,
         limit: providerFetchLimit,
-        priority: resolveCandleRefreshPriority(canonicalSymbol, false),
+        priority: resolveCandleRefreshPriority(marketSymbol, false),
       });
     }
 
     logCandleCacheDebug({
       action: 'stale_fallback',
       exchange: params.exchange,
-      symbol: canonicalSymbol,
+      symbol: marketSymbol,
       interval: params.interval,
       freshness: 'stale',
       reason: fallbackReason,
@@ -1138,7 +1263,7 @@ export async function resolveCandleSnapshot(params: {
     });
     logCandlePhase({
       exchange: params.exchange,
-      symbol: canonicalSymbol,
+      symbol: marketSymbol,
       interval: params.interval,
       phase: 'response_stale_cache',
       mappedInterval: resolved.resolvedInterval,
@@ -1148,7 +1273,7 @@ export async function resolveCandleSnapshot(params: {
     });
     return buildResultFromCache({
       exchange: params.exchange,
-      symbol: canonicalSymbol,
+      symbol: marketSymbol,
       rawSymbol,
       requestedInterval: params.interval,
       normalizedInterval: resolved.normalizedInterval,
@@ -1159,7 +1284,7 @@ export async function resolveCandleSnapshot(params: {
       stale: true,
       metaSource: withinPreferredStaleWindow ? cachedSource : 'fallback',
       fallbackReason,
-      refreshPriority: resolveCandleRefreshPriority(canonicalSymbol, false),
+      refreshPriority: resolveCandleRefreshPriority(marketSymbol, false),
     });
   }
 
@@ -1168,7 +1293,7 @@ export async function resolveCandleSnapshot(params: {
     logCandleCacheDebug({
       action: 'unavailable',
       exchange: params.exchange,
-      symbol: canonicalSymbol,
+      symbol: marketSymbol,
       interval: params.interval,
       freshness: 'unavailable',
       reason: 'negative_cooldown',
@@ -1176,7 +1301,7 @@ export async function resolveCandleSnapshot(params: {
     });
     return buildCandleSnapshotResult({
       exchange: params.exchange,
-      symbol: canonicalSymbol,
+      symbol: marketSymbol,
       rawSymbol,
       requestedInterval: params.interval,
       normalizedInterval: resolved.normalizedInterval,
@@ -1203,7 +1328,7 @@ export async function resolveCandleSnapshot(params: {
     logCandleCacheDebug({
       action: 'cache_miss',
       exchange: params.exchange,
-      symbol: canonicalSymbol,
+      symbol: marketSymbol,
       interval: params.interval,
       reason: 'no_usable_cache',
       requestedPointCount: requestedLimit,
@@ -1216,7 +1341,7 @@ export async function resolveCandleSnapshot(params: {
         logCandleCacheDebug({
           action: 'singleflight_join',
           exchange: params.exchange,
-          symbol: canonicalSymbol,
+          symbol: marketSymbol,
           interval: params.interval,
           cachedPointCount: inFlight.limit,
           requestedPointCount: providerFetchLimit,
@@ -1226,7 +1351,8 @@ export async function resolveCandleSnapshot(params: {
     : await startCandleRefresh({
         cacheKey,
         exchange: params.exchange,
-        symbol: canonicalSymbol,
+        symbol: marketSymbol,
+        marketId: params.marketId,
         rawSymbol,
         requestedInterval: params.interval,
         normalizedInterval: resolved.normalizedInterval,
@@ -1239,7 +1365,7 @@ export async function resolveCandleSnapshot(params: {
     logCandleCacheDebug({
       action: 'unavailable',
       exchange: params.exchange,
-      symbol: canonicalSymbol,
+      symbol: marketSymbol,
       interval: params.interval,
       freshness: 'unavailable',
       reason: outcome.reason ?? 'no_last_good',
@@ -1249,7 +1375,7 @@ export async function resolveCandleSnapshot(params: {
 
   return buildResultFromRefreshOutcome({
     exchange: params.exchange,
-    symbol: canonicalSymbol,
+    symbol: marketSymbol,
     rawSymbol,
     requestedInterval: params.interval,
     normalizedInterval: resolved.normalizedInterval,
@@ -1266,6 +1392,7 @@ export function resetCandleSnapshotCachesForTest() {
   candleSnapshotCache.clear();
   candleSnapshotInFlight.clear();
   candleFailureCooldown.clear();
+  candleUnsupportedCapabilityCache.clear();
   candleRefreshCoordinator.resetForTest();
 }
 

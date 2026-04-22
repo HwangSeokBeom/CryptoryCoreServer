@@ -17,6 +17,7 @@ export interface ExchangeConnectionCredentials {
   apiKey: string;
   secretKey: string;
   passphrase?: string | null;
+  permission?: 'read_only' | 'trade_enabled';
 }
 
 export interface ExchangeConnectionValidationResult {

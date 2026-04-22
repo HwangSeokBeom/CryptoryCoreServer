@@ -134,6 +134,9 @@ describe('Public Market Contracts', () => {
     expect(tickers.snapshotAt).toBe(1_712_345_678_000);
     expect(tickers.items[0].canonicalAssetKey).toBe('BTC');
     expect(tickers.items[0].assetImageUrl).toBe('https://assets.example.com/btc.png');
+    expect(tickers.items[0].imageFallbackKey).toBe('symbol:BTC');
+    expect(tickers.items[0].fallbackKey).toBe('symbol:BTC');
+    expect(tickers.items[0].imageLookupKey).toBe('symbol:BTC');
     expect(orderbook.spread).toBe(20000);
     expect(orderbook.marketId).toBe('KRW-BTC');
     expect(trades.items[0].notional).toBe(1000000);
@@ -146,6 +149,8 @@ describe('Public Market Contracts', () => {
     expect(kimchi.items[0].domestic[0].market).toBe('BTC/KRW');
     expect(kimchi.items[0].canonicalAssetKey).toBe('BTC');
     expect(kimchi.items[0].assetImageUrl).toBe('https://assets.example.com/btc.png');
+    expect(kimchi.items[0].imageFallbackKey).toBe('symbol:BTC');
+    expect(kimchi.items[0].fallbackKey).toBe('symbol:BTC');
     expect(kimchi.items[0].displayMeta?.status).toBe('ready');
     expect(kimchi.items[0].displayHint).toBe('keep_last_good');
   });

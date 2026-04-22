@@ -30,7 +30,7 @@ export async function exchangeConnectionRoutes(app: FastifyInstance) {
       return createSuccessResponse(await getExchangeConnection(request.user.id, id));
     } catch (error) {
       if (error instanceof AppError) {
-        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
+        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details, error.code));
       }
       throw error;
     }
@@ -42,7 +42,7 @@ export async function exchangeConnectionRoutes(app: FastifyInstance) {
       return createSuccessResponse(await getExchangeConnection(request.user.id, id));
     } catch (error) {
       if (error instanceof AppError) {
-        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
+        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details, error.code));
       }
       throw error;
     }
@@ -58,7 +58,7 @@ export async function exchangeConnectionRoutes(app: FastifyInstance) {
       return createSuccessResponse(await testExchangeConnection(request.user.id, parsed.data));
     } catch (error) {
       if (error instanceof AppError) {
-        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
+        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details, error.code));
       }
       throw error;
     }
@@ -74,7 +74,7 @@ export async function exchangeConnectionRoutes(app: FastifyInstance) {
       return reply.status(201).send(createSuccessResponse(await createExchangeConnection(request.user.id, parsed.data)));
     } catch (error) {
       if (error instanceof AppError) {
-        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
+        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details, error.code));
       }
       throw error;
     }
@@ -86,7 +86,7 @@ export async function exchangeConnectionRoutes(app: FastifyInstance) {
       return createSuccessResponse(await validateStoredExchangeConnection(request.user.id, id));
     } catch (error) {
       if (error instanceof AppError) {
-        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
+        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details, error.code));
       }
       throw error;
     }
@@ -98,7 +98,7 @@ export async function exchangeConnectionRoutes(app: FastifyInstance) {
       return createSuccessResponse(await validateStoredExchangeConnection(request.user.id, id));
     } catch (error) {
       if (error instanceof AppError) {
-        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
+        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details, error.code));
       }
       throw error;
     }
@@ -115,7 +115,7 @@ export async function exchangeConnectionRoutes(app: FastifyInstance) {
       return createSuccessResponse(await updateExchangeConnection(request.user.id, id, parsed.data));
     } catch (error) {
       if (error instanceof AppError) {
-        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
+        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details, error.code));
       }
       throw error;
     }
@@ -127,7 +127,7 @@ export async function exchangeConnectionRoutes(app: FastifyInstance) {
       return createSuccessResponse(await removeExchangeConnection(request.user.id, id));
     } catch (error) {
       if (error instanceof AppError) {
-        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
+        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details, error.code));
       }
       throw error;
     }

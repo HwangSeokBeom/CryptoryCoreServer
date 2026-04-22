@@ -25,6 +25,10 @@ Errors use:
 ## Security
 
 - User exchange credentials are stored only through DB encrypted fields backed by `EXCHANGE_CREDENTIAL_ENCRYPTION_KEY`.
+- Exchange credential encryption uses versioned AES-256-GCM envelopes. The encryption key material must live outside the DB and must not fall back to JWT secrets.
+- API key list/detail responses never return plaintext credentials. They expose only `apiKeyMasked`, `connectionPurpose`, `permissionScope`, and status metadata.
+- Read-only connections are blocked from server-side trading/order APIs before any exchange request is sent.
+- Logs and error responses redact API keys, secrets, tokens, signatures, authorization headers, query hashes, and nonce-like values.
 - Runtime private credential resolution order is `user exchange connection -> formal server env variables`.
 - Provider auth/signing is handled only inside provider or validator code.
 - Binance is public-reference-only. Private trading and private portfolio are intentionally unsupported.
@@ -1211,6 +1215,13 @@ Example `GET /exchange-connections` response:
         "exchange": "upbit",
         "exchangeName": "업비트",
         "label": "Primary Upbit",
+        "permission": "read_only",
+        "connectionPurpose": "read_only",
+        "permissionScope": ["read"],
+        "credentialStatus": "active",
+        "status": "connected",
+        "maskedCredentialSummary": "abc*****xyz",
+        "lastValidatedAt": "2026-04-17T06:00:00.000Z",
         "apiKeyMasked": "abc*****xyz",
         "hasSecretKey": true,
         "hasPassphrase": false,
@@ -1231,6 +1242,7 @@ Example `GET /exchange-connections` response:
           "mode": "live_api",
           "canUsePrivateApi": true,
           "code": "verified",
+          "appCode": "CONNECTION_VERIFIED",
           "message": "업비트 연결이 확인되었습니다.",
           "checkedAt": "2026-04-17T06:00:00.000Z"
         },
@@ -1240,6 +1252,8 @@ Example `GET /exchange-connections` response:
           "status": "verified",
           "mode": "live_api",
           "code": "verified",
+          "appCode": "CONNECTION_VERIFIED",
+          "permission": "read_only",
           "message": "업비트 연결이 확인되었습니다.",
           "checkedAt": "2026-04-17T06:00:00.000Z"
         },
@@ -1260,6 +1274,25 @@ Example `GET /exchange-connections` response:
 }
 ```
 
+Credential status values:
+
+- `pending_verification`
+- `active`
+- `verification_failed`
+- `invalid_credentials`
+- `insufficient_scope`
+- `ip_not_allowed`
+- `temporarily_unreachable`
+- `revoked`
+- `reauth_required`
+
+Credential handling rules:
+
+- `POST /exchange-connections/test` verifies a submitted key without storing it.
+- `POST /exchange-connections` stores encrypted credentials and records a verified or failed status; it never marks a failed validation as active.
+- `PATCH /exchange-connections/:id` never returns or exposes existing secrets. Secret changes require re-entry, while label-only changes do not decrypt credentials.
+- `DELETE /exchange-connections/:id` hard-deletes the encrypted credential row. Dependent history rows keep nullable connection references.
+
 Example `POST /exchange-connections/test` response:
 
 ```json
@@ -1271,6 +1304,8 @@ Example `POST /exchange-connections/test` response:
     "status": "invalid",
     "mode": "live_api",
     "code": "insufficient_permissions",
+    "appCode": "INSUFFICIENT_SCOPE",
+    "permission": "trade_enabled",
     "message": "API 키 권한이 부족합니다.",
     "details": {
       "upstreamStatus": 403
@@ -1393,7 +1428,7 @@ Error responses:
 }
 ```
 
-Unexpected registration failures return HTTP 500 with `code: "INTERNAL_SERVER_ERROR"` and do not expose passwords or secrets in logs.
+Unexpected registration failures return HTTP 500 with `code: "AUTH_REGISTER_FAILED"` and do not expose passwords or secrets in logs.
 
 ## Exchange Metadata Routes
 

@@ -35,6 +35,13 @@ function normalizeKimchiExchange(exchange: string | undefined): DomesticExchange
     : undefined;
 }
 
+function parseDebugFlag(value: string | undefined) {
+  if (!value) {
+    return false;
+  }
+  return ['1', 'true', 'yes', 'debug'].includes(value.trim().toLowerCase());
+}
+
 export async function publicMarketRoutes(app: FastifyInstance) {
   app.addHook('onRequest', async (request) => {
     logger.info({ domain: 'public-market', method: request.method, url: request.url }, 'Handling public market route');
@@ -63,7 +70,7 @@ export async function publicMarketRoutes(app: FastifyInstance) {
   });
 
   app.get('/tickers', async (request, reply) => {
-    const { exchange, symbol, marketId } = request.query as { exchange?: string; symbol?: string; marketId?: string };
+    const { exchange, symbol, marketId, debug } = request.query as { exchange?: string; symbol?: string; marketId?: string; debug?: string };
     const exchangeError = ensureSupportedExchange(exchange);
     if (exchangeError) {
       return reply.status(400).send(exchangeError);
@@ -77,7 +84,7 @@ export async function publicMarketRoutes(app: FastifyInstance) {
     if (marketId && exchange && !resolvedMarket) {
       return reply.status(400).send(createErrorResponse('marketId is not listed on the requested exchange'));
     }
-    const tickers = await getPublicTickers({ exchange, symbol: resolvedMarket?.symbol ?? symbol });
+    const tickers = await getPublicTickers({ exchange, symbol: resolvedMarket?.symbol ?? symbol, debug: parseDebugFlag(debug) });
     return createSuccessResponse(serializeTickersResponse(tickers));
   });
 
@@ -206,11 +213,12 @@ export async function publicMarketRoutes(app: FastifyInstance) {
   });
 
   app.get('/kimchi-premium', async (request, reply) => {
-    const { symbols, exchange, venue, domesticExchange } = request.query as {
+    const { symbols, exchange, venue, domesticExchange, debug } = request.query as {
       symbols?: string;
       exchange?: string;
       venue?: string;
       domesticExchange?: string;
+      debug?: string;
     };
     if (!symbols) {
       return reply.status(400).send(createErrorResponse('symbols query parameter is required'));
@@ -224,7 +232,7 @@ export async function publicMarketRoutes(app: FastifyInstance) {
 
     const result = await getPublicKimchiPremium(
       symbols.split(',').map((symbol) => symbol.trim()).filter(Boolean),
-      selectedExchange ? { venues: [selectedExchange] } : undefined,
+      selectedExchange ? { venues: [selectedExchange], debug: parseDebugFlag(debug) } : { debug: parseDebugFlag(debug) },
     );
 
     return createSuccessResponse(serializeKimchiPremiumResponse(result));

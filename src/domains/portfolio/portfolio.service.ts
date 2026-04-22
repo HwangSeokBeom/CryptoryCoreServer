@@ -2,8 +2,10 @@ import { ExchangeCapabilityError } from '../../core/exchange/errors';
 import type { ExchangeId, PortfolioSnapshot, QuoteCurrency } from '../../core/exchange/exchange.types';
 import { EXCHANGE_METADATA } from '../../core/exchange/exchange.metadata';
 import { exchangeProviderRegistry } from '../../core/exchange/registry.bootstrap';
+import { env } from '../../config/env';
 import { AppError } from '../../utils/errors';
 import {
+  getUserExchangeConnectionRecord,
   listUserVerifiedExchangeConnections,
   requireUserOwnedExchangeCredentials,
 } from '../exchange-connections/user-exchange-credentials.service';
@@ -67,6 +69,24 @@ export type PortfolioSummary = {
   generatedAt: string;
 };
 
+export type PortfolioRouteStatus =
+  | 'ok'
+  | 'no_connection'
+  | 'connection_exists_but_unverified'
+  | 'partial_data';
+
+export type PortfolioRouteResponse<T> = {
+  data: T;
+  routeStatus: PortfolioRouteStatus;
+  warningMessage?: string;
+  partialFailureMessage?: string;
+  unavailableReason?: string;
+  privateStreamingStatus: 'live_stream_available' | 'live_stream_unavailable_polling_active';
+  pollingFallbackRecommended: boolean;
+};
+
+const inFlightPortfolioOperations = new Map<string, Promise<unknown>>();
+
 function resolvePortfolioProvider(exchange: ExchangeId) {
   try {
     return exchangeProviderRegistry.getPortfolioProvider(exchange);
@@ -126,6 +146,58 @@ function buildFailure(exchange: ExchangeId, error: unknown): PortfolioFailure {
 
 function getKrwMultiplier(quoteCurrency: QuoteCurrency, usdKrwRate: number) {
   return quoteCurrency === 'USDT' ? usdKrwRate : 1;
+}
+
+function getPrivateStreamingStatus() {
+  return env.ENABLE_PRIVATE_WS
+    ? 'live_stream_available' as const
+    : 'live_stream_unavailable_polling_active' as const;
+}
+
+function createRouteMeta(params: {
+  routeStatus: PortfolioRouteStatus;
+  warningMessage?: string;
+  partialFailureMessage?: string;
+  unavailableReason?: string;
+}): Omit<PortfolioRouteResponse<unknown>, 'data'> {
+  return {
+    routeStatus: params.routeStatus,
+    warningMessage: params.warningMessage,
+    partialFailureMessage: params.partialFailureMessage,
+    unavailableReason: params.unavailableReason,
+    privateStreamingStatus: getPrivateStreamingStatus(),
+    pollingFallbackRecommended: env.ENABLE_PRIVATE_WS === false,
+  };
+}
+
+function buildEmptyPortfolioSnapshot(exchange: ExchangeId) {
+  return {
+    exchange,
+    balances: [],
+    positions: [],
+    totalAsset: 0,
+    totalAssetValue: 0,
+    totalPnlValue: 0,
+    totalPnlPercent: 0,
+    cash: 0,
+    availableAsset: 0,
+    lockedAsset: 0,
+    timestamp: Date.now(),
+  };
+}
+
+function withSingleFlight<T>(key: string, operation: () => Promise<T>) {
+  const existing = inFlightPortfolioOperations.get(key);
+  if (existing) {
+    logger.debug({ domain: 'portfolio', event: 'singleflight_join', key }, 'Joined in-flight portfolio request');
+    return existing as Promise<T>;
+  }
+
+  const promise = operation().finally(() => {
+    inFlightPortfolioOperations.delete(key);
+  });
+  inFlightPortfolioOperations.set(key, promise);
+  return promise;
 }
 
 function toExchangeGroup(snapshot: PortfolioSnapshot, usdKrwRate: number): ExchangePortfolioGroup {
@@ -204,8 +276,10 @@ async function executePortfolioOperation<T>(
 
 export async function getPortfolioSnapshot(userId: string, exchange: ExchangeId) {
   const provider = resolvePortfolioProvider(exchange);
-  return executePortfolioOperation(userId, exchange, '자산 스냅샷 조회에 실패했습니다.', async () =>
-    provider.getPortfolioSnapshot(await getPortfolioContext(userId, exchange)),
+  return withSingleFlight(`snapshot:${userId}:${exchange}`, () =>
+    executePortfolioOperation(userId, exchange, '자산 스냅샷 조회에 실패했습니다.', async () =>
+      provider.getPortfolioSnapshot(await getPortfolioContext(userId, exchange)),
+    ),
   );
 }
 
@@ -297,7 +371,97 @@ export async function getAssetHistory(userId: string, exchange: ExchangeId, symb
     throw new AppError(501, `${exchange} asset history is unsupported`);
   }
 
-  return executePortfolioOperation(userId, exchange, '자산 변동 내역 조회에 실패했습니다.', async () =>
-    provider.getAssetHistory!(symbol, limit, await getPortfolioContext(userId, exchange)),
+  return withSingleFlight(`history:${userId}:${exchange}:${symbol ?? '*'}:${limit ?? 50}`, () =>
+    executePortfolioOperation(userId, exchange, '자산 변동 내역 조회에 실패했습니다.', async () =>
+      provider.getAssetHistory!(symbol, limit, await getPortfolioContext(userId, exchange)),
+    ),
   );
+}
+
+async function classifyConnectionState(userId: string, exchange: ExchangeId) {
+  try {
+    const connection = await getUserExchangeConnectionRecord(userId, exchange);
+    return connection.canUsePrivateApi ? 'verified' as const : 'unverified' as const;
+  } catch (error) {
+    if (error instanceof AppError && error.statusCode === 404) {
+      return 'missing' as const;
+    }
+    throw error;
+  }
+}
+
+export async function getPortfolioSnapshotRouteResponse(
+  userId: string,
+  exchange: ExchangeId,
+): Promise<PortfolioRouteResponse<PortfolioSnapshot | ReturnType<typeof buildEmptyPortfolioSnapshot>>> {
+  try {
+    return {
+      data: await getPortfolioSnapshot(userId, exchange),
+      ...createRouteMeta({ routeStatus: 'ok' }),
+    };
+  } catch (error) {
+    const connectionState = await classifyConnectionState(userId, exchange);
+    if (connectionState === 'missing') {
+      return {
+        data: buildEmptyPortfolioSnapshot(exchange),
+        ...createRouteMeta({
+          routeStatus: 'no_connection',
+          warningMessage: '거래소 연결이 없어 polling fallback 상태로 표시합니다.',
+          unavailableReason: 'no_connection',
+        }),
+      };
+    }
+
+    if (connectionState === 'unverified') {
+      return {
+        data: buildEmptyPortfolioSnapshot(exchange),
+        ...createRouteMeta({
+          routeStatus: 'connection_exists_but_unverified',
+          warningMessage: '거래소 연결은 저장되었지만 아직 검증되지 않았습니다.',
+          unavailableReason: 'connection_exists_but_unverified',
+        }),
+      };
+    }
+
+    throw error;
+  }
+}
+
+export async function getAssetHistoryRouteResponse(
+  userId: string,
+  exchange: ExchangeId,
+  symbol?: string,
+  limit?: number,
+): Promise<PortfolioRouteResponse<unknown[]>> {
+  try {
+    return {
+      data: await getAssetHistory(userId, exchange, symbol, limit),
+      ...createRouteMeta({ routeStatus: 'ok' }),
+    };
+  } catch (error) {
+    const connectionState = await classifyConnectionState(userId, exchange);
+    if (connectionState === 'missing') {
+      return {
+        data: [],
+        ...createRouteMeta({
+          routeStatus: 'no_connection',
+          warningMessage: '거래소 연결이 없어 자산 이력 대신 빈 응답을 반환합니다.',
+          unavailableReason: 'no_connection',
+        }),
+      };
+    }
+
+    if (connectionState === 'unverified') {
+      return {
+        data: [],
+        ...createRouteMeta({
+          routeStatus: 'connection_exists_but_unverified',
+          warningMessage: '거래소 연결은 존재하지만 아직 검증되지 않아 자산 이력을 불러오지 못했습니다.',
+          unavailableReason: 'connection_exists_but_unverified',
+        }),
+      };
+    }
+
+    throw error;
+  }
 }

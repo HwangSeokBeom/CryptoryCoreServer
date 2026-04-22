@@ -83,8 +83,12 @@ export class BithumbProvider
       ttlMs: MARKET_CACHE_TTL_MS,
       staleTtlMs: MARKET_STALE_TTL_MS,
       loader: async () => {
-        const response = await this.restClient.request<Array<{ market: string }>>('/v1/market/all', {
-          query: { isDetails: false },
+        const response = await this.restClient.request<Array<{
+          market: string;
+          korean_name?: string | null;
+          english_name?: string | null;
+        }>>('/v1/market/all', {
+          query: { isDetails: true },
         });
 
         return response
@@ -100,6 +104,8 @@ export class BithumbProvider
               quoteCurrency: 'KRW',
               rawSymbol: item.market,
               tradable: true,
+              koreanName: item.korean_name ?? null,
+              englishName: item.english_name ?? null,
             };
           });
       },

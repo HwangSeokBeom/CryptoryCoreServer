@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { exchangeProviderRegistry } from '../src/core/exchange/registry.bootstrap';
 
 const provider = {
   exchange: 'upbit',
@@ -18,22 +19,28 @@ vi.mock('../src/config/redis', () => ({
   },
 }));
 
-vi.mock('../src/core/exchange/registry.bootstrap', () => ({
-  exchangeProviderRegistry: {
-    getMarketDataProvider: vi.fn(() => provider),
-  },
-}));
-
-function makeCandles(count: number, closeAnchor = 1_712_345_000_000) {
+function makeCandles(
+  count: number,
+  closeAnchor = 1_712_345_000_000,
+  market: {
+    symbol?: string;
+    market?: string;
+    rawSymbol?: string;
+    marketId?: string;
+  } = {},
+) {
+  const symbol = market.symbol ?? 'BTC';
+  const displayMarket = market.market ?? `${symbol}/KRW`;
+  const rawSymbol = market.rawSymbol ?? market.marketId ?? `KRW-${symbol}`;
   return Array.from({ length: count }, (_, index) => {
     const openTime = closeAnchor - (count - index) * 60_000;
     return {
       exchange: 'upbit' as const,
-      symbol: 'BTC',
-      market: 'BTC/KRW',
-      baseCurrency: 'BTC',
+      symbol,
+      market: displayMarket,
+      baseCurrency: symbol,
       quoteCurrency: 'KRW' as const,
-      rawSymbol: 'KRW-BTC',
+      rawSymbol,
       interval: '1m',
       openTime,
       closeTime: openTime + 60_000,
@@ -48,8 +55,8 @@ function makeCandles(count: number, closeAnchor = 1_712_345_000_000) {
 
 describe('candle cache resilience', () => {
   beforeEach(() => {
-    vi.resetModules();
     vi.clearAllMocks();
+    vi.spyOn(exchangeProviderRegistry, 'getMarketDataProvider').mockReturnValue(provider as never);
     vi.spyOn(Date, 'now').mockReturnValue(1_712_345_000_000);
     provider.listMarkets.mockResolvedValue([
       {
@@ -143,6 +150,64 @@ describe('candle cache resilience', () => {
     expect(fallback.meta.fallbackReason).toBe('timeout');
     expect(fallback.meta.retryAfterMs).toBeGreaterThan(0);
     expect(fallback.items).toHaveLength(12);
+  });
+
+  it('keeps stale renderable candles and marks the market unsupported after a provider-level unsupported response', async () => {
+    provider.listMarkets.mockResolvedValue([
+      {
+        symbol: 'S',
+        exchangeSymbol: 'KRW-S',
+        marketId: 'KRW-S',
+        market: 'S/KRW',
+        baseCurrency: 'S',
+        quoteCurrency: 'KRW',
+        rawSymbol: 'KRW-S',
+        tradable: true,
+      },
+    ]);
+    provider.getMarketCapabilitySnapshot.mockResolvedValue({
+      websocketTickerSymbols: ['S'],
+      capabilitySymbols: {
+        tickers: ['S'],
+        orderbook: ['S'],
+        trades: ['S'],
+        candles: ['S'],
+      },
+    });
+    provider.getCandles.mockResolvedValueOnce(makeCandles(12, 1_712_345_000_000, {
+      symbol: 'S',
+      market: 'S/KRW',
+      rawSymbol: 'KRW-S',
+      marketId: 'KRW-S',
+    }));
+
+    const { ExchangeUnsupportedSymbolError } = await import('../src/core/exchange/errors');
+    const { getCandlesWithMeta } = await import('../src/domains/market-data/market-data.service');
+    const { resetCandleSnapshotCachesForTest } = await import('../src/domains/charts/candle.snapshot');
+    resetCandleSnapshotCachesForTest();
+
+    const first = await getCandlesWithMeta('upbit', { marketId: 'KRW-S' }, '1m', 12);
+    expect(first.items).toHaveLength(12);
+
+    vi.spyOn(Date, 'now').mockReturnValue(1_712_345_966_000);
+    provider.getCandles.mockRejectedValueOnce(
+      new ExchangeUnsupportedSymbolError('upbit', 'HTTP 400 market_data_unsupported', 400, 'KRW-S'),
+    );
+
+    const staleWhileRefresh = await getCandlesWithMeta('upbit', { marketId: 'KRW-S' }, '1m', 12);
+    expect(staleWhileRefresh.items).toHaveLength(12);
+    expect(staleWhileRefresh.meta.freshnessState).toBe('stale');
+
+    await vi.waitFor(() => {
+      expect(provider.getCandles).toHaveBeenCalledTimes(2);
+    });
+
+    const cachedUnsupported = await getCandlesWithMeta('upbit', { marketId: 'KRW-S' }, '1m', 12);
+    expect(cachedUnsupported.items).toHaveLength(12);
+    expect(cachedUnsupported.meta.freshnessState).toBe('stale');
+    expect(cachedUnsupported.metadata.availability.candles).toBe('unsupported');
+    expect(cachedUnsupported.metadata.isChartAvailable).toBe(false);
+    expect(provider.getCandles).toHaveBeenCalledTimes(2);
   });
 
   it('returns unavailable only when no last known good candles exist and honors negative cooldown', async () => {

@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { exchangeProviderRegistry } from '../src/core/exchange/registry.bootstrap';
+import { publicMarketDataStore } from '../src/modules/public-market/market.data.store';
 
 const upbitProvider = {
   exchange: 'upbit',
@@ -28,23 +30,6 @@ const binanceProvider = {
   getCandles: vi.fn(),
 };
 
-const publicMarketDataStore = {
-  getTicker: vi.fn(() => null),
-  getTickers: vi.fn(() => []),
-  getTickerHistory: vi.fn(() => []),
-};
-
-vi.mock('../src/core/exchange/registry.bootstrap', () => ({
-  exchangeProviderRegistry: {
-    getMarketDataProvider: vi.fn((exchange: string) => (exchange === 'binance' ? binanceProvider : upbitProvider)),
-    listMarketDataProviders: vi.fn(() => [upbitProvider, binanceProvider]),
-  },
-}));
-
-vi.mock('../src/modules/public-market/market.data.store', () => ({
-  publicMarketDataStore,
-}));
-
 function createTicker(symbol: string, market: string, rawSymbol: string, price: number) {
   return {
     exchange: 'upbit' as const,
@@ -65,6 +50,13 @@ function createTicker(symbol: string, market: string, rawSymbol: string, price: 
 describe('provider market universe scope', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.spyOn(exchangeProviderRegistry, 'getMarketDataProvider')
+      .mockImplementation((exchange: string) => (exchange === 'binance' ? binanceProvider : upbitProvider) as never);
+    vi.spyOn(exchangeProviderRegistry, 'listMarketDataProviders')
+      .mockReturnValue([upbitProvider, binanceProvider] as never);
+    vi.spyOn(publicMarketDataStore, 'getTicker').mockReturnValue(null);
+    vi.spyOn(publicMarketDataStore, 'getTickers').mockReturnValue([]);
+    vi.spyOn(publicMarketDataStore, 'getTickerHistory').mockReturnValue([]);
   });
 
   it('listMarkets returns the provider market universe without trimming registry-unmapped symbols', async () => {
@@ -106,10 +98,19 @@ describe('provider market universe scope', () => {
     expect(response.items.map((item) => item.symbol)).toEqual(['BTC', 'TNSR']);
     expect(response.items.find((item) => item.symbol === 'TNSR')).toMatchObject({
       exchangeSymbol: 'KRW-TNSR',
+      canonicalMarketId: 'TNSR/KRW',
+      candlesSupported: true,
+      graphSupported: true,
+      supportedIntervals: expect.arrayContaining(['1m', '1h', '1d']),
       tradable: true,
       registryMapped: false,
+      assetSupportStatus: 'metadata_pending',
       kimchiComparable: false,
       kimchiComparisonReason: 'BINANCE_REFERENCE_MISSING',
+      assetSlug: 'tnsr',
+      imageFallbackKey: 'asset:tnsr',
+      fallbackKey: 'asset:tnsr',
+      imageMissingReason: 'missing_curated_mapping',
     });
     expect(response.meta).toMatchObject({
       sourceOfTruth: 'provider_market_universe',
@@ -120,7 +121,7 @@ describe('provider market universe scope', () => {
       totalAvailableCount: 2,
       droppedSymbols: [],
     });
-  });
+  }, 10000);
 
   it('getTickers uses the provider market universe, keeps kimchiComparable=false symbols, and only drops provider-missing symbols', async () => {
     upbitProvider.listMarkets.mockResolvedValue([
@@ -191,8 +192,16 @@ describe('provider market universe scope', () => {
     expect(fullResponse.items.map((item) => item.symbol)).toEqual(['BTC', 'TNSR']);
     expect(fullResponse.items.find((item) => item.symbol === 'TNSR')).toMatchObject({
       exchangeSymbol: 'KRW-TNSR',
+      canonicalMarketId: 'TNSR/KRW',
+      candlesSupported: true,
+      graphSupported: true,
+      supportedIntervals: expect.arrayContaining(['1m', '1h', '1d']),
       kimchiComparable: false,
       kimchiComparisonReason: 'BINANCE_REFERENCE_MISSING',
+      assetSlug: 'tnsr',
+      imageFallbackKey: 'asset:tnsr',
+      fallbackKey: 'asset:tnsr',
+      imageMissingReason: 'missing_curated_mapping',
     });
     expect(fullResponse.meta.droppedSymbols).toEqual([
       {

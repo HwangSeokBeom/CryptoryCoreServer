@@ -1,4 +1,5 @@
 import { COINS, COIN_MAP, EXCHANGES } from '../../config/constants';
+import { buildImageFallbackKey, getAssetRegistryMetadata, resolvePreferredAssetImage } from '../../core/exchange/asset.registry';
 import {
   assetMetadataService,
   type AssetImageAvailability,
@@ -77,34 +78,148 @@ function toUsableAssetImageUrl(view: AssetMetadataView | undefined, fallbackUrl:
   return isDefaultPlaceholderAssetImage(view, imageUrl) ? null : imageUrl;
 }
 
-function buildAssetImageFields(view: AssetMetadataView | undefined, assetImageUrl: string | null, canonicalAssetKey?: string | null) {
-  const imageAvailability = assetImageUrl
-    ? view?.fallbackHit ? 'fallback' as const : 'available' as const
-    : view?.imageAvailability ?? (canonicalAssetKey ? 'pending' as const : 'unavailable' as const);
+function hasPromotablePreferredImage(preferredImage: ReturnType<typeof resolvePreferredAssetImage>) {
+  return Boolean(
+    preferredImage.preferredImageSlug
+    && preferredImage.preferredImageCoingeckoId
+    && !preferredImage.fallbackOnly,
+  );
+}
+
+function buildAssetImageFields(params: {
+  view: AssetMetadataView | undefined;
+  assetImageUrl: string | null;
+  exchange?: ExchangeId;
+  symbol: string;
+  rawSymbol?: string | null;
+  marketId?: string | null;
+  canonicalAssetKey?: string | null;
+}) {
+  const preferredImage = resolvePreferredAssetImage({
+    exchange: params.exchange ?? null,
+    canonicalAssetKey: params.canonicalAssetKey ?? null,
+    symbol: params.symbol,
+    rawSymbol: params.rawSymbol ?? null,
+    marketId: params.marketId ?? null,
+  });
+  const identityMetadata = params.canonicalAssetKey
+    ? getAssetRegistryMetadata(params.canonicalAssetKey, params.symbol)
+    : null;
+  const assetSlug = params.view?.assetSlug ?? preferredImage.preferredImageSlug ?? identityMetadata?.assetSlug ?? null;
+  const imageFallbackKey = params.view?.imageFallbackKey ?? buildImageFallbackKey({
+    exchange: params.exchange,
+    symbol: params.symbol,
+    rawSymbol: params.rawSymbol ?? null,
+    marketId: params.marketId ?? null,
+    canonicalAssetKey: params.canonicalAssetKey ?? null,
+    assetSlug,
+    coingeckoId: params.view?.coingeckoId ?? preferredImage.preferredImageCoingeckoId ?? null,
+  });
+  const imageAvailability = params.assetImageUrl
+    ? params.view?.fallbackHit ? 'fallback' as const : 'available' as const
+    : params.view?.imageAvailability ?? (params.canonicalAssetKey ? 'pending' as const : 'unavailable' as const);
+  const promotablePreferredImage = hasPromotablePreferredImage(preferredImage);
+  const imageMissingReason = params.assetImageUrl
+    ? null
+    : !params.canonicalAssetKey
+      ? 'unsupported_asset'
+      : params.view?.failureReason === 'alias_not_found'
+        ? promotablePreferredImage
+          ? 'curated_slug_resolved_but_source_merge_failed'
+          : preferredImage.imageMissingReason ?? 'alias_miss'
+        : params.view?.failureReason === 'coingecko_fetch_failed'
+          ? promotablePreferredImage
+            ? 'curated_slug_resolved_but_cache_stale'
+            : 'upstream_fetch_failed'
+          : params.view?.failureReason === 'image_url_empty' || params.view?.failureReason === 'no_image_url' || params.view?.fallbackType === 'default_placeholder' || params.view?.source === 'placeholder'
+            ? promotablePreferredImage
+              ? 'curated_slug_resolved_but_metadata_missing'
+              : 'source_metadata_absent'
+            : params.view?.fallbackType === 'stale_cache' || params.view?.source === 'stale_cache'
+              ? promotablePreferredImage
+                ? 'curated_slug_resolved_but_cache_stale'
+                : 'metadata_pending'
+            : imageAvailability === 'pending'
+              ? promotablePreferredImage
+                ? 'curated_slug_resolved_but_cache_stale'
+                : preferredImage.imageMissingReason ?? 'metadata_pending'
+              : 'no_image_url';
   return {
-    imageUrl: assetImageUrl,
-    imageURL: assetImageUrl,
-    hasImage: Boolean(assetImageUrl),
+    imageUrl: params.assetImageUrl,
+    imageURL: params.assetImageUrl,
+    hasImage: Boolean(params.assetImageUrl),
     imageAvailability,
-    imageFailureReason: view?.failureReason ?? null,
-    fallbackType: view?.fallbackType ?? null,
-    assetType: view?.assetType ?? null,
-    canonicalName: view?.canonicalName ?? null,
-    fallbackColor: view?.fallbackColor ?? null,
-    fallbackInitials: view?.fallbackInitials ?? null,
+    imageFailureReason: params.view?.failureReason ?? imageMissingReason,
+    imageMissingReason,
+    fallbackType: params.view?.fallbackType ?? null,
+    assetType: params.view?.assetType ?? identityMetadata?.assetType ?? null,
+    canonicalName: params.view?.canonicalName ?? identityMetadata?.canonicalName ?? null,
+    fallbackColor: params.view?.fallbackColor ?? identityMetadata?.fallbackColor ?? null,
+    fallbackInitials: params.view?.fallbackInitials ?? identityMetadata?.fallbackInitials ?? null,
+    assetSlug,
+    imageFallbackKey,
+    fallbackKey: imageFallbackKey,
+    stableImageKey: imageFallbackKey,
+    imageLookupKey: imageFallbackKey,
+    preferredImageSymbol: params.view?.preferredImageSymbol ?? preferredImage.preferredImageSymbol ?? null,
+    preferredImageSlug: params.view?.preferredImageSlug ?? preferredImage.preferredImageSlug ?? assetSlug ?? null,
+    imageResolutionSource: params.assetImageUrl
+      ? (params.view?.source === 'curated' || params.view?.source === 'coingecko' ? 'direct_slug' : 'alias_map')
+      : promotablePreferredImage
+        ? preferredImage.resolutionSource.startsWith('registry')
+          ? 'registry_identity'
+          : preferredImage.resolutionSource.includes('override')
+            ? 'alias_map'
+            : 'direct_slug'
+      : preferredImage.fallbackOnly
+        ? 'fallback_only'
+        : preferredImage.resolutionSource.startsWith('registry')
+          ? 'registry_identity'
+          : preferredImage.resolutionSource,
+    resolutionStage: params.assetImageUrl
+      ? 'projection_applied'
+      : preferredImage.fallbackOnly
+        ? 'fallback_only'
+        : promotablePreferredImage
+          ? 'preferred_image_resolved'
+          : 'canonical_resolved',
+    manualCurationRecommended: params.view?.manualCurationRecommended ?? preferredImage.manualCurationRecommended,
+    fallbackOnly: preferredImage.fallbackOnly,
   };
 }
 
 async function getAssetViewsForProjection(
   lookups: AssetMetadataLookup[],
   context: string,
+  options?: { eager?: boolean },
 ): Promise<Map<string, AssetMetadataView>> {
   const service = assetMetadataService as typeof assetMetadataService & {
+    getAssetViewsEager?: (
+      lookups: AssetMetadataLookup[],
+    ) => Promise<Map<string, AssetMetadataView>>;
     getAssetViewsSafely?: (
       lookups: AssetMetadataLookup[],
       context: string,
     ) => Promise<Map<string, AssetMetadataView>>;
   };
+
+  if (options?.eager && typeof service.getAssetViewsEager === 'function') {
+    try {
+      return await service.getAssetViewsEager(lookups);
+    } catch (error) {
+      logger.warn(
+        {
+          domain: 'asset-image',
+          action: 'asset_view_lookup_failed',
+          context,
+          eager: true,
+          err: error,
+        },
+        `[AssetImageDebug] action=asset_view_lookup_failed context=${context} eager=true`,
+      );
+      return new Map<string, AssetMetadataView>();
+    }
+  }
 
   if (typeof service.getAssetViewsSafely === 'function') {
     return service.getAssetViewsSafely(lookups, context);
@@ -124,6 +239,22 @@ async function getAssetViewsForProjection(
     );
     return new Map<string, AssetMetadataView>();
   }
+}
+
+function buildImageDebugPayload(params: {
+  canonicalSymbol: string;
+  assetSlug?: string | null;
+  preferredImageSlug?: string | null;
+  imageResolutionSource?: string | null;
+  imageMissingReason?: string | null;
+}) {
+  return {
+    canonicalSymbol: params.canonicalSymbol,
+    assetSlug: params.assetSlug ?? null,
+    preferredImageSlug: params.preferredImageSlug ?? null,
+    imageResolutionSource: params.imageResolutionSource ?? null,
+    imageMissingReason: params.imageMissingReason ?? null,
+  };
 }
 
 function mapRestTicker(exchange: string, ticker: {
@@ -183,18 +314,19 @@ function mapRestTicker(exchange: string, ticker: {
 export async function getPublicTickers(params: {
   exchange?: string;
   symbol?: string;
+  debug?: boolean;
 }): Promise<NormalizedMarketTicker[]> {
   const symbol = params.symbol ? toUnifiedSymbol(params.symbol) : undefined;
   const cached = publicMarketDataStore.getTickers(params.exchange, symbol);
   if (cached.length > 0) {
-    return decoratePublicTickers(cached);
+    return decoratePublicTickers(cached, { debug: params.debug });
   }
 
   if (params.exchange) {
     const adapter = getAdapter(params.exchange);
     if (!adapter) return [];
     const tickers = await adapter.fetchTickers(symbol ? [symbol] : COINS.map((coin) => coin.symbol));
-    return decoratePublicTickers(tickers.map((ticker) => mapRestTicker(params.exchange!, ticker)));
+    return decoratePublicTickers(tickers.map((ticker) => mapRestTicker(params.exchange!, ticker)), { debug: params.debug });
   }
 
   const results = await Promise.all(
@@ -211,10 +343,10 @@ export async function getPublicTickers(params: {
     }),
   );
 
-  return decoratePublicTickers(results.flat());
+  return decoratePublicTickers(results.flat(), { debug: params.debug });
 }
 
-async function decoratePublicTickers(tickers: NormalizedMarketTicker[]) {
+async function decoratePublicTickers(tickers: NormalizedMarketTicker[], options?: { debug?: boolean }) {
   if (tickers.length === 0) {
     return tickers;
   }
@@ -223,15 +355,25 @@ async function decoratePublicTickers(tickers: NormalizedMarketTicker[]) {
     symbol: ticker.symbol,
     exchangeSymbol: ticker.rawSymbol,
     exchange: ticker.exchange as ExchangeId,
-    displayName: COIN_MAP.get(ticker.symbol)?.nameKo ?? COIN_MAP.get(ticker.symbol)?.nameEn ?? ticker.symbol,
+    displayName: COIN_MAP.get(ticker.symbol)?.nameEn ?? COIN_MAP.get(ticker.symbol)?.nameKo ?? ticker.symbol,
     canonicalAssetKey: ticker.canonicalAssetKey ?? ticker.symbol,
-  })), '/api/v1/public/tickers');
+  })), '/api/v1/public/tickers', {
+    eager: options?.debug,
+  });
 
   return tickers.map((ticker) => {
     const view = views.get(ticker.canonicalAssetKey ?? ticker.symbol);
-    const canonicalAssetKey = view?.canonicalAssetKey ?? ticker.canonicalAssetKey ?? ticker.symbol;
+    const canonicalAssetKey = view?.canonicalAssetKey ?? ticker.canonicalAssetKey ?? null;
     const assetImageUrl = toUsableAssetImageUrl(view, ticker.assetImageUrl ?? ticker.iconUrl ?? null);
-    const imageFields = buildAssetImageFields(view, assetImageUrl, canonicalAssetKey);
+    const imageFields = buildAssetImageFields({
+      view,
+      assetImageUrl,
+      exchange: ticker.exchange as ExchangeId,
+      symbol: ticker.symbol,
+      rawSymbol: ticker.rawSymbol,
+      marketId: ticker.marketId ?? ticker.rawSymbol,
+      canonicalAssetKey,
+    });
     const metadata = buildCanonicalMarketMetadata({
       exchange: ticker.exchange as ExchangeId,
       symbol: ticker.canonicalSymbol ?? ticker.symbol,
@@ -257,6 +399,17 @@ async function decoratePublicTickers(tickers: NormalizedMarketTicker[]) {
       iconUrl: assetImageUrl ?? ticker.iconUrl ?? metadata.iconUrl,
       assetImageUrl,
       ...imageFields,
+      ...(options?.debug
+        ? {
+          imageDebug: buildImageDebugPayload({
+            canonicalSymbol: ticker.canonicalSymbol ?? metadata.canonicalSymbol,
+            assetSlug: imageFields.assetSlug,
+            preferredImageSlug: imageFields.preferredImageSlug,
+            imageResolutionSource: imageFields.imageResolutionSource,
+            imageMissingReason: imageFields.imageMissingReason,
+          }),
+        }
+        : {}),
     };
     logAssetImageProjection({
       route: '/api/v1/public/tickers',
@@ -394,7 +547,7 @@ export async function getPublicCandlesWithMeta(
   };
 }
 
-export async function getPublicKimchiPremium(symbols: string[], options?: { venues?: DomesticExchangeId[] }) {
+export async function getPublicKimchiPremium(symbols: string[], options?: { venues?: DomesticExchangeId[]; debug?: boolean }) {
   const results = await getCanonicalKimchiPremium(symbols.map((symbol) => toUnifiedSymbol(symbol)), options);
   const rows = results.map((item) => ({
     symbol: item.symbol,
@@ -453,19 +606,37 @@ export async function getPublicKimchiPremium(symbols: string[], options?: { venu
     symbol: row.symbol,
     displayName: row.nameKo ?? row.nameEn ?? row.symbol,
     canonicalAssetKey: row.canonicalAssetKey,
-  })), '/api/v1/public/kimchi-premium');
+  })), '/api/v1/public/kimchi-premium', {
+    eager: options?.debug,
+  });
 
   return rows.map((row) => {
     const view = views.get(row.canonicalAssetKey ?? row.symbol);
-    const canonicalAssetKey = view?.canonicalAssetKey ?? row.canonicalAssetKey ?? row.symbol;
+    const canonicalAssetKey = view?.canonicalAssetKey ?? row.canonicalAssetKey ?? null;
     const assetImageUrl = toUsableAssetImageUrl(view, row.assetImageUrl ?? null);
-    const imageFields = buildAssetImageFields(view, assetImageUrl, canonicalAssetKey);
+    const imageFields = buildAssetImageFields({
+      view,
+      assetImageUrl,
+      symbol: row.symbol,
+      canonicalAssetKey,
+    });
     const projected = {
       ...row,
       canonicalAssetKey,
       iconUrl: assetImageUrl,
       assetImageUrl,
       ...imageFields,
+      ...(options?.debug
+        ? {
+          imageDebug: buildImageDebugPayload({
+            canonicalSymbol: row.symbol,
+            assetSlug: imageFields.assetSlug,
+            preferredImageSlug: imageFields.preferredImageSlug,
+            imageResolutionSource: imageFields.imageResolutionSource,
+            imageMissingReason: imageFields.imageMissingReason,
+          }),
+        }
+        : {}),
     };
     logAssetImageProjection({
       route: '/api/v1/public/kimchi-premium',

@@ -170,9 +170,7 @@ export class KorbitAdapter implements ExchangeAdapter {
     const pair = toKorbitSymbol(symbol);
     const intervalMap: Record<string, string> = {
       '1m': '1',
-      '3m': '3',
       '5m': '5',
-      '10m': '10',
       '15m': '15',
       '30m': '30',
       '1h': '60',

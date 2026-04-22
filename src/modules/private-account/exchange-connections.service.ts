@@ -4,14 +4,19 @@ import { EXCHANGE_MAP } from '../../config/constants';
 import { AppError } from '../../utils/errors';
 import { logger } from '../../utils/logger';
 import {
+  createFingerprint,
   decryptSecret,
   encryptSecret,
-  maskSecret,
+  maskAccessKey,
 } from './exchange-connections.crypto';
 import {
   serializeExchangeConnectionDeleteResponse,
   serializeExchangeConnectionDto,
   serializeExchangeConnectionTestResult,
+  type ExchangeConnectionAppCode,
+  type ExchangeConnectionPermission,
+  type ExchangeConnectionPurpose,
+  type ExchangeConnectionStatus,
   type CreateExchangeConnectionRequest,
   type ExchangeConnectionTestCode,
   type ExchangeConnectionTestResult,
@@ -31,9 +36,11 @@ import {
 import {
   getExchangeCapabilitySummary,
   getExchangeCredentialFields,
+  getExchangePermissionGuides,
 } from '../../domains/exchange-metadata/exchange-metadata.service';
 
 type ExchangeConnectionRecord = Awaited<ReturnType<typeof prisma.exchangeConnection.findFirst>>;
+const inFlightExchangeConnectionReads = new Map<string, Promise<unknown>>();
 
 function assertSupportedExchange(exchange: string): ExchangeId {
   const exchangeInfo = EXCHANGE_MAP.get(exchange);
@@ -69,16 +76,211 @@ async function findConnectionByIdentifier(userId: string, identifier: string) {
   });
 }
 
-function toOperationalStatus(validation: ExchangeConnectionValidationResult) {
-  return validation.status === 'verified'
-    ? 'active'
-    : validation.status === 'invalid'
-      ? 'invalid'
-      : 'pending';
+function withSingleFlight<T>(key: string, operation: () => Promise<T>) {
+  const existing = inFlightExchangeConnectionReads.get(key);
+  if (existing) {
+    logger.debug({ domain: 'exchange-connection', event: 'singleflight_join', key }, 'Joined in-flight exchange connection request');
+    return existing as Promise<T>;
+  }
+
+  const promise = operation().finally(() => {
+    inFlightExchangeConnectionReads.delete(key);
+  });
+  inFlightExchangeConnectionReads.set(key, promise);
+  return promise;
 }
 
-function toVerificationDetails(details: Record<string, unknown> | undefined) {
-  return sanitizeSensitiveDetails(details) as Prisma.InputJsonValue | undefined;
+function toConnectionPurpose(permission: ExchangeConnectionPermission): ExchangeConnectionPurpose {
+  return permission === 'trade_enabled' ? 'trading' : 'read_only';
+}
+
+function toPermissionFromPurpose(purpose: string | null | undefined): ExchangeConnectionPermission | null {
+  if (purpose === 'trading') return 'trade_enabled';
+  if (purpose === 'read_only') return 'read_only';
+  return null;
+}
+
+function readRequestedPermission(
+  details: Record<string, unknown> | null | undefined,
+  connectionPurpose?: string | null,
+): ExchangeConnectionPermission {
+  const purposePermission = toPermissionFromPurpose(connectionPurpose);
+  if (purposePermission) return purposePermission;
+  return details?.requestedPermission === 'trade_enabled' ? 'trade_enabled' : 'read_only';
+}
+
+function toPermissionScope(permission: ExchangeConnectionPermission) {
+  return permission === 'trade_enabled' ? ['read', 'trade'] : ['read'];
+}
+
+function readPermissionScope(value: Prisma.JsonValue | null | undefined, permission: ExchangeConnectionPermission) {
+  if (Array.isArray(value)) {
+    const scope = value.filter((item): item is string => typeof item === 'string');
+    if (scope.length > 0) {
+      return scope;
+    }
+  }
+
+  return toPermissionScope(permission);
+}
+
+function toClientFacingValidationCode(
+  code: ExchangeConnectionTestCode,
+  permission: ExchangeConnectionPermission,
+  details?: Record<string, unknown>,
+): ExchangeConnectionAppCode {
+  const rawMessage = String(details?.rawMessage ?? '').toLowerCase();
+
+  switch (code) {
+    case 'verified':
+      return 'CONNECTION_VERIFIED';
+    case 'invalid_credentials':
+      if (/secret|signature/i.test(rawMessage)) {
+        return 'INVALID_SECRET';
+      }
+      if (/api|access|token/i.test(rawMessage)) {
+        return 'INVALID_API_KEY';
+      }
+      return 'INVALID_CREDENTIALS';
+    case 'insufficient_permissions':
+      return permission === 'trade_enabled' ? 'INSUFFICIENT_SCOPE' : 'INSUFFICIENT_PERMISSION_READONLY_REQUIRED';
+    case 'ip_not_whitelisted':
+      return 'IP_NOT_ALLOWED';
+    case 'signature_error':
+      return 'SIGNATURE_INVALID';
+    case 'timeout':
+      return 'UPSTREAM_TIMEOUT';
+    case 'exchange_unavailable':
+    case 'rate_limited':
+      return 'EXCHANGE_UNAVAILABLE';
+    case 'unsupported_exchange':
+    case 'unknown_error':
+    default:
+      return 'CONNECTION_VERIFICATION_FAILED';
+  }
+}
+
+function toClientConnectionStatus(params: {
+  validationStatus: ExchangeConnectionValidationResult['status'];
+  canUsePrivateApi: boolean;
+  connectionStatus: string;
+  code: ExchangeConnectionTestCode;
+}) {
+  if (params.canUsePrivateApi) {
+    return 'connected' as const;
+  }
+  if (
+    params.validationStatus === 'placeholder'
+    || params.connectionStatus === 'pending'
+    || params.connectionStatus === 'pending_verification'
+  ) {
+    return 'validating' as const;
+  }
+  if (
+    params.code === 'exchange_unavailable'
+    || params.code === 'timeout'
+    || params.connectionStatus === 'degraded'
+    || params.connectionStatus === 'temporarily_unreachable'
+  ) {
+    return 'maintenance' as const;
+  }
+  if (
+    params.validationStatus === 'invalid'
+    || [
+      'invalid',
+      'verification_failed',
+      'invalid_credentials',
+      'insufficient_scope',
+      'ip_not_allowed',
+      'revoked',
+      'reauth_required',
+    ].includes(params.connectionStatus)
+  ) {
+    return 'failed' as const;
+  }
+  return 'unknown' as const;
+}
+
+function toOperationalStatus(validation: ExchangeConnectionValidationResult): ExchangeConnectionStatus {
+  if (validation.status === 'verified') {
+    return 'active';
+  }
+
+  if (validation.status === 'placeholder') {
+    return 'pending_verification';
+  }
+
+  switch (validation.code) {
+    case 'invalid_credentials':
+    case 'signature_error':
+      return 'invalid_credentials';
+    case 'insufficient_permissions':
+      return 'insufficient_scope';
+    case 'ip_not_whitelisted':
+      return 'ip_not_allowed';
+    case 'timeout':
+    case 'rate_limited':
+    case 'exchange_unavailable':
+      return 'temporarily_unreachable';
+    case 'unsupported_exchange':
+    case 'unknown_error':
+    case 'verified':
+    default:
+      return 'verification_failed';
+  }
+}
+
+function toRuntimeFailureStatus(failureCode: string | null | undefined): ExchangeConnectionStatus {
+  switch (failureCode) {
+    case 'invalid_credentials':
+    case 'signature_error':
+      return 'reauth_required';
+    case 'insufficient_permissions':
+      return 'insufficient_scope';
+    case 'ip_not_whitelisted':
+      return 'ip_not_allowed';
+    case 'timeout':
+    case 'rate_limited':
+    case 'exchange_unavailable':
+      return 'temporarily_unreachable';
+    default:
+      return 'verification_failed';
+  }
+}
+
+function normalizeFailureCode(failureCode: string | null | undefined): ExchangeConnectionTestCode {
+  switch (failureCode) {
+    case 'invalid_credentials':
+    case 'insufficient_permissions':
+    case 'ip_not_whitelisted':
+    case 'signature_error':
+    case 'timeout':
+    case 'rate_limited':
+    case 'exchange_unavailable':
+    case 'unsupported_exchange':
+      return failureCode;
+    case 'INSUFFICIENT_SCOPE':
+      return 'insufficient_permissions';
+    case 'IP_NOT_ALLOWED':
+      return 'ip_not_whitelisted';
+    case 'EXCHANGE_UNAVAILABLE':
+      return 'exchange_unavailable';
+    default:
+      return 'unknown_error';
+  }
+}
+
+function toVerificationDetails(
+  details: Record<string, unknown> | undefined,
+  permission: ExchangeConnectionPermission,
+) {
+  return sanitizeSensitiveDetails({
+    ...(details ?? {}),
+    requestedPermission: permission,
+    connectionPurpose: toConnectionPurpose(permission),
+    permissionScope: toPermissionScope(permission),
+    withdrawPermissionAllowed: false,
+  }) as Prisma.InputJsonValue | undefined;
 }
 
 function toLastErrorCode(validation: ExchangeConnectionValidationResult): ExchangeConnectionTestCode | null {
@@ -89,13 +291,19 @@ function toLastErrorSummary(validation: ExchangeConnectionValidationResult) {
   return validation.canUsePrivateApi ? null : sanitizeSensitiveText(validation.message);
 }
 
-function toTestResult(exchange: ExchangeId, validation: ExchangeConnectionValidationResult): ExchangeConnectionTestResult {
+function toTestResult(
+  exchange: ExchangeId,
+  validation: ExchangeConnectionValidationResult,
+  permission: ExchangeConnectionPermission,
+): ExchangeConnectionTestResult {
   return serializeExchangeConnectionTestResult({
     exchange,
     success: validation.canUsePrivateApi,
     status: validation.status,
     mode: validation.mode,
     code: validation.code,
+    appCode: toClientFacingValidationCode(validation.code, permission, validation.details),
+    permission,
     message: sanitizeSensitiveText(validation.message) ?? validation.message,
     details: sanitizeSensitiveDetails(validation.details),
     checkedAt: validation.checkedAt,
@@ -107,6 +315,7 @@ async function createVerificationHistory(params: {
   exchangeConnectionId?: string | null;
   userId: string;
   exchange: ExchangeId;
+  permission: ExchangeConnectionPermission;
   validation: ExchangeConnectionValidationResult;
 }) {
   const client = params.tx ?? prisma;
@@ -118,7 +327,7 @@ async function createVerificationHistory(params: {
       status: params.validation.status,
       code: params.validation.code,
       message: sanitizeSensitiveText(params.validation.message) ?? params.validation.message,
-      details: toVerificationDetails(params.validation.details),
+      details: toVerificationDetails(params.validation.details, params.permission),
       checkedAt: new Date(params.validation.checkedAt),
     },
   });
@@ -135,11 +344,16 @@ function ensureConnectionRecord(connection: ExchangeConnectionRecord) {
 function mapConnection(connection: NonNullable<ExchangeConnectionRecord>) {
   const exchange = assertSupportedExchange(connection.exchange);
   const exchangeInfo = EXCHANGE_MAP.get(exchange);
-  const apiKey = decryptSecret(connection.apiKeyEncrypted);
-  const secretKey = decryptSecret(connection.secretKeyEncrypted);
-  const passphrase = connection.passphraseEncrypted
-    ? decryptSecret(connection.passphraseEncrypted)
-    : null;
+  const permission = readRequestedPermission(
+    connection.validationDetails && typeof connection.validationDetails === 'object'
+      ? (connection.validationDetails as Record<string, unknown>)
+      : undefined,
+    connection.connectionPurpose,
+  );
+  const connectionPurpose = toConnectionPurpose(permission);
+  const permissionScope = readPermissionScope(connection.permissionScope, permission);
+  const apiKeyMasked = connection.apiKeyMasked || '********';
+  const credentialStatus = connection.connectionStatus as ExchangeConnectionStatus;
   const testResult = toTestResult(exchange, {
     status: connection.validationStatus as ExchangeConnectionValidationResult['status'],
     mode: connection.validationMode as ExchangeConnectionValidationResult['mode'],
@@ -153,30 +367,51 @@ function mapConnection(connection: NonNullable<ExchangeConnectionRecord>) {
         ? sanitizeSensitiveDetails(connection.validationDetails as Record<string, unknown>)
         : undefined,
     checkedAt: (connection.lastValidatedAt ?? connection.updatedAt).toISOString(),
+  }, permission);
+  const status = toClientConnectionStatus({
+    validationStatus: testResult.status,
+    canUsePrivateApi: connection.canUsePrivateApi,
+    connectionStatus: connection.connectionStatus,
+    code: testResult.code,
   });
 
   return serializeExchangeConnectionDto({
     id: connection.id,
     exchange,
     exchangeName: exchangeInfo?.name ?? connection.exchange,
+    permission,
+    connectionPurpose,
+    permissionScope,
+    credentialStatus,
+    nickname: connection.label,
+    status,
+    statusMessage: sanitizeSensitiveText(connection.validationMessage)
+      ?? sanitizeSensitiveText(connection.lastErrorSummary)
+      ?? null,
+    maskedCredentialSummary: apiKeyMasked,
+    lastValidatedAt: connection.lastValidatedAt?.toISOString() ?? null,
+    validationStatus: testResult.status,
+    appValidationCode: testResult.appCode,
     label: connection.label,
-    apiKeyMasked: maskSecret(apiKey),
-    hasSecretKey: Boolean(secretKey),
-    hasPassphrase: Boolean(passphrase),
+    apiKeyMasked,
+    hasSecretKey: Boolean(connection.secretKeyEncrypted),
+    hasPassphrase: Boolean(connection.passphraseEncrypted),
     credentialFields: getExchangeCredentialFields(exchange),
+    permissionGuides: getExchangePermissionGuides(exchange),
     capabilities: getExchangeCapabilitySummary(exchange),
     validation: {
       status: testResult.status,
       mode: testResult.mode,
       canUsePrivateApi: connection.canUsePrivateApi,
       code: testResult.code,
+      appCode: testResult.appCode,
       message: testResult.message,
       details: testResult.details,
       checkedAt: testResult.checkedAt,
     },
     lastTestResult: testResult,
     operational: {
-      connectionStatus: connection.connectionStatus as 'pending' | 'active' | 'degraded' | 'invalid',
+      connectionStatus: credentialStatus,
       lastSyncAt: connection.lastSyncAt?.toISOString() ?? null,
       lastErrorCode: (connection.lastErrorCode as ExchangeConnectionTestCode | null) ?? null,
       lastErrorSummary: sanitizeSensitiveText(connection.lastErrorSummary) ?? null,
@@ -188,15 +423,20 @@ function mapConnection(connection: NonNullable<ExchangeConnectionRecord>) {
   });
 }
 
-function buildConnectionUpdate(validation: ExchangeConnectionValidationResult) {
+function buildConnectionUpdate(
+  validation: ExchangeConnectionValidationResult,
+  permission: ExchangeConnectionPermission,
+) {
   return {
     validationStatus: validation.status,
     validationMode: validation.mode,
     validationCode: validation.code,
     validationMessage: sanitizeSensitiveText(validation.message) ?? validation.message,
-    validationDetails: toVerificationDetails(validation.details),
+    validationDetails: toVerificationDetails(validation.details, permission),
     canUsePrivateApi: validation.canUsePrivateApi,
     connectionStatus: toOperationalStatus(validation),
+    connectionPurpose: toConnectionPurpose(permission),
+    permissionScope: toPermissionScope(permission),
     lastValidatedAt: new Date(validation.checkedAt),
     isTestConnectionResult: validation.canUsePrivateApi,
     lastErrorCode: toLastErrorCode(validation),
@@ -209,11 +449,13 @@ function mergeCredentials(
   exchange: ExchangeId,
   existing: NonNullable<ExchangeConnectionRecord>,
   input: UpdateExchangeConnectionRequest,
+  permission: ExchangeConnectionPermission,
 ): ExchangeConnectionCredentials {
   return {
     exchange,
     apiKey: input.apiKey ?? decryptSecret(existing.apiKeyEncrypted),
     secretKey: input.secretKey ?? decryptSecret(existing.secretKeyEncrypted),
+    permission,
     passphrase:
       input.passphrase !== undefined
         ? input.passphrase
@@ -247,15 +489,17 @@ export async function testExchangeConnection(
     apiKey: input.apiKey,
     secretKey: input.secretKey,
     passphrase: input.passphrase ?? null,
+    permission: input.permission,
   });
 
   await createVerificationHistory({
     userId,
     exchange,
+    permission: input.permission,
     validation,
   });
 
-  return toTestResult(exchange, validation);
+  return toTestResult(exchange, validation, input.permission);
 }
 
 export async function createExchangeConnection(userId: string, input: CreateExchangeConnectionRequest) {
@@ -278,6 +522,7 @@ export async function createExchangeConnection(userId: string, input: CreateExch
     apiKey: input.apiKey,
     secretKey: input.secretKey,
     passphrase: input.passphrase ?? null,
+    permission: input.permission,
   });
 
   logger.info(
@@ -294,7 +539,9 @@ export async function createExchangeConnection(userId: string, input: CreateExch
         apiKeyEncrypted: encryptSecret(input.apiKey),
         secretKeyEncrypted: encryptSecret(input.secretKey),
         passphraseEncrypted: input.passphrase ? encryptSecret(input.passphrase) : null,
-        ...buildConnectionUpdate(validation),
+        apiKeyMasked: maskAccessKey(input.apiKey),
+        apiKeyFingerprint: createFingerprint(input.apiKey),
+        ...buildConnectionUpdate(validation, input.permission),
       },
     });
 
@@ -303,6 +550,7 @@ export async function createExchangeConnection(userId: string, input: CreateExch
       exchangeConnectionId: created.id,
       userId,
       exchange,
+      permission: input.permission,
       validation,
     });
 
@@ -319,7 +567,27 @@ export async function updateExchangeConnection(
 ) {
   const existing = ensureConnectionRecord(await findConnectionByIdentifier(userId, identifier));
   const exchange = assertSupportedExchange(existing.exchange);
-  const mergedCredentials = mergeCredentials(exchange, existing, input);
+  const existingPermission = readRequestedPermission(
+    existing.validationDetails && typeof existing.validationDetails === 'object'
+      ? (existing.validationDetails as Record<string, unknown>)
+      : undefined,
+    existing.connectionPurpose,
+  );
+  const permission = input.permission ?? existingPermission;
+  const credentialsChanged = input.apiKey !== undefined || input.secretKey !== undefined || input.passphrase !== undefined;
+  const permissionChanged = input.permission !== undefined && input.permission !== existingPermission;
+
+  if (!credentialsChanged && !permissionChanged) {
+    const updated = await prisma.exchangeConnection.update({
+      where: { id: existing.id },
+      data: {
+        label: input.label !== undefined ? input.label : existing.label,
+      },
+    });
+    return mapConnection(updated);
+  }
+
+  const mergedCredentials = mergeCredentials(exchange, existing, input, permission);
   const validation = await validateConnection(mergedCredentials);
 
   logger.info(
@@ -334,6 +602,10 @@ export async function updateExchangeConnection(
         label: input.label !== undefined ? input.label : existing.label,
         apiKeyEncrypted:
           input.apiKey !== undefined ? encryptSecret(input.apiKey) : existing.apiKeyEncrypted,
+        apiKeyMasked:
+          input.apiKey !== undefined ? maskAccessKey(input.apiKey) : existing.apiKeyMasked,
+        apiKeyFingerprint:
+          input.apiKey !== undefined ? createFingerprint(input.apiKey) : existing.apiKeyFingerprint,
         secretKeyEncrypted:
           input.secretKey !== undefined ? encryptSecret(input.secretKey) : existing.secretKeyEncrypted,
         passphraseEncrypted:
@@ -342,7 +614,7 @@ export async function updateExchangeConnection(
               ? encryptSecret(input.passphrase)
               : null
             : existing.passphraseEncrypted,
-        ...buildConnectionUpdate(validation),
+        ...buildConnectionUpdate(validation, permission),
       },
     });
 
@@ -351,6 +623,7 @@ export async function updateExchangeConnection(
       exchangeConnectionId: updated.id,
       userId,
       exchange,
+      permission,
       validation,
     });
 
@@ -382,17 +655,30 @@ export async function removeExchangeConnection(userId: string, identifier: strin
 export async function validateStoredExchangeConnection(userId: string, identifier: string) {
   const existing = ensureConnectionRecord(await findConnectionByIdentifier(userId, identifier));
   const exchange = assertSupportedExchange(existing.exchange);
+  const permission = readRequestedPermission(
+    existing.validationDetails && typeof existing.validationDetails === 'object'
+      ? (existing.validationDetails as Record<string, unknown>)
+      : undefined,
+    existing.connectionPurpose,
+  );
+  const apiKey = decryptSecret(existing.apiKeyEncrypted);
+  const secretKey = decryptSecret(existing.secretKeyEncrypted);
   const validation = await validateConnection({
     exchange,
-    apiKey: decryptSecret(existing.apiKeyEncrypted),
-    secretKey: decryptSecret(existing.secretKeyEncrypted),
+    apiKey,
+    secretKey,
     passphrase: existing.passphraseEncrypted ? decryptSecret(existing.passphraseEncrypted) : null,
+    permission,
   });
 
   const updated = await prisma.$transaction(async (tx) => {
     const connection = await tx.exchangeConnection.update({
       where: { id: existing.id },
-      data: buildConnectionUpdate(validation),
+      data: {
+        apiKeyMasked: maskAccessKey(apiKey),
+        apiKeyFingerprint: createFingerprint(apiKey),
+        ...buildConnectionUpdate(validation, permission),
+      },
     });
 
     await createVerificationHistory({
@@ -400,6 +686,7 @@ export async function validateStoredExchangeConnection(userId: string, identifie
       exchangeConnectionId: connection.id,
       userId,
       exchange,
+      permission,
       validation,
     });
 
@@ -415,21 +702,27 @@ export async function markExchangeConnectionSync(
   params: { success: boolean; failureCode?: string | null; failureReason?: string | null },
 ) {
   try {
-    await prisma.exchangeConnection.update({
+    const failureCode = normalizeFailureCode(params.failureCode);
+    const result = await prisma.exchangeConnection.updateMany({
       where: {
-        userId_exchange: {
-          userId,
-          exchange,
-        },
+        userId,
+        exchange,
       },
       data: {
-        connectionStatus: params.success ? 'active' : 'degraded',
+        connectionStatus: params.success ? 'active' : toRuntimeFailureStatus(failureCode),
         lastSyncAt: params.success ? new Date() : undefined,
-        lastErrorCode: params.success ? null : params.failureCode ?? 'unknown_error',
+        lastErrorCode: params.success ? null : failureCode,
         lastErrorSummary: params.success ? null : sanitizeSensitiveText(params.failureReason) ?? 'Exchange sync failed',
         failureReason: params.success ? null : sanitizeSensitiveText(params.failureReason) ?? 'Exchange sync failed',
       },
     });
+
+    if (result.count === 0) {
+      logger.debug(
+        { domain: 'exchange-connection', userId, exchange, operation: 'mark-sync', event: 'connection-not-found' },
+        'Skipping exchange sync marker update for missing connection',
+      );
+    }
   } catch (error) {
     logger.debug(
       { domain: 'exchange-connection', userId, exchange, operation: 'mark-sync', err: error },

@@ -46,6 +46,7 @@ export interface ExchangeMetadata {
 export interface CanonicalMarket {
   exchange: ExchangeId;
   marketId: string;
+  canonicalMarketId: string;
   rawSymbol: string;
   canonicalSymbol: string;
   baseAsset: string;
@@ -56,6 +57,10 @@ export interface CanonicalMarket {
   iconUrl: string | null;
   isActive: boolean;
   capabilities: CanonicalMarketCapabilities;
+  candlesSupported: boolean;
+  graphSupported: boolean;
+  supportedIntervals: string[];
+  unsupportedReason: string | null;
   symbol: string;
   market: string;
   baseCurrency: string;
@@ -68,11 +73,15 @@ export interface CanonicalMarketCapabilities {
   supportsCandles: boolean;
   supportsOrderBook: boolean;
   supportsTrades: boolean;
+  graphSupported: boolean;
+  supportedIntervals: string[];
+  unsupportedReason: string | null;
 }
 
 export interface CanonicalMarketMetadata {
   exchange: ExchangeId;
   marketId: string;
+  canonicalMarketId: string;
   rawSymbol: string;
   canonicalSymbol: string;
   baseAsset: string;
@@ -83,6 +92,10 @@ export interface CanonicalMarketMetadata {
   iconUrl: string | null;
   isActive: boolean;
   capabilities: CanonicalMarketCapabilities;
+  candlesSupported: boolean;
+  graphSupported: boolean;
+  supportedIntervals: string[];
+  unsupportedReason: string | null;
 }
 
 export interface CanonicalTickerSnapshot extends CanonicalMarket {
@@ -430,6 +443,7 @@ export interface KimchiPremiumEntry {
 export interface MarketSymbolSupportEntry {
   exchange: ExchangeId;
   marketId: string;
+  canonicalMarketId: string;
   rawSymbol: string;
   canonicalSymbol: string;
   baseAsset: string;
@@ -440,7 +454,27 @@ export interface MarketSymbolSupportEntry {
   iconUrl: string | null;
   isActive: boolean;
   capabilities: CanonicalMarketCapabilities;
+  candlesSupported: boolean;
+  graphSupported: boolean;
+  supportedIntervals: string[];
+  unsupportedReason: string | null;
   symbol: string;
+  canonicalAssetKey?: string | null;
+  assetImageUrl?: string | null;
+  imageAvailability?: 'available' | 'fallback' | 'pending' | 'lookup_failed' | 'unavailable';
+  imageFailureReason?: string | null;
+  fallbackType?: string | null;
+  assetType?: string | null;
+  canonicalName?: string | null;
+  fallbackColor?: string | null;
+  fallbackInitials?: string | null;
+  assetSlug?: string | null;
+  imageFallbackKey?: string | null;
+  fallbackKey?: string | null;
+  stableImageKey?: string | null;
+  imageLookupKey?: string | null;
+  imageMissingReason?: string | null;
+  assetSupportStatus?: 'supported' | 'metadata_pending' | 'unsupported';
   exchangeSymbol: string;
   market: string;
   baseCurrency: string;
@@ -463,6 +497,8 @@ export interface ExchangeMarketDescriptor {
   quoteCurrency: QuoteCurrency;
   rawSymbol: string;
   tradable: boolean;
+  koreanName?: string | null;
+  englishName?: string | null;
 }
 
 export type MarketCapabilityChannel = 'tickers' | 'orderbook' | 'trades' | 'candles';

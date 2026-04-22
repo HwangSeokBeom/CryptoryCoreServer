@@ -11,7 +11,11 @@ export type MarketDataErrorBody = {
   target: MarketDataTarget;
   exchange: ExchangeId;
   marketId?: string;
+  canonicalMarketId?: string;
   canonicalSymbol?: string;
+  candlesSupported?: boolean;
+  graphSupported?: boolean;
+  supportedIntervals?: string[];
   message: string;
   userMessage: string;
   retryable: boolean;
@@ -45,6 +49,7 @@ export function buildMarketDataError(params: {
   retryable?: boolean;
   statusCode?: number;
 }) {
+  const normalizedReason = classifyMarketDataReason(params);
   const retryable = params.retryable ?? params.code === 'MARKET_DATA_UNAVAILABLE';
   const targetLabel = params.target === 'candles'
     ? 'candles'
@@ -76,12 +81,64 @@ export function buildMarketDataError(params: {
       target: params.target,
       exchange: params.exchange,
       marketId: params.metadata?.marketId,
+      canonicalMarketId: params.metadata?.canonicalMarketId,
       canonicalSymbol: params.metadata?.canonicalSymbol,
+      candlesSupported: params.metadata?.candlesSupported,
+      graphSupported: params.metadata?.graphSupported,
+      supportedIntervals: params.metadata?.supportedIntervals ?? [],
       message,
       userMessage,
       retryable,
       metadata: params.metadata,
-      reason: params.reason ?? null,
+      reason: normalizedReason,
     },
   );
+}
+
+function classifyMarketDataReason(params: {
+  code: MarketDataErrorCode;
+  target: MarketDataTarget;
+  metadata?: CanonicalMarketMetadata;
+  reason?: string | null;
+}) {
+  const rawReason = params.reason?.trim() ?? '';
+  const normalized = rawReason.toLowerCase();
+
+  if (params.code === 'MARKET_DATA_UNSUPPORTED') {
+    if (params.metadata?.candlesSupported === false) {
+      if (params.metadata.unsupportedReason === 'quote_like_symbol') {
+        return 'synthetic_quote_only';
+      }
+      return params.metadata.unsupportedReason ?? 'provider_not_supported';
+    }
+
+    if (normalized.includes('interval_mapping_not_found') || normalized.includes('invalid interval')) {
+      return 'interval_not_supported';
+    }
+
+    if (
+      normalized.includes('market_data_unsupported')
+      || normalized.includes('invalid symbol')
+      || normalized.includes('not supported')
+    ) {
+      return 'market_not_supported';
+    }
+
+    return rawReason || 'market_not_supported';
+  }
+
+  if (normalized.includes('timeout') || normalized.includes('timed out')) {
+    return 'provider_timeout';
+  }
+  if (normalized.includes('429') || normalized.includes('rate limit') || normalized.includes('too_many_requests')) {
+    return 'provider_rate_limited';
+  }
+  if (normalized.includes('503') || normalized.includes('service unavailable') || normalized.includes('upstream_503')) {
+    return 'provider_down';
+  }
+  if (normalized.includes('malformed')) {
+    return 'provider_malformed';
+  }
+
+  return rawReason || 'provider_unavailable';
 }

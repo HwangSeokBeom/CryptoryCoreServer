@@ -48,7 +48,7 @@ export async function privateAccountRoutes(app: FastifyInstance) {
       return reply.status(201).send(createSuccessResponse(connection));
     } catch (err) {
       if (err instanceof AppError) {
-        return reply.status(err.statusCode).send(createErrorResponse(err.message));
+        return reply.status(err.statusCode).send(createErrorResponse(err.message, err.details, err.code));
       }
       throw err;
     }
@@ -61,7 +61,7 @@ export async function privateAccountRoutes(app: FastifyInstance) {
       return createSuccessResponse(connection);
     } catch (err) {
       if (err instanceof AppError) {
-        return reply.status(err.statusCode).send(createErrorResponse(err.message));
+        return reply.status(err.statusCode).send(createErrorResponse(err.message, err.details, err.code));
       }
       throw err;
     }
@@ -79,7 +79,7 @@ export async function privateAccountRoutes(app: FastifyInstance) {
       return createSuccessResponse(connection);
     } catch (err) {
       if (err instanceof AppError) {
-        return reply.status(err.statusCode).send(createErrorResponse(err.message));
+        return reply.status(err.statusCode).send(createErrorResponse(err.message, err.details, err.code));
       }
       throw err;
     }
@@ -93,7 +93,7 @@ export async function privateAccountRoutes(app: FastifyInstance) {
       return createSuccessResponse(removed);
     } catch (err) {
       if (err instanceof AppError) {
-        return reply.status(err.statusCode).send(createErrorResponse(err.message));
+        return reply.status(err.statusCode).send(createErrorResponse(err.message, err.details, err.code));
       }
       throw err;
     }

@@ -1,5 +1,6 @@
 import { COIN_MAP } from '../../config/constants';
 import {
+  getAssetRegistryMetadata,
   compactAssetToken,
   isKnownQuoteAssetToken,
   normalizeAssetToken,
@@ -8,6 +9,7 @@ import {
 } from './asset.registry';
 import { EXCHANGE_METADATA } from './exchange.metadata';
 import { resolveIconUrl } from './icon.resolver';
+import { getSupportedCandleIntervals } from './interval.mapper';
 import type { CanonicalMarket, ExchangeId } from './exchange.types';
 
 export type CanonicalAssetResolution = {
@@ -32,10 +34,10 @@ export function toCanonicalSymbol(symbol: string) {
     return '';
   }
 
-  const separatedPairMatch = normalized.match(/^([A-Z0-9]+)[-_/]([A-Z0-9]+)$/i);
+  const separatedPairMatch = normalized.match(/^([^/_-]+)[-_/]([^/_-]+)$/i);
   if (separatedPairMatch) {
-    const left = separatedPairMatch[1];
-    const right = separatedPairMatch[2];
+    const left = compactAssetToken(separatedPairMatch[1]);
+    const right = compactAssetToken(separatedPairMatch[2]);
     if (isFiatOrStableQuoteToken(left) && right) {
       return right;
     }
@@ -156,11 +158,17 @@ export function toCanonicalMarket(exchange: ExchangeId, symbol: string): Canonic
   const canonicalSymbol = toCanonicalSymbol(symbol);
   const quoteCurrency = EXCHANGE_METADATA[exchange].quoteCurrency;
   const coin = COIN_MAP.get(canonicalSymbol);
+  const assetMetadata = getAssetRegistryMetadata(canonicalSymbol, canonicalSymbol);
   const rawSymbol = toExchangeSymbol(exchange, canonicalSymbol);
+  const canonicalMarketId = `${canonicalSymbol}/${quoteCurrency}`;
+  const quoteLikeAsset = assetMetadata.assetType === 'fiat'
+    || assetMetadata.assetType === 'stablecoin';
+  const graphSupported = !quoteLikeAsset && assetMetadata.assetType !== 'synthetic' && assetMetadata.assetType !== 'exchange_only';
 
   return {
     exchange,
     marketId: rawSymbol,
+    canonicalMarketId,
     rawSymbol,
     canonicalSymbol,
     baseAsset: canonicalSymbol,
@@ -174,7 +182,22 @@ export function toCanonicalMarket(exchange: ExchangeId, symbol: string): Canonic
       supportsCandles: true,
       supportsOrderBook: true,
       supportsTrades: true,
+      graphSupported,
+      supportedIntervals: getSupportedCandleIntervals(exchange),
+      unsupportedReason: graphSupported
+        ? null
+        : quoteLikeAsset
+          ? 'quote_like_symbol'
+          : 'synthetic_market',
     },
+    candlesSupported: true,
+    graphSupported,
+    supportedIntervals: getSupportedCandleIntervals(exchange),
+    unsupportedReason: graphSupported
+      ? null
+      : quoteLikeAsset
+        ? 'quote_like_symbol'
+        : 'synthetic_market',
     symbol: canonicalSymbol,
     market: `${canonicalSymbol}/${quoteCurrency}`,
     baseCurrency: canonicalSymbol,

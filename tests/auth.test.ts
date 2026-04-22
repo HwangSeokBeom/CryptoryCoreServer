@@ -36,12 +36,12 @@ describe('Auth API', () => {
     await app.close();
   });
 
-  it('POST /auth/register - creates a session for valid input', async () => {
+  it('POST /api/v1/auth/register - creates a session for valid input', async () => {
     registerUserMock.mockResolvedValueOnce(authUser);
     const app = await buildApp();
     const res = await app.inject({
       method: 'POST',
-      url: '/auth/register',
+      url: '/api/v1/auth/register',
       payload: { email: 'New@Example.com', password: 'password123', nickname: 'tester' },
     });
 
@@ -51,6 +51,22 @@ describe('Auth API', () => {
     expect(body.data.user).toEqual(authUser);
     expect(typeof body.data.token).toBe('string');
     expect(body.data.token.length).toBeGreaterThan(0);
+    await app.close();
+  });
+
+  it('POST /api/v1/auth/register - returns AUTH_REGISTER_FAILED only for unexpected errors', async () => {
+    registerUserMock.mockRejectedValueOnce(new Error('unexpected register failure'));
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/register',
+      payload: { email: 'new@example.com', password: 'password123', nickname: 'tester' },
+    });
+
+    expect(res.statusCode).toBe(500);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(false);
+    expect(body.code).toBe('AUTH_REGISTER_FAILED');
     await app.close();
   });
 

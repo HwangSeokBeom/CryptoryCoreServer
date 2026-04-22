@@ -70,10 +70,14 @@ function toOperationAppError(exchange: ExchangeId, error: unknown, fallbackMessa
   });
 }
 
-async function getTradingContext(userId: string, exchange: ExchangeId) {
+async function getTradingContext(
+  userId: string,
+  exchange: ExchangeId,
+  requiredCapability: 'read' | 'trade' = 'read',
+) {
   const [connection, credentials] = await Promise.all([
     getUserExchangeConnectionRecord(userId, exchange),
-    requireUserOwnedExchangeCredentials(userId, exchange),
+    requireUserOwnedExchangeCredentials(userId, exchange, requiredCapability),
   ]);
 
   logger.debug(
@@ -151,7 +155,7 @@ export async function getOrderChance(userId: string, exchange: ExchangeId, symbo
 
   return executeTradingOperation(userId, exchange, '주문 가능 정보 조회에 실패했습니다.', async () =>
     provider.getOrderChance!(symbol, {
-      ...(await getTradingContext(userId, exchange)),
+      ...(await getTradingContext(userId, exchange, 'trade')),
     }),
   );
 }
@@ -164,7 +168,7 @@ export async function createTradingOrder(userId: string, input: CreateOrderReque
     throw new AppError(501, `${input.exchange} trading create order is unsupported`);
   }
 
-  const context = await getTradingContext(userId, input.exchange);
+  const context = await getTradingContext(userId, input.exchange, 'trade');
 
   try {
     const order = await executeTradingOperation(userId, input.exchange, '주문 생성에 실패했습니다.', async () =>
@@ -216,7 +220,7 @@ export async function cancelTradingOrder(userId: string, exchange: ExchangeId, o
   return executeTradingOperation(userId, exchange, '주문 취소에 실패했습니다.', async () =>
     provider.cancelOrder!(
       { exchange, orderId, symbol },
-      await getTradingContext(userId, exchange),
+      await getTradingContext(userId, exchange, 'trade'),
     ),
   );
 }

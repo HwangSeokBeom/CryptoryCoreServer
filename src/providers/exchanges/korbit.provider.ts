@@ -84,8 +84,10 @@ export class KorbitProvider
       ttlMs: MARKET_CACHE_TTL_MS,
       staleTtlMs: MARKET_STALE_TTL_MS,
       loader: async () => {
-        const response = await this.restClient.request<Record<string, unknown>>('/v1/ticker/detailed/all');
-        return Object.keys(response)
+        const response = await this.restClient.request<{ data?: Array<{ symbol?: string; status?: string }> }>('/v2/currencyPairs');
+        const pairs = Array.isArray(response?.data) ? response.data : [];
+        return pairs
+          .map((item) => String(item.symbol ?? '').toLowerCase())
           .filter((symbol) => symbol.endsWith('_krw'))
           .map<ExchangeMarketDescriptor>((symbol) => {
             const normalizedSymbol = symbol.replace(/_krw$/i, '').toUpperCase();
@@ -97,7 +99,7 @@ export class KorbitProvider
               baseCurrency: normalizedSymbol,
               quoteCurrency: 'KRW',
               rawSymbol: symbol.toLowerCase(),
-              tradable: true,
+              tradable: pairs.find((item) => String(item.symbol ?? '').toLowerCase() === symbol)?.status === 'launched',
             };
           });
       },

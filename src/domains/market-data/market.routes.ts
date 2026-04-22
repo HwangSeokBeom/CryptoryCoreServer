@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { AppError, createErrorResponse, createSuccessResponse } from '../../utils/errors';
 import {
+  getAssetCoverageAudit,
   getBaseMarketSnapshot,
   getCandlesWithMeta,
   getMarketList,
@@ -444,6 +445,36 @@ export async function marketRoutes(app: FastifyInstance) {
 
     try {
       return createSuccessResponse(await listSymbolSupport(parsedExchange));
+    } catch (error) {
+      if (error instanceof AppError) {
+        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
+      }
+      throw error;
+    }
+  });
+
+  app.get('/symbols/audit', async (request, reply) => {
+    const { exchange, refresh } = request.query as {
+      exchange?: string;
+      refresh?: string;
+    };
+
+    const parsedExchange = parseExchange(exchange);
+    if (exchange && !parsedExchange) {
+      return reply.status(400).send(createErrorResponse('unsupported exchange', {
+        code: 'INVALID_REQUEST',
+        field: 'exchange',
+        reason: 'UNSUPPORTED_VALUE',
+        acceptedValues: ['upbit', 'bithumb', 'coinone', 'korbit', 'binance'],
+        rejectedValue: exchange,
+      }));
+    }
+
+    try {
+      return createSuccessResponse(await getAssetCoverageAudit({
+        exchange: parsedExchange ?? undefined,
+        refresh: parseBooleanFlag(refresh) ?? false,
+      }));
     } catch (error) {
       if (error instanceof AppError) {
         return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));

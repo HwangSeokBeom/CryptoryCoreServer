@@ -1,4 +1,5 @@
 import pino from 'pino';
+import { sanitizeSensitiveText } from '../domains/security/credential-security.service';
 
 function serializeError(error: unknown) {
   if (!(error instanceof Error)) {
@@ -7,8 +8,8 @@ function serializeError(error: unknown) {
 
   const serialized: Record<string, unknown> = {
     type: error.name,
-    message: error.message,
-    stack: error.stack,
+    message: sanitizeSensitiveText(error.message),
+    stack: sanitizeSensitiveText(error.stack),
   };
 
   if ('exchange' in error) {
@@ -21,7 +22,7 @@ function serializeError(error: unknown) {
     serialized.statusCode = (error as { statusCode?: unknown }).statusCode;
   }
   if ('requestUrl' in error) {
-    serialized.requestUrl = (error as { requestUrl?: unknown }).requestUrl;
+    serialized.requestUrl = sanitizeSensitiveText(String((error as { requestUrl?: unknown }).requestUrl ?? ''));
   }
   if ('kind' in error) {
     serialized.kind = (error as { kind?: unknown }).kind;
@@ -42,12 +43,15 @@ export const logger = pino({
   redact: {
     paths: [
       'apiKey',
+      'accessKey',
       'secretKey',
       'accessToken',
       'passphrase',
       'token',
       'jwtSecret',
       'authorization',
+      'signature',
+      'nonce',
       'headers.authorization',
       'headers.Authorization',
       'headers.X-MBX-APIKEY',
@@ -55,6 +59,7 @@ export const logger = pino({
       'headers.X-COINONE-PAYLOAD',
       'headers.X-COINONE-SIGNATURE',
       '*.apiKey',
+      '*.accessKey',
       '*.secretKey',
       '*.accessToken',
       '*.passphrase',
@@ -62,6 +67,16 @@ export const logger = pino({
       '*.authorization',
       '*.Authorization',
       '*.signature',
+      '*.nonce',
+      'body.apiKey',
+      'body.accessKey',
+      'body.secretKey',
+      'body.accessToken',
+      'body.passphrase',
+      'req.headers.authorization',
+      'req.headers.Authorization',
+      'request.headers.authorization',
+      'request.headers.Authorization',
     ],
     censor: '[REDACTED]',
   },

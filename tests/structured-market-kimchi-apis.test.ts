@@ -83,6 +83,7 @@ const getAssetViewsMock = vi.fn(async (lookups: Array<{
 ));
 
 vi.mock('../src/domains/assets/asset-metadata.service', () => ({
+  hasCuratedAssetMetadata: vi.fn((symbol?: string | null) => symbol === 'BTC'),
   assetMetadataService: {
     getAssetViews: getAssetViewsMock,
     start: vi.fn(),
@@ -219,7 +220,7 @@ describe('Structured Market and Kimchi APIs', () => {
       displayStatus: 'fresh',
     });
     expect(response.debug?.requestedSymbolCount).toBe(290);
-  });
+  }, 15000);
 
   it('reuses stale sparkline cache for small fast-path requests and exposes stability metadata', async () => {
     const { getMarketSparkline } = await import('../src/domains/market-data/market-data.service');

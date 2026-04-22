@@ -26,11 +26,24 @@ export interface NormalizedMarketBase {
   hasImage?: boolean;
   imageAvailability?: 'available' | 'fallback' | 'pending' | 'lookup_failed' | 'unavailable';
   imageFailureReason?: string | null;
+  imageMissingReason?: string | null;
   fallbackType?: string | null;
   assetType?: string | null;
   canonicalName?: string | null;
   fallbackColor?: string | null;
   fallbackInitials?: string | null;
+  assetSlug?: string | null;
+  imageFallbackKey?: string | null;
+  fallbackKey?: string | null;
+  stableImageKey?: string | null;
+  imageLookupKey?: string | null;
+  imageDebug?: {
+    canonicalSymbol: string;
+    assetSlug: string | null;
+    preferredImageSlug: string | null;
+    imageResolutionSource: string | null;
+    imageMissingReason: string | null;
+  };
   market: string;
   baseCurrency: string;
   quoteCurrency: string;

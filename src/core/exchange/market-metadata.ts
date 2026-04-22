@@ -1,6 +1,14 @@
 import { COIN_MAP } from '../../config/constants';
 import { EXCHANGE_METADATA } from './exchange.metadata';
 import { resolveIconUrl } from './icon.resolver';
+import { getSupportedCandleIntervals } from './interval.mapper';
+import {
+  buildCanonicalMarketId,
+  buildMarketIdentityAliases,
+  normalizeMarketIdentity,
+  resolveMarketIdentitySpecialCase,
+  type MarketIdentitySpecialCaseReason,
+} from './market.contract';
 import { fromExchangeSymbol, toCanonicalSymbol, toExchangeSymbol } from './symbol.mapper';
 import type {
   CanonicalMarketCapabilities,
@@ -11,7 +19,7 @@ import type {
   QuoteCurrency,
 } from './exchange.types';
 
-export type MarketCapabilityFlags = Partial<Record<MarketCapabilityChannel, boolean>>;
+export type MarketCapabilityFlags = Partial<Record<MarketCapabilityChannel, boolean>> & Partial<CanonicalMarketCapabilities>;
 
 export type MarketResolveInput = {
   marketId?: string;
@@ -23,6 +31,8 @@ export type MarketResolveResult =
       ok: true;
       market: ExchangeMarketDescriptor;
       metadata: CanonicalMarketMetadata;
+      matchSource: 'market_id' | 'market_alias' | 'symbol';
+      identitySpecialCase: MarketIdentitySpecialCaseReason | null;
     }
   | {
       ok: false;
@@ -30,11 +40,22 @@ export type MarketResolveResult =
       input: string | null;
     };
 
-export function toCanonicalMarketCapabilities(flags?: MarketCapabilityFlags): CanonicalMarketCapabilities {
+export function toCanonicalMarketCapabilities(
+  flags?: MarketCapabilityFlags | CanonicalMarketCapabilities,
+): CanonicalMarketCapabilities {
+  const marketFlags = flags as Partial<Record<MarketCapabilityChannel, boolean>> | undefined;
+  const canonicalFlags = flags as Partial<CanonicalMarketCapabilities> | undefined;
+  const supportsCandles = marketFlags?.candles ?? canonicalFlags?.supportsCandles ?? true;
+  const supportsOrderBook = marketFlags?.orderbook ?? canonicalFlags?.supportsOrderBook ?? true;
+  const supportsTrades = marketFlags?.trades ?? canonicalFlags?.supportsTrades ?? true;
+
   return {
-    supportsCandles: flags?.candles ?? true,
-    supportsOrderBook: flags?.orderbook ?? true,
-    supportsTrades: flags?.trades ?? true,
+    supportsCandles,
+    supportsOrderBook,
+    supportsTrades,
+    graphSupported: canonicalFlags?.graphSupported ?? supportsCandles,
+    supportedIntervals: supportsCandles ? [...(canonicalFlags?.supportedIntervals ?? [])] : [],
+    unsupportedReason: canonicalFlags?.unsupportedReason ?? null,
   };
 }
 
@@ -53,14 +74,21 @@ export function buildCanonicalMarketMetadata(params: {
   const canonicalSymbol = toCanonicalSymbol(params.symbol ?? fromExchangeSymbol(params.exchange, rawSymbol));
   const baseAsset = params.baseAsset ?? canonicalSymbol;
   const marketId = params.marketId ?? rawSymbol;
+  const canonicalMarketId = buildCanonicalMarketId(baseAsset, quoteAsset);
   const coin = COIN_MAP.get(canonicalSymbol);
-  const capabilities = params.capabilities && 'supportsCandles' in params.capabilities
-    ? params.capabilities
-    : toCanonicalMarketCapabilities(params.capabilities as MarketCapabilityFlags | undefined);
+  const capabilities = toCanonicalMarketCapabilities(
+    params.capabilities as MarketCapabilityFlags | CanonicalMarketCapabilities | undefined,
+  );
+  const supportedIntervals = capabilities.supportsCandles && capabilities.supportedIntervals.length === 0
+    ? getSupportedCandleIntervals(params.exchange)
+    : capabilities.supportedIntervals;
+  const graphSupported = capabilities.graphSupported ?? capabilities.supportsCandles;
+  const unsupportedReason = capabilities.unsupportedReason ?? null;
 
   return {
     exchange: params.exchange,
     marketId,
+    canonicalMarketId,
     rawSymbol,
     canonicalSymbol,
     baseAsset,
@@ -70,7 +98,16 @@ export function buildCanonicalMarketMetadata(params: {
     englishName: coin?.nameEn ?? null,
     iconUrl: resolveIconUrl(canonicalSymbol),
     isActive: params.isActive ?? true,
-    capabilities,
+    capabilities: {
+      ...capabilities,
+      graphSupported,
+      supportedIntervals: [...supportedIntervals],
+      unsupportedReason,
+    },
+    candlesSupported: capabilities.supportsCandles,
+    graphSupported,
+    supportedIntervals: [...supportedIntervals],
+    unsupportedReason,
   };
 }
 
@@ -91,10 +128,6 @@ export function buildCanonicalMarketMetadataFromDescriptor(params: {
   });
 }
 
-function normalizeMarketId(value: string) {
-  return value.trim().toLowerCase();
-}
-
 export function resolveExchangeMarketInput(params: {
   exchange: ExchangeId;
   markets: ExchangeMarketDescriptor[];
@@ -105,27 +138,57 @@ export function resolveExchangeMarketInput(params: {
   const symbol = params.input.symbol?.trim();
 
   if (marketId) {
-    const normalizedMarketId = normalizeMarketId(marketId);
-    const market = params.markets.find((item) =>
-      [
+    const normalizedMarketId = normalizeMarketIdentity(marketId);
+    const market = params.markets.find((item) => {
+      const directMatches = [
         item.marketId,
         item.exchangeSymbol,
         item.rawSymbol,
         item.market,
-      ].filter((value): value is string => Boolean(value))
-        .some((value) => normalizeMarketId(value) === normalizedMarketId));
+      ]
+        .filter((value): value is string => Boolean(value))
+        .some((value) => normalizeMarketIdentity(value) === normalizedMarketId);
+
+      return directMatches || buildMarketIdentityAliases({
+        exchange: params.exchange,
+        marketId: item.marketId ?? item.exchangeSymbol ?? item.rawSymbol,
+        exchangeSymbol: item.exchangeSymbol,
+        rawSymbol: item.rawSymbol,
+        market: item.market,
+        symbol: item.symbol,
+        baseAsset: item.baseCurrency ?? item.symbol,
+        quoteAsset: item.quoteCurrency,
+      }).includes(normalizedMarketId);
+    });
 
     if (!market) {
       return { ok: false, reason: 'MARKET_ID_NOT_FOUND', input: marketId };
     }
 
+    const metadata = buildCanonicalMarketMetadataFromDescriptor({
+      exchange: params.exchange,
+      market,
+      capabilities: params.capabilitiesBySymbol?.get(market.symbol),
+    });
+    const directMatches = [
+      market.marketId,
+      market.exchangeSymbol,
+      market.rawSymbol,
+      market.market,
+      metadata.canonicalMarketId,
+    ]
+      .filter((value): value is string => Boolean(value))
+      .some((value) => normalizeMarketIdentity(value) === normalizedMarketId);
+
     return {
       ok: true,
       market,
-      metadata: buildCanonicalMarketMetadataFromDescriptor({
-        exchange: params.exchange,
-        market,
-        capabilities: params.capabilitiesBySymbol?.get(market.symbol),
+      metadata,
+      matchSource: directMatches ? 'market_id' : 'market_alias',
+      identitySpecialCase: resolveMarketIdentitySpecialCase({
+        canonicalSymbol: metadata.canonicalSymbol,
+        marketId: metadata.marketId,
+        inputMarketId: marketId,
       }),
     };
   }
@@ -147,6 +210,11 @@ export function resolveExchangeMarketInput(params: {
       exchange: params.exchange,
       market,
       capabilities: params.capabilitiesBySymbol?.get(market.symbol),
+    }),
+    matchSource: 'symbol',
+    identitySpecialCase: resolveMarketIdentitySpecialCase({
+      canonicalSymbol,
+      marketId: market.marketId ?? market.exchangeSymbol ?? market.rawSymbol,
     }),
   };
 }

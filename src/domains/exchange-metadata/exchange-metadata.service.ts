@@ -1,11 +1,17 @@
 import { EXCHANGE_METADATA } from '../../core/exchange/exchange.metadata';
-import type { ExchangeCapabilitySummary, ExchangeCredentialField, ExchangeId } from '../../modules/private-account/exchange-connections.contract';
+import type {
+  ExchangeCapabilitySummary,
+  ExchangeCredentialField,
+  ExchangeId,
+  ExchangePermissionGuide,
+} from '../../modules/private-account/exchange-connections.contract';
 import { AppError } from '../../utils/errors';
 
 export type ExchangeGuide = {
   exchange: ExchangeId;
   displayName: string;
   credentialFields: ExchangeCredentialField[];
+  permissionGuides: ExchangePermissionGuide[];
   issueGuideSummary: string;
   apiGuideUrl: string;
   recommendedPermissions: string[];
@@ -19,8 +25,12 @@ const EXCHANGE_GUIDES: Record<ExchangeId, Omit<ExchangeGuide, 'capabilities'>> =
     exchange: 'upbit',
     displayName: '업비트',
     credentialFields: [
-      { key: 'apiKey', label: 'Access Key', required: true, masked: true },
-      { key: 'secretKey', label: 'Secret Key', required: true, masked: true },
+      { key: 'apiKey', requestKey: 'accessKey', label: 'Access Key', required: true, masked: true },
+      { key: 'secretKey', requestKey: 'secretKey', label: 'Secret Key', required: true, masked: true },
+    ],
+    permissionGuides: [
+      { key: 'read_only', label: '조회 전용', description: '잔고와 체결 내역 조회에 필요한 최소 권한입니다.', requiredPermissions: ['자산 조회', '주문 조회'] },
+      { key: 'trade_enabled', label: '주문 가능', description: '조회 전용 권한에 주문하기 권한을 추가합니다.', requiredPermissions: ['자산 조회', '주문 조회', '주문하기'] },
     ],
     issueGuideSummary: '업비트 고객센터의 Open API 안내를 따라 개발자 센터를 확인하고 Open API 관리 페이지에서 Key를 발급받습니다.',
     apiGuideUrl: 'https://support.upbit.com/hc/ko/articles/49411138468761-%EC%97%85%EB%B9%84%ED%8A%B8-API%EB%9E%80-%EB%AC%B4%EC%97%87%EC%9D%B8%EA%B0%80%EC%9A%94-%EC%96%B4%EB%96%BB%EA%B2%8C-%EC%8B%9C%EC%9E%91%ED%95%98%EB%82%98%EC%9A%94',
@@ -32,8 +42,12 @@ const EXCHANGE_GUIDES: Record<ExchangeId, Omit<ExchangeGuide, 'capabilities'>> =
     exchange: 'bithumb',
     displayName: '빗썸',
     credentialFields: [
-      { key: 'apiKey', label: 'Connect Key', required: true, masked: true },
-      { key: 'secretKey', label: 'Secret Key', required: true, masked: true },
+      { key: 'apiKey', requestKey: 'accessKey', label: 'Connect Key', required: true, masked: true },
+      { key: 'secretKey', requestKey: 'secretKey', label: 'Secret Key', required: true, masked: true },
+    ],
+    permissionGuides: [
+      { key: 'read_only', label: '조회 전용', description: '잔고 및 주문 조회 권한만 허용합니다.', requiredPermissions: ['자산 조회', '주문 조회'] },
+      { key: 'trade_enabled', label: '주문 가능', description: '조회 권한에 거래 권한을 추가합니다.', requiredPermissions: ['자산 조회', '주문 조회', '거래'] },
     ],
     issueGuideSummary: '빗썸 고객센터의 API 2.0 Key 발급 안내를 따라 API 관리 메뉴에서 Connect Key와 Secret Key를 발급받습니다.',
     apiGuideUrl: 'https://support.bithumb.com/hc/ko/articles/52815899880345',
@@ -45,8 +59,12 @@ const EXCHANGE_GUIDES: Record<ExchangeId, Omit<ExchangeGuide, 'capabilities'>> =
     exchange: 'coinone',
     displayName: '코인원',
     credentialFields: [
-      { key: 'apiKey', label: 'Access Token', required: true, masked: true },
-      { key: 'secretKey', label: 'Secret Key', required: true, masked: true },
+      { key: 'apiKey', requestKey: 'accessToken', label: 'Access Token', required: true, masked: true },
+      { key: 'secretKey', requestKey: 'secretKey', label: 'Secret Key', required: true, masked: true },
+    ],
+    permissionGuides: [
+      { key: 'read_only', label: '조회 전용', description: '조회 권한으로 잔고와 주문 이력을 확인합니다.', requiredPermissions: ['조회'] },
+      { key: 'trade_enabled', label: '주문 가능', description: '조회 권한에 주문 권한을 추가합니다.', requiredPermissions: ['조회', '주문'] },
     ],
     issueGuideSummary: '코인원 웹에서 Open API > API 관리 메뉴로 이동해 Access Token과 Secret Key를 발급받습니다.',
     apiGuideUrl: 'https://support.coinone.co.kr/support/solutions/articles/31000172450-%ED%8F%AC%ED%8A%B8%ED%8F%B4%EB%A6%AC%EC%98%A4-%ED%99%9C%EC%9A%A9%ED%95%98%EA%B8%B0',
@@ -58,8 +76,12 @@ const EXCHANGE_GUIDES: Record<ExchangeId, Omit<ExchangeGuide, 'capabilities'>> =
     exchange: 'korbit',
     displayName: '코빗',
     credentialFields: [
-      { key: 'apiKey', label: 'API Key', required: true, masked: true },
-      { key: 'secretKey', label: 'Secret Key', required: true, masked: true },
+      { key: 'apiKey', requestKey: 'accessKey', label: 'API Key', required: true, masked: true },
+      { key: 'secretKey', requestKey: 'secretKey', label: 'Secret Key', required: true, masked: true },
+    ],
+    permissionGuides: [
+      { key: 'read_only', label: '조회 전용', description: '잔고 및 주문 조회 권한만 요구합니다.', requiredPermissions: ['잔고 조회', '주문 조회'] },
+      { key: 'trade_enabled', label: '주문 가능', description: '조회 권한에 주문 권한을 추가합니다.', requiredPermissions: ['잔고 조회', '주문 조회', '주문'] },
     ],
     issueGuideSummary: '코빗은 개발자 콘솔이 종료되었으며, 현재는 내 계정의 API 관리 페이지에서 API Key를 생성합니다.',
     apiGuideUrl: 'https://exchange.korbit.co.kr/my/api',
@@ -71,8 +93,12 @@ const EXCHANGE_GUIDES: Record<ExchangeId, Omit<ExchangeGuide, 'capabilities'>> =
     exchange: 'binance',
     displayName: '바이낸스',
     credentialFields: [
-      { key: 'apiKey', label: 'API Key', required: true, masked: true },
-      { key: 'secretKey', label: 'Secret Key', required: true, masked: true },
+      { key: 'apiKey', requestKey: 'accessKey', label: 'API Key', required: true, masked: true },
+      { key: 'secretKey', requestKey: 'secretKey', label: 'Secret Key', required: true, masked: true },
+    ],
+    permissionGuides: [
+      { key: 'read_only', label: '조회 전용', description: 'Enable Reading 권한만으로 조회 기능을 사용할 수 있습니다.', requiredPermissions: ['Enable Reading'] },
+      { key: 'trade_enabled', label: '주문 가능', description: '읽기 권한에 Spot 거래 권한을 추가합니다.', requiredPermissions: ['Enable Reading', 'Enable Spot & Margin Trading'] },
     ],
     issueGuideSummary: '바이낸스 API Management에서 API Key와 Secret Key를 발급하고 Spot 권한을 활성화합니다.',
     apiGuideUrl: 'https://www.binance.com/en/my/settings/api-management',
@@ -114,6 +140,14 @@ export function getExchangeGuide(exchange: ExchangeId): ExchangeGuide {
     ...guide,
     capabilities: getExchangeCapabilitySummary(exchange),
   };
+}
+
+export function getExchangePermissionGuides(exchange: ExchangeId) {
+  const guide = EXCHANGE_GUIDES[exchange];
+  if (!guide) {
+    throw new AppError(404, '지원하지 않는 거래소 메타데이터입니다');
+  }
+  return guide.permissionGuides;
 }
 
 export function listExchangeGuides(): ExchangeGuide[] {

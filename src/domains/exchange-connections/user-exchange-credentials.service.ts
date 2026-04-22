@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { prisma } from '../../config/database';
 import type { ExchangeId, UserExchangeCredentials } from '../../core/exchange/exchange.types';
 import type { ExchangeCredentialSource } from '../../config/exchange.credentials';
@@ -8,7 +9,34 @@ import {
 import { AppError } from '../../utils/errors';
 import { decryptSecret } from '../../modules/private-account/exchange-connections.crypto';
 
-async function findUserExchangeConnectionRecord(userId: string, exchange: ExchangeId) {
+type PrivateCredentialCapability = 'read' | 'trade';
+
+const exchangeConnectionRuntimeSelect = {
+  id: true,
+  exchange: true,
+  apiKeyEncrypted: true,
+  secretKeyEncrypted: true,
+  passphraseEncrypted: true,
+  canUsePrivateApi: true,
+} satisfies Prisma.ExchangeConnectionSelect;
+
+const exchangeConnectionRuntimeWithPurposeSelect = {
+  ...exchangeConnectionRuntimeSelect,
+  connectionPurpose: true,
+} satisfies Prisma.ExchangeConnectionSelect;
+
+type RuntimeExchangeConnection = Prisma.ExchangeConnectionGetPayload<{
+  select: typeof exchangeConnectionRuntimeSelect;
+}>;
+type RuntimeExchangeConnectionWithPurpose = Prisma.ExchangeConnectionGetPayload<{
+  select: typeof exchangeConnectionRuntimeWithPurposeSelect;
+}>;
+
+async function findUserExchangeConnectionRecord(
+  userId: string,
+  exchange: ExchangeId,
+  options?: { includePurpose?: boolean },
+): Promise<RuntimeExchangeConnection | RuntimeExchangeConnectionWithPurpose | null> {
   return prisma.exchangeConnection.findUnique({
     where: {
       userId_exchange: {
@@ -16,7 +44,14 @@ async function findUserExchangeConnectionRecord(userId: string, exchange: Exchan
         exchange,
       },
     },
+    select: options?.includePurpose
+      ? exchangeConnectionRuntimeWithPurposeSelect
+      : exchangeConnectionRuntimeSelect,
   });
+}
+
+function getConnectionPurpose(connectionPurpose: string | null | undefined) {
+  return connectionPurpose === 'trading' ? 'trading' : 'read_only';
 }
 
 function toUserExchangeCredentials(connection: {
@@ -44,10 +79,27 @@ export async function getUserExchangeConnectionRecord(userId: string, exchange: 
 export async function requireUserOwnedExchangeCredentials(
   userId: string,
   exchange: ExchangeId,
+  capability: PrivateCredentialCapability = 'read',
 ): Promise<UserExchangeCredentials> {
-  const connection = await getUserExchangeConnectionRecord(userId, exchange);
+  const connection = await findUserExchangeConnectionRecord(userId, exchange, {
+    includePurpose: capability === 'trade',
+  });
+  if (!connection) {
+    throw new AppError(404, `${exchange} exchange connection is not connected`);
+  }
+
   if (!connection.canUsePrivateApi) {
     throw new AppError(400, `${exchange} exchange connection must be verified before using private APIs`);
+  }
+
+  const connectionPurpose = 'connectionPurpose' in connection ? connection.connectionPurpose : undefined;
+  if (capability === 'trade' && getConnectionPurpose(connectionPurpose) !== 'trading') {
+    throw new AppError(403, `${exchange} exchange connection is read-only and cannot call trading APIs`, {
+      code: 'INSUFFICIENT_SCOPE',
+      exchange,
+      requiredPurpose: 'trading',
+      currentPurpose: 'read_only',
+    }, 'INSUFFICIENT_SCOPE');
   }
 
   return toUserExchangeCredentials(connection, exchange);
@@ -114,6 +166,9 @@ export async function listUserConnectedExchanges(userId: string) {
       userId,
       canUsePrivateApi: true,
     },
+    select: {
+      exchange: true,
+    },
     orderBy: {
       createdAt: 'asc',
     },
@@ -126,6 +181,11 @@ export async function listUserVerifiedExchangeConnections(userId: string) {
   return prisma.exchangeConnection.findMany({
     where: {
       userId,
+      canUsePrivateApi: true,
+    },
+    select: {
+      id: true,
+      exchange: true,
       canUsePrivateApi: true,
     },
     orderBy: {

@@ -28,11 +28,14 @@ export function startTickerCollector() {
   logger.info({ domain: 'market-streaming' }, 'Public market orchestrator started');
 }
 
-export function stopTickerCollector() {
-  void marketStreamingOrchestrator.stop();
-  void stopMarketSnapshotCache();
+export async function stopTickerCollector() {
+  await Promise.allSettled([
+    marketStreamingOrchestrator.stop(),
+    stopMarketSnapshotCache(),
+  ]);
   stopChartLiveService();
   assetMetadataService.stop();
   rateTask?.stop();
+  rateTask = null;
   logger.info({ domain: 'market-streaming' }, 'Public market orchestrator stopped');
 }

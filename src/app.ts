@@ -3,7 +3,7 @@ import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
 import { env } from './config/env';
 import { logger } from './utils/logger';
-import { AppError, createErrorResponse } from './utils/errors';
+import { AppError, createErrorResponse, mapInfrastructureError } from './utils/errors';
 
 // Route imports
 import { authRoutes } from './modules/auth/auth.controller';
@@ -35,17 +35,55 @@ export async function buildApp() {
     }
   });
 
+  app.addHook('onRequest', async (request) => {
+    const startedAt = Date.now();
+    let cancelledLogged = false;
+
+    const maybeLogCancellation = (event: 'aborted' | 'close') => {
+      if (cancelledLogged || request.raw.aborted !== true) {
+        return;
+      }
+      cancelledLogged = true;
+      logger.warn(
+        {
+          domain: 'http',
+          event: 'client_cancelled_request',
+          method: request.method,
+          url: request.url,
+          requestId: request.id,
+          elapsedMs: Date.now() - startedAt,
+          signal: event,
+        },
+        'Client cancelled request',
+      );
+    };
+
+    request.raw.once('aborted', () => maybeLogCancellation('aborted'));
+    request.raw.once('close', () => maybeLogCancellation('close'));
+  });
+
   // Global error handler
   app.setErrorHandler((error, _request, reply) => {
-    logger.error({ err: error }, 'Unhandled error');
-    const statusCode = error.statusCode || 500;
+    const mappedError = mapInfrastructureError(error);
+    if (mappedError?.code === 'DATABASE_SCHEMA_MISMATCH') {
+      logger.error(
+        { err: error, code: mappedError.code, details: mappedError.details },
+        'Database schema mismatch detected',
+      );
+    } else {
+      logger.error({ err: error }, 'Unhandled error');
+    }
+
+    const responseError = mappedError ?? (error instanceof AppError ? error : null);
+    const statusCode = responseError?.statusCode || error.statusCode || 500;
+    const message = responseError?.message || 'Internal Server Error';
     reply
       .status(statusCode)
       .send(
         createErrorResponse(
-          error.message || 'Internal Server Error',
-          error instanceof AppError ? error.details : undefined,
-          error instanceof AppError ? error.code : undefined,
+          message,
+          responseError?.details,
+          responseError?.code,
         ),
       );
   });

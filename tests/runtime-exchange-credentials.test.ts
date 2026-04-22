@@ -5,6 +5,7 @@ const BASE_ENV = {
   REDIS_URL: 'redis://localhost:6379',
   JWT_SECRET: 'super-secret-jwt-value',
   NODE_ENV: 'test',
+  EXCHANGE_CREDENTIAL_ENCRYPTION_KEY: 'test-exchange-credential-encryption-key-32',
 };
 
 const EXCHANGE_ENV_KEYS = [
@@ -123,6 +124,7 @@ describe('trading service credential wiring', () => {
     const prisma = createPrismaMock({
       id: 'connection-1',
       canUsePrivateApi: true,
+      connectionPurpose: 'trading',
       apiKeyEncrypted: encryptSecret('user-upbit-key'),
       secretKeyEncrypted: encryptSecret('user-upbit-secret'),
       passphraseEncrypted: null,

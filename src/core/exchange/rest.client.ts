@@ -1,4 +1,5 @@
 import { logger } from '../../utils/logger';
+import { sanitizeSensitiveText } from '../../domains/security/credential-security.service';
 import { DEFAULT_RETRY_POLICY, delay, getRetryDelay, type RetryPolicy } from './retry-policy';
 import { ExchangeRequestError } from './errors';
 import type { ExchangeId } from './exchange.types';
@@ -154,7 +155,12 @@ function buildResponseSnippet(body: unknown) {
       ? body
       : JSON.stringify(Array.isArray(body) ? body.slice(0, 2) : body);
 
-  return raw.length > 240 ? `${raw.slice(0, 240)}...` : raw;
+  const snippet = raw.length > 240 ? `${raw.slice(0, 240)}...` : raw;
+  return sanitizeSensitiveText(snippet);
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && error.name === 'AbortError';
 }
 
 export class RestClient {
@@ -238,6 +244,25 @@ export class RestClient {
         };
       } catch (error) {
         clearTimeout(timeout);
+        if (isAbortError(error)) {
+          logger.warn(
+            {
+              domain: 'exchange-rest',
+              event: 'upstream_exchange_timeout',
+              owner: this.owner,
+              url: logUrl,
+              timeoutMs: options.timeoutMs ?? 10_000,
+              attempt,
+            },
+            'Exchange REST request timed out',
+          );
+          error = new ExchangeRequestError(
+            this.owner,
+            504,
+            logUrl,
+            `${this.owner} request timed out`,
+          );
+        }
         if (attempt >= policy.maxAttempts) {
           throw error;
         }

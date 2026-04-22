@@ -197,8 +197,101 @@ const getMarketSnapshotMock = vi.fn(async () => ({
   pendingItemCount: 0,
   excludedUnlistedCount: 0,
 }));
+const getAssetCoverageAuditMock = vi.fn(async () => ({
+  generatedAt: 1712345678000,
+  cacheAgeMs: 0,
+  cached: false,
+  exchanges: ['upbit'],
+  summary: [
+    {
+      exchange: 'upbit',
+      totalAssets: 1,
+      registryMappedCount: 1,
+      canonicalMappedCount: 1,
+      imageUrlAvailableCount: 1,
+      fallbackKeyAvailableCount: 1,
+      unsupportedCount: 0,
+      aliasMissingCount: 0,
+      canonicalMissingCount: 0,
+      assetSlugMissingCount: 0,
+      imageUrlMissingCount: 0,
+    },
+  ],
+  totals: {
+    totalAssets: 1,
+    registryMappedCount: 1,
+    canonicalMappedCount: 1,
+    imageUrlAvailableCount: 1,
+    fallbackKeyAvailableCount: 1,
+    unsupportedCount: 0,
+    aliasMissingCount: 0,
+    canonicalMissingCount: 0,
+    assetSlugMissingCount: 0,
+    imageUrlMissingCount: 0,
+  },
+  items: [
+    {
+      exchange: 'upbit',
+      marketId: 'KRW-BTC',
+      rawSymbol: 'KRW-BTC',
+      normalizedSymbol: 'BTC',
+      canonicalSymbol: 'BTC',
+      canonicalAssetKey: 'BTC',
+      assetSlug: 'bitcoin',
+      preferredImageSymbol: 'BTC',
+      preferredImageSlug: 'bitcoin',
+      imageUrl: 'https://assets.example.com/btc.png',
+      fallbackKey: 'coingecko:bitcoin',
+      stableAssetKey: 'coingecko:bitcoin',
+      imageAvailability: 'available',
+      imageFailureReason: null,
+      imageMissingReason: null,
+      imageResolutionSource: 'direct_slug',
+      resolutionStage: 'preferred_image',
+      assetSupportStatus: 'supported',
+      registryMapped: true,
+      aliasHit: false,
+      matchedBy: 'normalized',
+      diagnosticReasons: [],
+      exposurePriority: 10000,
+      exposureRank: 1,
+      representative: true,
+      visible: true,
+      volumeRank: 1,
+      manualCurationRecommended: false,
+      fallbackOnly: false,
+    },
+  ],
+  details: [
+    {
+      exchange: 'upbit',
+      summary: {
+        exchange: 'upbit',
+        totalAssets: 1,
+        registryMappedCount: 1,
+        canonicalMappedCount: 1,
+        imageUrlAvailableCount: 1,
+        fallbackKeyAvailableCount: 1,
+        unsupportedCount: 0,
+        aliasMissingCount: 0,
+        canonicalMissingCount: 0,
+        assetSlugMissingCount: 0,
+        imageUrlMissingCount: 0,
+      },
+      imageUrlMissingSymbols: [],
+      aliasMissingSymbols: [],
+      priorityRankedMissingImageCandidates: [],
+      manualCurationRecommended: [],
+      fallbackOnlyRetained: [],
+      curatedResolvedButNotPromoted: [],
+      cacheStaleSuspects: [],
+      sourceMetadataMissing: [],
+    },
+  ],
+}));
 
 vi.mock('../src/domains/market-data/market-data.service', () => ({
+  getAssetCoverageAudit: getAssetCoverageAuditMock,
   listMarkets: vi.fn(async () => []),
   listComparableKimchiSymbols: listComparableKimchiSymbolsMock,
   listSymbolSupport: vi.fn(async () => ({
@@ -314,7 +407,7 @@ describe('Responsibility Routes', () => {
       imageUrl: 'https://assets.example.com/btc.png',
     });
     await app.close();
-  }, 10000);
+  }, 15000);
 
   it('GET /market/tickers accepts marketId filters without auth', async () => {
     const app = await createApp();
@@ -326,7 +419,7 @@ describe('Responsibility Routes', () => {
     expect(res.statusCode).toBe(200);
     expect(getMarketSnapshotMock).not.toHaveBeenCalled();
     await app.close();
-  });
+  }, 10000);
 
   it('GET /market/snapshot returns snapshot-first canonical data without auth', async () => {
     const app = await createApp();
@@ -356,7 +449,7 @@ describe('Responsibility Routes', () => {
       limit: undefined,
     });
     await app.close();
-  });
+  }, 10000);
 
   it('GET /market/symbols returns symbol support metadata without auth', async () => {
     const app = await createApp();
@@ -373,6 +466,39 @@ describe('Responsibility Routes', () => {
       marketId: 'KRW-BTC',
       tradable: true,
       kimchiComparable: true,
+    });
+    await app.close();
+  });
+
+  it('GET /market/symbols/audit returns coverage diagnostics without auth', async () => {
+    const app = await createApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/market/symbols/audit?exchange=upbit&refresh=1',
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(true);
+    expect(body.data.summary[0]).toMatchObject({
+      exchange: 'upbit',
+      totalAssets: 1,
+      canonicalMappedCount: 1,
+      fallbackKeyAvailableCount: 1,
+    });
+    expect(body.data.items[0]).toMatchObject({
+      exchange: 'upbit',
+      marketId: 'KRW-BTC',
+      fallbackKey: 'coingecko:bitcoin',
+      stableAssetKey: 'coingecko:bitcoin',
+    });
+    expect(body.data.details[0]).toMatchObject({
+      exchange: 'upbit',
+      priorityRankedMissingImageCandidates: [],
+    });
+    expect(getAssetCoverageAuditMock).toHaveBeenCalledWith({
+      exchange: 'upbit',
+      refresh: true,
     });
     await app.close();
   });

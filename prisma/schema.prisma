@@ -82,6 +82,10 @@ model ExchangeConnection {
   apiKeyEncrypted     String
   secretKeyEncrypted  String
   passphraseEncrypted String?
+  apiKeyMasked        String    @default("********")
+  apiKeyFingerprint   String?
+  connectionPurpose   String    @default("read_only")
+  permissionScope     Json?
   validationStatus    String    @default("placeholder")
   validationMode      String    @default("placeholder")
   validationCode      String?
@@ -102,6 +106,7 @@ model ExchangeConnection {
 
   @@unique([userId, exchange])
   @@index([userId, exchange])
+  @@index([userId, apiKeyFingerprint])
 }
 
 model ExchangeConnectionVerification {

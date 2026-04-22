@@ -39,8 +39,8 @@ vi.mock('../src/domains/trading/trading.service', () => ({
   ]),
 }));
 
-vi.mock('../src/domains/portfolio/portfolio.service', () => ({
-  getPortfolioSnapshot: vi.fn(async () => ({
+vi.mock('../src/domains/portfolio/portfolio.service', () => {
+  const getPortfolioSnapshot = vi.fn(async () => ({
     exchange: 'upbit',
     balances: [
       { asset: 'KRW', free: 1000000, locked: 0, averageBuyPrice: 0 },
@@ -65,8 +65,8 @@ vi.mock('../src/domains/portfolio/portfolio.service', () => ({
     totalPnlValue: 50000,
     totalPnlPercent: 2.56,
     timestamp: 1712345678000,
-  })),
-  getAssetHistory: vi.fn(async () => [
+  }));
+  const getAssetHistory = vi.fn(async () => [
     {
       exchange: 'upbit',
       symbol: 'BTC',
@@ -75,8 +75,23 @@ vi.mock('../src/domains/portfolio/portfolio.service', () => ({
       timestamp: 1712345678000,
       description: 'BUY 0.01 @ 100000000',
     },
-  ]),
-  getAggregatedPortfolioSummary: vi.fn(async () => ({
+  ]);
+  return {
+    getPortfolioSnapshot,
+    getPortfolioSnapshotRouteResponse: vi.fn(async () => ({
+      data: await getPortfolioSnapshot(),
+      routeStatus: 'ok',
+      privateStreamingStatus: 'live_stream_available',
+      pollingFallbackRecommended: false,
+    })),
+    getAssetHistory,
+    getAssetHistoryRouteResponse: vi.fn(async () => ({
+      data: await getAssetHistory(),
+      routeStatus: 'ok',
+      privateStreamingStatus: 'live_stream_available',
+      pollingFallbackRecommended: false,
+    })),
+    getAggregatedPortfolioSummary: vi.fn(async () => ({
     requestedExchanges: ['upbit', 'bithumb'],
     connectedExchanges: ['upbit'],
     partialSuccess: true,
@@ -151,8 +166,9 @@ vi.mock('../src/domains/portfolio/portfolio.service', () => ({
       },
     ],
     generatedAt: '2026-04-21T00:00:00.000Z',
-  })),
-}));
+    })),
+  };
+});
 
 async function createAppWithToken() {
   const { buildApp } = await import('../src/app');

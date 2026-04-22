@@ -37,9 +37,7 @@ const INTERVAL_MAPPINGS: Record<ExchangeId, Record<string, string>> = {
   },
   korbit: {
     '1m': '1',
-    '3m': '3',
     '5m': '5',
-    '10m': '10',
     '15m': '15',
     '30m': '30',
     '1h': '60',
@@ -66,6 +64,7 @@ const INTERVAL_MAPPINGS: Record<ExchangeId, Record<string, string>> = {
 };
 
 const FALLBACK_ORDER = ['1m', '3m', '5m', '10m', '15m', '30m', '1h', '4h', '1d', '1w'];
+const SUPPORTED_INTERVAL_ORDER = ['1m', '3m', '5m', '10m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w'];
 
 const INTERVAL_ALIASES: Record<string, string> = {
   '1m': '1m',
@@ -184,4 +183,8 @@ export function resolveExchangeInterval(exchange: ExchangeId, interval: string) 
   }
 
   return null;
+}
+
+export function getSupportedCandleIntervals(exchange: ExchangeId) {
+  return SUPPORTED_INTERVAL_ORDER.filter((interval) => Boolean(INTERVAL_MAPPINGS[exchange][interval]));
 }
