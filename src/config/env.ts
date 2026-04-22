@@ -67,6 +67,9 @@ const envSchema = z.object({
   KORBIT_WS_URL: z.string().url().optional(),
   KORBIT_PUBLIC_WS_URL: z.string().url().optional(),
   KORBIT_PRIVATE_WS_URL: z.string().url().optional(),
+  BINANCE_PUBLIC_API_BASE_URL: z.string().url().optional(),
+  BINANCE_PRIVATE_API_BASE_URL: z.string().url().optional(),
+  BINANCE_WS_BASE_URL: z.string().url().optional(),
   BINANCE_API_BASE_URL: z.string().url().optional(),
   BINANCE_REST_BASE_URL: z.string().url().optional(),
   BINANCE_WS_URL: z.string().url().optional(),
@@ -157,6 +160,9 @@ export interface Env {
   KORBIT_WS_URL?: string;
   KORBIT_PUBLIC_WS_URL?: string;
   KORBIT_PRIVATE_WS_URL?: string;
+  BINANCE_PUBLIC_API_BASE_URL?: string;
+  BINANCE_PRIVATE_API_BASE_URL?: string;
+  BINANCE_WS_BASE_URL?: string;
   BINANCE_API_BASE_URL?: string;
   BINANCE_REST_BASE_URL?: string;
   BINANCE_WS_URL?: string;
@@ -247,6 +253,9 @@ function loadEnv(): Env {
     KORBIT_WS_URL: parsed.data.KORBIT_WS_URL,
     KORBIT_PUBLIC_WS_URL: parsed.data.KORBIT_PUBLIC_WS_URL,
     KORBIT_PRIVATE_WS_URL: parsed.data.KORBIT_PRIVATE_WS_URL,
+    BINANCE_PUBLIC_API_BASE_URL: parsed.data.BINANCE_PUBLIC_API_BASE_URL,
+    BINANCE_PRIVATE_API_BASE_URL: parsed.data.BINANCE_PRIVATE_API_BASE_URL,
+    BINANCE_WS_BASE_URL: parsed.data.BINANCE_WS_BASE_URL,
     BINANCE_API_BASE_URL: parsed.data.BINANCE_API_BASE_URL,
     BINANCE_REST_BASE_URL: parsed.data.BINANCE_REST_BASE_URL,
     BINANCE_WS_URL: parsed.data.BINANCE_WS_URL,

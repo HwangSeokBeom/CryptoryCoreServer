@@ -2,6 +2,7 @@ import 'dotenv/config';
 
 import { execFileSync } from 'child_process';
 import { buildApp } from './app';
+import { getExchangeConfig } from './config/exchange.config';
 import { getServerExchangeCredentialAvailability } from './config/exchange.credentials';
 import { env } from './config/env';
 import { logger } from './utils/logger';
@@ -58,6 +59,18 @@ async function main() {
       exchangeCredentialEnv: getServerExchangeCredentialAvailability(),
     },
     'Loaded exchange credential availability',
+  );
+
+  const binanceConfig = getExchangeConfig('binance');
+  logger.info(
+    {
+      domain: 'config',
+      exchange: 'binance',
+      publicRestBaseUrl: binanceConfig.publicRestBaseUrl,
+      privateRestBaseUrl: binanceConfig.privateRestBaseUrl,
+      webSocketBaseUrl: binanceConfig.publicWebSocketUrl,
+    },
+    'Loaded Binance endpoint configuration',
   );
 
   await app.listen({ port: env.PORT, host: '0.0.0.0' });

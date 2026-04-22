@@ -1,5 +1,5 @@
 import { COINS } from '../../config/constants';
-import { getExchangeConfig } from '../../config/exchange.config';
+import { buildBinancePublicWebSocketUrl } from '../../config/exchange.config';
 import { ExchangeRequestError } from '../../core/exchange/errors';
 import { resolveExchangeInterval } from '../../core/exchange/interval.mapper';
 import type {
@@ -423,7 +423,7 @@ export class BinanceProvider
     const streams = this.buildStreamNames(initialPlan);
     this.streamManager = new WebSocketClientManager({
       name: 'binance-public',
-      url: `${getExchangeConfig(this.exchange).publicWebSocketUrl}?streams=${streams.join('/')}`,
+      url: buildBinancePublicWebSocketUrl(streams),
       onOpen: async () => {},
       onMessage: async (raw) => {
         const payload = JSON.parse(raw.toString());

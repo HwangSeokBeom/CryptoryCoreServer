@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import { buildBinancePublicWebSocketUrl } from '../../config/exchange.config';
 import { updateSparkline } from '../../exchanges/ExchangeManager';
 import { getUsdKrwRate } from '../../exchanges/exchangeRateService';
 import {
@@ -352,7 +353,7 @@ class BinanceCollector extends BasePublicExchangeCollector {
       return [`${pair}@ticker`, `${pair}@depth20@100ms`, `${pair}@trade`];
     });
 
-    return `wss://data-stream.binance.vision/stream?streams=${streams.join('/')}`;
+    return buildBinancePublicWebSocketUrl(streams);
   }
 
   protected subscribe() {

@@ -4,6 +4,8 @@ import { env } from './env';
 
 type ExchangeConfig = {
   restBaseUrl: string;
+  publicRestBaseUrl: string;
+  privateRestBaseUrl: string;
   publicWebSocketUrl: string;
   privateWebSocketUrl?: string;
   publicStreamingEnabled: boolean;
@@ -12,38 +14,85 @@ type ExchangeConfig = {
   marketDataStaleThresholdMs: number;
 };
 
+function buildUnifiedUrls(restBaseUrl: string, publicWebSocketUrl: string, privateWebSocketUrl?: string) {
+  return {
+    restBaseUrl,
+    publicRestBaseUrl: restBaseUrl,
+    privateRestBaseUrl: restBaseUrl,
+    publicWebSocketUrl,
+    privateWebSocketUrl,
+  };
+}
+
+function isBinancePublicDataRestBaseUrl(baseUrl?: string) {
+  if (!baseUrl) {
+    return false;
+  }
+
+  try {
+    return new URL(baseUrl).hostname === 'data-api.binance.vision';
+  } catch {
+    return false;
+  }
+}
+
 function getExchangeUrls(exchange: ExchangeId) {
   switch (exchange) {
     case 'upbit':
-      return {
-        restBaseUrl: env.UPBIT_API_BASE_URL ?? env.UPBIT_REST_BASE_URL ?? EXCHANGE_METADATA.upbit.restBaseUrl,
-        publicWebSocketUrl: env.UPBIT_WS_URL ?? env.UPBIT_PUBLIC_WS_URL ?? EXCHANGE_METADATA.upbit.publicWebSocketUrl,
-        privateWebSocketUrl: env.UPBIT_PRIVATE_WS_URL ?? EXCHANGE_METADATA.upbit.privateWebSocketUrl,
-      };
+      return buildUnifiedUrls(
+        env.UPBIT_API_BASE_URL ?? env.UPBIT_REST_BASE_URL ?? EXCHANGE_METADATA.upbit.restBaseUrl,
+        env.UPBIT_WS_URL ?? env.UPBIT_PUBLIC_WS_URL ?? EXCHANGE_METADATA.upbit.publicWebSocketUrl,
+        env.UPBIT_PRIVATE_WS_URL ?? EXCHANGE_METADATA.upbit.privateWebSocketUrl,
+      );
     case 'bithumb':
-      return {
-        restBaseUrl: env.BITHUMB_API_BASE_URL ?? env.BITHUMB_REST_BASE_URL ?? EXCHANGE_METADATA.bithumb.restBaseUrl,
-        publicWebSocketUrl: env.BITHUMB_WS_URL ?? env.BITHUMB_PUBLIC_WS_URL ?? EXCHANGE_METADATA.bithumb.publicWebSocketUrl,
-        privateWebSocketUrl: env.BITHUMB_PRIVATE_WS_URL ?? EXCHANGE_METADATA.bithumb.privateWebSocketUrl,
-      };
+      return buildUnifiedUrls(
+        env.BITHUMB_API_BASE_URL ?? env.BITHUMB_REST_BASE_URL ?? EXCHANGE_METADATA.bithumb.restBaseUrl,
+        env.BITHUMB_WS_URL ?? env.BITHUMB_PUBLIC_WS_URL ?? EXCHANGE_METADATA.bithumb.publicWebSocketUrl,
+        env.BITHUMB_PRIVATE_WS_URL ?? EXCHANGE_METADATA.bithumb.privateWebSocketUrl,
+      );
     case 'coinone':
-      return {
-        restBaseUrl: env.COINONE_API_BASE_URL ?? env.COINONE_REST_BASE_URL ?? EXCHANGE_METADATA.coinone.restBaseUrl,
-        publicWebSocketUrl: env.COINONE_WS_URL ?? env.COINONE_PUBLIC_WS_URL ?? EXCHANGE_METADATA.coinone.publicWebSocketUrl,
-        privateWebSocketUrl: env.COINONE_PRIVATE_WS_URL ?? EXCHANGE_METADATA.coinone.privateWebSocketUrl,
-      };
+      return buildUnifiedUrls(
+        env.COINONE_API_BASE_URL ?? env.COINONE_REST_BASE_URL ?? EXCHANGE_METADATA.coinone.restBaseUrl,
+        env.COINONE_WS_URL ?? env.COINONE_PUBLIC_WS_URL ?? EXCHANGE_METADATA.coinone.publicWebSocketUrl,
+        env.COINONE_PRIVATE_WS_URL ?? EXCHANGE_METADATA.coinone.privateWebSocketUrl,
+      );
     case 'korbit':
-      return {
-        restBaseUrl: env.KORBIT_API_BASE_URL ?? env.KORBIT_REST_BASE_URL ?? EXCHANGE_METADATA.korbit.restBaseUrl,
-        publicWebSocketUrl: env.KORBIT_WS_URL ?? env.KORBIT_PUBLIC_WS_URL ?? EXCHANGE_METADATA.korbit.publicWebSocketUrl,
-        privateWebSocketUrl: env.KORBIT_PRIVATE_WS_URL ?? EXCHANGE_METADATA.korbit.privateWebSocketUrl,
-      };
+      return buildUnifiedUrls(
+        env.KORBIT_API_BASE_URL ?? env.KORBIT_REST_BASE_URL ?? EXCHANGE_METADATA.korbit.restBaseUrl,
+        env.KORBIT_WS_URL ?? env.KORBIT_PUBLIC_WS_URL ?? EXCHANGE_METADATA.korbit.publicWebSocketUrl,
+        env.KORBIT_PRIVATE_WS_URL ?? EXCHANGE_METADATA.korbit.privateWebSocketUrl,
+      );
     case 'binance':
-      return {
-        restBaseUrl: env.BINANCE_API_BASE_URL ?? env.BINANCE_REST_BASE_URL ?? EXCHANGE_METADATA.binance.restBaseUrl,
-        publicWebSocketUrl: env.BINANCE_WS_URL ?? env.BINANCE_PUBLIC_WS_URL ?? EXCHANGE_METADATA.binance.publicWebSocketUrl,
-        privateWebSocketUrl: env.BINANCE_PRIVATE_WS_URL,
-      };
+      {
+        const publicRestBaseUrl =
+          env.BINANCE_PUBLIC_API_BASE_URL
+          ?? env.BINANCE_API_BASE_URL
+          ?? env.BINANCE_REST_BASE_URL
+          ?? EXCHANGE_METADATA.binance.publicRestBaseUrl
+          ?? EXCHANGE_METADATA.binance.restBaseUrl;
+        const privateOverride = isBinancePublicDataRestBaseUrl(env.BINANCE_PRIVATE_API_BASE_URL)
+          ? undefined
+          : env.BINANCE_PRIVATE_API_BASE_URL;
+        const legacyPrivateOverride = isBinancePublicDataRestBaseUrl(env.BINANCE_REST_BASE_URL)
+          ? undefined
+          : env.BINANCE_REST_BASE_URL;
+        const privateRestBaseUrl =
+          privateOverride
+          ?? legacyPrivateOverride
+          ?? EXCHANGE_METADATA.binance.privateRestBaseUrl
+          ?? EXCHANGE_METADATA.binance.restBaseUrl;
+        return {
+          restBaseUrl: publicRestBaseUrl,
+          publicRestBaseUrl,
+          privateRestBaseUrl,
+          publicWebSocketUrl:
+            env.BINANCE_WS_BASE_URL
+            ?? env.BINANCE_WS_URL
+            ?? env.BINANCE_PUBLIC_WS_URL
+            ?? EXCHANGE_METADATA.binance.publicWebSocketUrl,
+          privateWebSocketUrl: env.BINANCE_PRIVATE_WS_URL,
+        };
+      }
   }
 }
 
@@ -65,3 +114,18 @@ export const fxConfig = {
   timestampSkewThresholdMs: env.FX_TIMESTAMP_SKEW_THRESHOLD_MS,
   fallbackRate: env.USD_KRW_FALLBACK,
 };
+
+function normalizeBinanceCombinedStreamBaseUrl(baseUrl: string) {
+  const url = new URL(baseUrl);
+  if (!url.pathname || url.pathname === '/') {
+    url.pathname = '/stream';
+  }
+  url.search = '';
+  url.hash = '';
+  return url.toString().replace(/\/$/g, '');
+}
+
+export function buildBinancePublicWebSocketUrl(streams: string[]) {
+  const baseUrl = normalizeBinanceCombinedStreamBaseUrl(getExchangeConfig('binance').publicWebSocketUrl);
+  return `${baseUrl}?streams=${streams.join('/')}`;
+}

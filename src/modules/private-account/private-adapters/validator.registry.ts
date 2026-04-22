@@ -150,7 +150,7 @@ async function validateKorbit(credentials: ExchangeConnectionCredentials) {
 
 async function validateBinance(credentials: ExchangeConnectionCredentials) {
   const signer = new BinanceSigner();
-  const client = new RestClient('binance', getExchangeConfig('binance').restBaseUrl);
+  const client = new RestClient('binance', getExchangeConfig('binance').privateRestBaseUrl);
   const signed = signer.createSignedRequest({
     apiKey: credentials.apiKey,
     secretKey: credentials.secretKey,

@@ -37,6 +37,8 @@ export interface ExchangeMetadata {
   quoteCurrency: QuoteCurrency;
   domestic: boolean;
   restBaseUrl: string;
+  publicRestBaseUrl?: string;
+  privateRestBaseUrl?: string;
   publicWebSocketUrl: string;
   privateWebSocketUrl?: string;
   referenceOnly?: boolean;

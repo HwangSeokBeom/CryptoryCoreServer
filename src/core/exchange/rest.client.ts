@@ -116,6 +116,23 @@ function sanitizeUrlWithQueryForLogs(rawUrl: string) {
   }
 }
 
+function buildUrlLogContext(rawUrl: string) {
+  try {
+    const url = new URL(rawUrl);
+    return {
+      url: rawUrl,
+      requestHost: url.host,
+      requestPath: url.pathname,
+    };
+  } catch {
+    return {
+      url: rawUrl,
+      requestHost: null,
+      requestPath: null,
+    };
+  }
+}
+
 function buildQueryPreview(rawUrl: string, maxEntries = 6) {
   try {
     const url = new URL(rawUrl);
@@ -226,6 +243,7 @@ export class RestClient {
     const logUrl = sanitizeUrlForLogs(url);
     const debugUrl = sanitizeUrlWithQueryForLogs(url);
     const queryPreview = buildQueryPreview(url);
+    const urlLogContext = buildUrlLogContext(logUrl);
     const formBody = buildFormBody(options.form);
 
     if (queryPreview) {
@@ -262,6 +280,7 @@ export class RestClient {
 
         if (!response.ok) {
           const responseBody = await response.text();
+          const responseSnippet = buildResponseSnippet(responseBody);
           const retryable = policy.retryableStatusCodes.includes(response.status);
           if (retryable && attempt < policy.maxAttempts) {
             const retryDelayMs = parseRetryAfter(response.headers.get('retry-after')) ?? getRetryDelay(policy, attempt);
@@ -269,9 +288,10 @@ export class RestClient {
               {
                 domain: 'exchange-rest',
                 owner: this.owner,
-                url: logUrl,
+                ...urlLogContext,
                 attempt,
                 upstreamStatus: response.status,
+                responseSnippet,
                 retry: true,
                 retryDelayMs,
               },
@@ -280,6 +300,19 @@ export class RestClient {
             await delay(retryDelayMs);
             continue;
           }
+
+          logger.warn(
+            {
+              domain: 'exchange-rest',
+              owner: this.owner,
+              ...urlLogContext,
+              attempt,
+              upstreamStatus: response.status,
+              responseSnippet,
+              retry: false,
+            },
+            'Exchange REST request failed',
+          );
 
           throw new ExchangeRequestError(
             this.owner,
@@ -309,7 +342,7 @@ export class RestClient {
               domain: 'exchange-rest',
               event: 'upstream_exchange_timeout',
               owner: this.owner,
-              url: logUrl,
+              ...urlLogContext,
               timeoutMs: options.timeoutMs ?? 10_000,
               attempt,
             },
@@ -331,7 +364,7 @@ export class RestClient {
         }
 
         logger.warn(
-          { domain: 'exchange-rest', owner: this.owner, url: logUrl, attempt, retry: true, err: error },
+          { domain: 'exchange-rest', owner: this.owner, ...urlLogContext, attempt, retry: true, err: error },
           'Retrying exchange REST request',
         );
         await delay(getRetryDelay(policy, attempt));

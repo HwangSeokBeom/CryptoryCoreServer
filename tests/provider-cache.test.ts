@@ -144,7 +144,7 @@ describe('BinanceProvider ticker request filtering', () => {
       meta: {
         owner: 'binance',
         path: '/api/v3/ticker/24hr',
-        requestUrl: 'https://api.binance.com/api/v3/ticker/24hr',
+        requestUrl: 'https://data-api.binance.vision/api/v3/ticker/24hr',
         statusCode: 200,
         responseSnippet: null,
       },
@@ -201,7 +201,7 @@ describe('BinanceProvider ticker request filtering', () => {
       meta: {
         owner: 'binance',
         path: '/api/v3/ticker/24hr',
-        requestUrl: 'https://api.binance.com/api/v3/ticker/24hr',
+        requestUrl: 'https://data-api.binance.vision/api/v3/ticker/24hr',
         statusCode: 200,
         responseSnippet: null,
       },

@@ -74,7 +74,7 @@ export abstract class BaseExchangeProvider {
 
   constructor(readonly exchange: ExchangeId) {
     this.metadata = EXCHANGE_METADATA[exchange];
-    this.restClient = new RestClient(exchange, getExchangeConfig(exchange).restBaseUrl);
+    this.restClient = new RestClient(exchange, getExchangeConfig(exchange).publicRestBaseUrl);
   }
 
   supports(capability: ExchangeCapability) {
