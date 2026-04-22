@@ -22,6 +22,59 @@ Errors use:
 
 `code` and `details` are optional, but auth endpoints return them for validation and duplicate-resource cases.
 
+## Auth And Account Routes
+
+Session responses keep the legacy `token` field as an alias of `accessToken`.
+
+```json
+{
+  "success": true,
+  "data": {
+    "user": {
+      "id": "user-id",
+      "email": "user@example.com",
+      "nickname": "tester",
+      "authProvider": "email",
+      "createdAt": "2026-04-21T00:00:00.000Z",
+      "updatedAt": "2026-04-21T00:00:00.000Z"
+    },
+    "token": "access.jwt",
+    "accessToken": "access.jwt",
+    "refreshToken": "session-id.random-secret",
+    "tokenType": "Bearer",
+    "expiresIn": "7d",
+    "refreshTokenExpiresAt": "2026-05-21T00:00:00.000Z",
+    "sessionId": "session-id"
+  }
+}
+```
+
+- `POST /api/v1/auth/register` and `POST /auth/register`: creates an email account and returns a Cryptory access/refresh session.
+- `POST /api/v1/auth/login`: verifies email/password and returns a Cryptory access/refresh session.
+- `POST /api/v1/auth/social/google`: accepts `{ "idToken": "..." }` or `{ "credential": "..." }`; the server verifies Google RS256 ID token signature, `iss`, `aud`, `exp`, and `sub`, then maps `provider=google + sub` to a Cryptory user/session.
+- `POST /api/v1/auth/social/apple`: accepts `{ "identityToken": "..." }`; the server verifies Apple RS256 identity token signature, `iss`, `aud`, `exp`, and `sub`, then maps `provider=apple + sub` to a Cryptory user/session. Apple email may only be present on first login, so existing `provider+sub` identity is the primary re-login key.
+- `POST /api/v1/auth/refresh` and `POST /auth/refresh`: accepts `{ "refreshToken": "..." }`, checks the DB-stored SHA-256 hash for the session, rejects expired/revoked/tampered tokens with explicit 401 codes, rotates the refresh token, and returns a fresh access token.
+- `POST /api/v1/auth/logout` and `POST /auth/logout`: accepts `{ "refreshToken": "..." }` without requiring a valid access token and revokes that session. `{ "logoutAll": true }` requires access auth and revokes all user sessions.
+- `GET /api/v1/auth/me`: access-token protected profile endpoint.
+- `GET /api/v1/auth/session`: access-token protected session restore check. If the access token has a session id, the session must still exist, not be expired, and not be revoked.
+- `DELETE /api/v1/auth/account`: access-token protected account deletion. It deletes refresh sessions, social identity links, exchange connections, orders, holdings, favorites, and the user row, allowing later re-registration/re-linking.
+
+Access token failures and refresh token failures are intentionally separate. Expired access tokens return `ACCESS_TOKEN_EXPIRED` so the client can try `/auth/refresh`; refresh failures such as `REFRESH_TOKEN_EXPIRED`, `REFRESH_TOKEN_REVOKED`, or `REFRESH_TOKEN_INVALID` are the point where the app should move to logged-out state.
+
+Social account mapping policy:
+
+- Existing `AuthIdentity(provider, providerAccountId)` wins.
+- If no identity exists and the provider supplies a verified email, Cryptory links to an existing user with that email.
+- If no identity exists and no verified email is available, the server rejects the login with `SOCIAL_EMAIL_REQUIRED`.
+- New social users receive initial holdings like email signups and get a Cryptory access/refresh session after provider verification.
+
+## App Review And Legal Config
+
+- `GET /api/v1/app/config`
+- `GET /api/v1/legal/config`
+
+These public endpoints expose `appName`, legal/support URLs, account route contracts, social login client ids, and app-review readiness. Production startup requires all public legal/support URL env vars to be set to valid URLs: `APP_HOMEPAGE_URL`, `TERMS_URL`, `PRIVACY_POLICY_URL`, `SUPPORT_URL`, `ACCOUNT_DELETION_URL`, and `INVESTMENT_DISCLAIMER_URL`.
+
 ## Security
 
 - User exchange credentials are stored only through DB encrypted fields backed by `EXCHANGE_CREDENTIAL_ENCRYPTION_KEY`.

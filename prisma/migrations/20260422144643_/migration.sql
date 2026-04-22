@@ -1,0 +1,2 @@
+-- RenameIndex
+ALTER INDEX "ExchangeConnectionVerification_exchangeConnectionId_checkedAt_i" RENAME TO "ExchangeConnectionVerification_exchangeConnectionId_checked_idx";

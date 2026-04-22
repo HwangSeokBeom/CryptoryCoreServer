@@ -4,9 +4,11 @@ import jwt from '@fastify/jwt';
 import { env } from './config/env';
 import { logger } from './utils/logger';
 import { AppError, createErrorResponse, mapInfrastructureError } from './utils/errors';
+import { validateAccessSession } from './modules/auth/auth.service';
 
 // Route imports
 import { authRoutes } from './modules/auth/auth.controller';
+import { appConfigRoutes } from './modules/app-config/app-config.controller';
 import { publicMarketRoutes } from './modules/public-market/public-market.controller';
 import { privateAccountRoutes } from './modules/private-account/private-account.controller';
 import { marketRoutes } from './domains/market-data/market.routes';
@@ -30,8 +32,29 @@ export async function buildApp() {
   app.decorate('authenticate', async (request: any, reply: any) => {
     try {
       await request.jwtVerify();
-    } catch {
-      reply.status(401).send(createErrorResponse('인증이 필요합니다'));
+      const sessionId = request.user?.sid ?? request.user?.sessionId;
+      if (sessionId && typeof validateAccessSession === 'function') {
+        const active = await validateAccessSession(request.user.id, sessionId);
+        if (!active) {
+          return reply.status(401).send(createErrorResponse('세션이 만료되었거나 폐기되었습니다', undefined, 'SESSION_INVALID'));
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: unknown }).code) : '';
+      const expired = code.includes('EXPIRED') || /expired/i.test(message);
+      const reason = expired ? 'access_token_expired' : 'access_token_invalid';
+      logger.warn(
+        { domain: 'auth', action: 'session_restore_failed', reason, err: error },
+        `[AuthDebug] action=session_restore_failed reason=${reason}`,
+      );
+      reply
+        .status(401)
+        .send(createErrorResponse(
+          expired ? 'access token이 만료되었습니다' : '인증이 필요합니다',
+          undefined,
+          expired ? 'ACCESS_TOKEN_EXPIRED' : 'ACCESS_TOKEN_INVALID',
+        ));
     }
   });
 
@@ -93,6 +116,7 @@ export async function buildApp() {
 
   // Register routes
   await app.register(authRoutes);
+  await app.register(appConfigRoutes);
   await app.register(publicMarketRoutes, { prefix: '/api/v1/public' });
   await app.register(privateAccountRoutes, { prefix: '/api/v1/private' });
   await app.register(marketRoutes, { prefix: '/market' });

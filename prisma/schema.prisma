@@ -23,8 +23,44 @@ model User {
   exchangeConnections ExchangeConnection[]
   exchangeConnectionVerifications ExchangeConnectionVerification[]
   orderRequests       OrderRequest[]
+  authSessions        AuthSession[]
+  authIdentities      AuthIdentity[]
 
   @@unique([authProvider, providerAccountId])
+}
+
+model AuthSession {
+  id               String    @id @default(uuid())
+  userId           String
+  user             User      @relation(fields: [userId], references: [id])
+  refreshTokenHash String
+  userAgent        String?
+  ipAddress        String?
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  lastUsedAt       DateTime  @default(now())
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([revokedAt])
+}
+
+model AuthIdentity {
+  id                String   @id @default(uuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id])
+  provider          String
+  providerAccountId String
+  email             String?
+  emailVerified     Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@index([email])
 }
 
 model Coin {

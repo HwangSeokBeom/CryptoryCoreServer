@@ -2,12 +2,24 @@ import 'dotenv/config';
 
 import { z } from 'zod';
 
+const optionalUrl = z.preprocess((value) => value === '' ? undefined : value, z.string().url().optional());
+
 const envSchema = z.object({
   DATABASE_URL: z.string().url(),
   REDIS_URL: z.string(),
   JWT_SECRET: z.string().min(10).optional(),
   JWT_ACCESS_SECRET: z.string().min(10).optional(),
+  JWT_ACCESS_EXPIRES_IN: z.string().optional(),
   JWT_EXPIRES_IN: z.string().default('7d'),
+  JWT_REFRESH_EXPIRES_IN: z.string().default('30d'),
+  GOOGLE_CLIENT_IDS: z.string().default('142113558371-t5s22ri6gjl5aur76s81910gf2hb8p09.apps.googleusercontent.com'),
+  APPLE_CLIENT_IDS: z.string().default('com.hwb.Cryptory'),
+  APP_HOMEPAGE_URL: optionalUrl,
+  TERMS_URL: optionalUrl,
+  PRIVACY_POLICY_URL: optionalUrl,
+  SUPPORT_URL: optionalUrl,
+  ACCOUNT_DELETION_URL: optionalUrl,
+  INVESTMENT_DISCLAIMER_URL: optionalUrl,
   PORT: z.coerce.number().default(3000),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   USE_LIVE_DATA: z.coerce.boolean().default(false),
@@ -60,6 +72,27 @@ const envSchema = z.object({
   BINANCE_WS_URL: z.string().url().optional(),
   BINANCE_PUBLIC_WS_URL: z.string().url().optional(),
   BINANCE_PRIVATE_WS_URL: z.string().url().optional(),
+}).superRefine((value, ctx) => {
+  if (value.NODE_ENV !== 'production') {
+    return;
+  }
+
+  for (const key of [
+    'APP_HOMEPAGE_URL',
+    'TERMS_URL',
+    'PRIVACY_POLICY_URL',
+    'SUPPORT_URL',
+    'ACCOUNT_DELETION_URL',
+    'INVESTMENT_DISCLAIMER_URL',
+  ] as const) {
+    if (!value[key]) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [key],
+        message: `${key} is required in production for app review readiness`,
+      });
+    }
+  }
 });
 
 export interface Env {
@@ -67,6 +100,16 @@ export interface Env {
   REDIS_URL: string;
   JWT_SECRET: string;
   JWT_EXPIRES_IN: string;
+  JWT_ACCESS_EXPIRES_IN: string;
+  JWT_REFRESH_EXPIRES_IN: string;
+  GOOGLE_CLIENT_IDS: string[];
+  APPLE_CLIENT_IDS: string[];
+  APP_HOMEPAGE_URL?: string;
+  TERMS_URL?: string;
+  PRIVACY_POLICY_URL?: string;
+  SUPPORT_URL?: string;
+  ACCOUNT_DELETION_URL?: string;
+  INVESTMENT_DISCLAIMER_URL?: string;
   PORT: number;
   NODE_ENV: 'development' | 'production' | 'test';
   USE_LIVE_DATA: boolean;
@@ -121,6 +164,13 @@ export interface Env {
   BINANCE_PRIVATE_WS_URL?: string;
 }
 
+function parseCsvList(value: string) {
+  return value
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function loadEnv(): Env {
   const parsed = envSchema.safeParse(process.env);
   if (!parsed.success) {
@@ -139,6 +189,16 @@ function loadEnv(): Env {
     REDIS_URL: parsed.data.REDIS_URL,
     JWT_SECRET: jwtSecret,
     JWT_EXPIRES_IN: parsed.data.JWT_EXPIRES_IN,
+    JWT_ACCESS_EXPIRES_IN: parsed.data.JWT_ACCESS_EXPIRES_IN ?? parsed.data.JWT_EXPIRES_IN,
+    JWT_REFRESH_EXPIRES_IN: parsed.data.JWT_REFRESH_EXPIRES_IN,
+    GOOGLE_CLIENT_IDS: parseCsvList(parsed.data.GOOGLE_CLIENT_IDS),
+    APPLE_CLIENT_IDS: parseCsvList(parsed.data.APPLE_CLIENT_IDS),
+    APP_HOMEPAGE_URL: parsed.data.APP_HOMEPAGE_URL,
+    TERMS_URL: parsed.data.TERMS_URL,
+    PRIVACY_POLICY_URL: parsed.data.PRIVACY_POLICY_URL,
+    SUPPORT_URL: parsed.data.SUPPORT_URL,
+    ACCOUNT_DELETION_URL: parsed.data.ACCOUNT_DELETION_URL,
+    INVESTMENT_DISCLAIMER_URL: parsed.data.INVESTMENT_DISCLAIMER_URL,
     PORT: parsed.data.PORT,
     NODE_ENV: parsed.data.NODE_ENV,
     USE_LIVE_DATA: parsed.data.USE_LIVE_DATA,

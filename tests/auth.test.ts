@@ -1,15 +1,35 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { buildApp } from '../src/app';
-import { registerUser } from '../src/modules/auth/auth.service';
+import {
+  createSessionForUser,
+  loginWithGoogle,
+  refreshSession,
+  registerUser,
+  revokeSessionByRefreshToken,
+} from '../src/modules/auth/auth.service';
 import { AppError } from '../src/utils/errors';
 
 vi.mock('../src/modules/auth/auth.service', () => ({
   registerUser: vi.fn(),
   loginUser: vi.fn(),
   getCurrentUserProfile: vi.fn(),
+  createSessionForUser: vi.fn(),
+  refreshSession: vi.fn(),
+  revokeAllUserSessions: vi.fn(),
+  revokeSessionById: vi.fn(),
+  revokeSessionByRefreshToken: vi.fn(),
+  getSessionSnapshot: vi.fn(),
+  loginWithGoogle: vi.fn(),
+  loginWithApple: vi.fn(),
+  deleteUserAccount: vi.fn(),
+  validateAccessSession: vi.fn(),
 }));
 
 const registerUserMock = vi.mocked(registerUser);
+const createSessionForUserMock = vi.mocked(createSessionForUser);
+const refreshSessionMock = vi.mocked(refreshSession);
+const loginWithGoogleMock = vi.mocked(loginWithGoogle);
+const revokeSessionByRefreshTokenMock = vi.mocked(revokeSessionByRefreshToken);
 
 const authUser = {
   id: 'user-1',
@@ -31,6 +51,13 @@ describe('Auth API', () => {
     const routes = app.printRoutes({ commonPrefix: false });
     expect(routes).toContain('/auth/register');
     expect(routes).toContain('/api/v1/auth/register');
+    expect(routes).toContain('/api/v1/auth/refresh');
+    expect(routes).toContain('/api/v1/auth/social/google');
+    expect(routes).toContain('/api/v1/auth/social/apple');
+    expect(routes).toContain('/api/v1/auth/logout');
+    expect(routes).toContain('/api/v1/auth/session');
+    expect(routes).toContain('/api/v1/auth/account');
+    expect(routes).toContain('/api/v1/app/config');
     expect(app.hasRoute({ method: 'POST', url: '/auth/register' })).toBe(true);
     expect(app.hasRoute({ method: 'POST', url: '/api/v1/auth/register' })).toBe(true);
     await app.close();
@@ -38,6 +65,11 @@ describe('Auth API', () => {
 
   it('POST /api/v1/auth/register - creates a session for valid input', async () => {
     registerUserMock.mockResolvedValueOnce(authUser);
+    createSessionForUserMock.mockResolvedValueOnce({
+      sessionId: 'session-1',
+      refreshToken: 'session-1.refresh-token-secret',
+      refreshTokenExpiresAt: new Date('2026-05-21T00:00:00.000Z'),
+    });
     const app = await buildApp();
     const res = await app.inject({
       method: 'POST',
@@ -51,6 +83,9 @@ describe('Auth API', () => {
     expect(body.data.user).toEqual(authUser);
     expect(typeof body.data.token).toBe('string');
     expect(body.data.token.length).toBeGreaterThan(0);
+    expect(body.data.accessToken).toBe(body.data.token);
+    expect(body.data.refreshToken).toBe('session-1.refresh-token-secret');
+    expect(body.data.sessionId).toBe('session-1');
     await app.close();
   });
 
@@ -147,6 +182,72 @@ describe('Auth API', () => {
     expect(res.statusCode).toBe(400);
     const body = JSON.parse(res.body);
     expect(body.success).toBe(false);
+    await app.close();
+  });
+
+  it('POST /api/v1/auth/refresh - rotates refresh token and returns a new access token', async () => {
+    refreshSessionMock.mockResolvedValueOnce({
+      user: authUser,
+      sessionId: 'session-1',
+      refreshToken: 'session-1.rotated-refresh-token-secret',
+      refreshTokenExpiresAt: new Date('2026-05-21T00:00:00.000Z'),
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/refresh',
+      payload: { refreshToken: 'session-1.original-refresh-token-secret' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(true);
+    expect(body.data.user).toEqual(authUser);
+    expect(body.data.accessToken).toBe(body.data.token);
+    expect(body.data.refreshToken).toBe('session-1.rotated-refresh-token-secret');
+    expect(refreshSessionMock).toHaveBeenCalledWith(
+      'session-1.original-refresh-token-secret',
+      expect.objectContaining({ ipAddress: expect.any(String) }),
+    );
+    await app.close();
+  });
+
+  it('POST /api/v1/auth/social/google - exchanges a verified provider user for a Cryptory session', async () => {
+    loginWithGoogleMock.mockResolvedValueOnce({ ...authUser, authProvider: 'google' });
+    createSessionForUserMock.mockResolvedValueOnce({
+      sessionId: 'session-google',
+      refreshToken: 'session-google.refresh-token-secret',
+      refreshTokenExpiresAt: new Date('2026-05-21T00:00:00.000Z'),
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/social/google',
+      payload: { idToken: 'header.payload.signature.long-enough' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(true);
+    expect(body.data.user.authProvider).toBe('google');
+    expect(body.data.refreshToken).toBe('session-google.refresh-token-secret');
+    await app.close();
+  });
+
+  it('POST /api/v1/auth/logout - revokes a refresh token without requiring a valid access token', async () => {
+    revokeSessionByRefreshTokenMock.mockResolvedValueOnce(1);
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/logout',
+      payload: { refreshToken: 'session-1.refresh-token-secret' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(true);
+    expect(body.data.revokedSessionCount).toBe(1);
+    expect(revokeSessionByRefreshTokenMock).toHaveBeenCalledWith('session-1.refresh-token-secret');
     await app.close();
   });
 });

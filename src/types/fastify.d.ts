@@ -13,11 +13,15 @@ declare module '@fastify/jwt' {
       id: string;
       email: string;
       authProvider?: string;
+      sid?: string;
+      sessionId?: string;
     };
     user: {
       id: string;
       email: string;
       authProvider?: string;
+      sid?: string;
+      sessionId?: string;
     };
   }
 }

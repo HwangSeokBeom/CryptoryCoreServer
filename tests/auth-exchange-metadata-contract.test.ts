@@ -3,6 +3,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../src/modules/auth/auth.service', () => ({
   registerUser: vi.fn(),
   loginUser: vi.fn(),
+  createSessionForUser: vi.fn(),
+  refreshSession: vi.fn(),
+  revokeAllUserSessions: vi.fn(),
+  revokeSessionById: vi.fn(),
+  revokeSessionByRefreshToken: vi.fn(),
+  getSessionSnapshot: vi.fn(),
+  loginWithGoogle: vi.fn(),
+  loginWithApple: vi.fn(),
+  deleteUserAccount: vi.fn(),
+  validateAccessSession: vi.fn(async () => true),
   getCurrentUserProfile: vi.fn(async () => ({
     id: 'user-1',
     email: 'user@example.com',

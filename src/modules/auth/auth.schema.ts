@@ -30,6 +30,37 @@ export const LoginInput = z.object({
   password: z.string().min(1),
 });
 
+export const RefreshTokenInput = z.object({
+  refreshToken: z.string().min(20),
+});
+
+export const LogoutInput = z.object({
+  refreshToken: z.string().min(20).optional(),
+  logoutAll: z.boolean().optional(),
+}).optional();
+
+export const GoogleLoginInput = z.object({
+  idToken: z.string().min(20).optional(),
+  credential: z.string().min(20).optional(),
+  deviceId: z.string().trim().max(128).optional(),
+}).refine((value) => Boolean(value.idToken ?? value.credential), {
+  message: 'GOOGLE_ID_TOKEN_REQUIRED',
+  path: ['idToken'],
+});
+
+export const AppleLoginInput = z.object({
+  identityToken: z.string().min(20).optional(),
+  idToken: z.string().min(20).optional(),
+  authorizationCode: z.string().min(1).optional(),
+  fullName: z.string().trim().max(80).optional(),
+  givenName: z.string().trim().max(40).optional(),
+  familyName: z.string().trim().max(40).optional(),
+  deviceId: z.string().trim().max(128).optional(),
+}).refine((value) => Boolean(value.identityToken ?? value.idToken), {
+  message: 'APPLE_IDENTITY_TOKEN_REQUIRED',
+  path: ['identityToken'],
+});
+
 export const AuthUserResponse = z.object({
   id: z.string(),
   email: z.string().email(),
@@ -42,9 +73,19 @@ export const AuthUserResponse = z.object({
 export const AuthSessionResponse = z.object({
   user: AuthUserResponse,
   token: z.string().min(1),
+  accessToken: z.string().min(1),
+  refreshToken: z.string().min(1),
+  tokenType: z.literal('Bearer'),
+  expiresIn: z.string(),
+  refreshTokenExpiresAt: z.string(),
+  sessionId: z.string(),
 });
 
 export type RegisterInputType = z.infer<typeof RegisterInput>;
 export type LoginInputType = z.infer<typeof LoginInput>;
+export type RefreshTokenInputType = z.infer<typeof RefreshTokenInput>;
+export type LogoutInputType = z.infer<typeof LogoutInput>;
+export type GoogleLoginInputType = z.infer<typeof GoogleLoginInput>;
+export type AppleLoginInputType = z.infer<typeof AppleLoginInput>;
 export type AuthUserResponseType = z.infer<typeof AuthUserResponse>;
 export type AuthSessionResponseType = z.infer<typeof AuthSessionResponse>;

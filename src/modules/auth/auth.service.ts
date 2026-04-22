@@ -1,18 +1,25 @@
 import bcrypt from 'bcrypt';
-import { randomUUID } from 'crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../config/database';
+import { env } from '../../config/env';
 import { AppError } from '../../utils/errors';
 import { logger } from '../../utils/logger';
-import type { LoginInputType, RegisterInputType } from './auth.schema';
+import type { AppleLoginInputType, GoogleLoginInputType, LoginInputType, RegisterInputType } from './auth.schema';
+import { verifyAppleIdentityToken, verifyGoogleIdToken, type VerifiedSocialToken } from './social-token.verifier';
 
 const EMAIL_AUTH_PROVIDER = 'email';
+const GOOGLE_AUTH_PROVIDER = 'google';
+const APPLE_AUTH_PROVIDER = 'apple';
 const EMAIL_ALREADY_EXISTS = 'EMAIL_ALREADY_EXISTS';
 const AUTH_REGISTER_FAILED = 'AUTH_REGISTER_FAILED';
+const REFRESH_TOKEN_INVALID = 'REFRESH_TOKEN_INVALID';
+const SOCIAL_EMAIL_REQUIRED = 'SOCIAL_EMAIL_REQUIRED';
 
 const userProfileSelect = {
   id: true,
   email: true,
+  authProvider: true,
   nickname: true,
   createdAt: true,
   updatedAt: true,
@@ -28,6 +35,50 @@ const INITIAL_HOLDINGS = [
 
 function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
+}
+
+function parseDurationMs(input: string) {
+  const match = input.trim().match(/^(\d+)(ms|s|m|h|d)?$/i);
+  if (!match) {
+    return 30 * 24 * 60 * 60 * 1000;
+  }
+
+  const value = Number(match[1]);
+  const unit = (match[2] ?? 'ms').toLowerCase();
+  switch (unit) {
+    case 'd':
+      return value * 24 * 60 * 60 * 1000;
+    case 'h':
+      return value * 60 * 60 * 1000;
+    case 'm':
+      return value * 60 * 1000;
+    case 's':
+      return value * 1000;
+    default:
+      return value;
+  }
+}
+
+function createRefreshToken(sessionId: string) {
+  return `${sessionId}.${randomBytes(32).toString('base64url')}`;
+}
+
+function hashRefreshToken(refreshToken: string) {
+  return createHash('sha256').update(refreshToken).digest('hex');
+}
+
+function safeCompareHash(left: string, right: string) {
+  const leftBuffer = Buffer.from(left, 'hex');
+  const rightBuffer = Buffer.from(right, 'hex');
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function extractSessionId(refreshToken: string) {
+  const [sessionId, secret] = refreshToken.split('.');
+  if (!sessionId || !secret) {
+    return null;
+  }
+  return sessionId;
 }
 
 function createEmailAlreadyExistsError() {
@@ -63,6 +114,7 @@ function isMissingLegacyAuthColumnError(error: unknown) {
 function toUserProfile(user: {
   id: string;
   email: string;
+  authProvider?: string;
   nickname: string;
   createdAt: Date;
   updatedAt: Date;
@@ -71,10 +123,23 @@ function toUserProfile(user: {
     id: user.id,
     email: user.email,
     nickname: user.nickname,
-    authProvider: EMAIL_AUTH_PROVIDER,
+    authProvider: user.authProvider ?? EMAIL_AUTH_PROVIDER,
     createdAt: user.createdAt.toISOString(),
     updatedAt: user.updatedAt.toISOString(),
   };
+}
+
+async function createInitialHoldings(tx: Prisma.TransactionClient, userId: string) {
+  for (const holding of INITIAL_HOLDINGS) {
+    await tx.holding.create({
+      data: {
+        userId,
+        coinId: holding.coinId,
+        quantity: holding.quantity,
+        avgPrice: holding.avgPrice,
+      },
+    });
+  }
 }
 
 async function createUserWithLegacySchemaFallback(
@@ -157,16 +222,7 @@ export async function registerUser(input: RegisterInputType) {
 
     logger.info({ domain: 'auth', userId: newUser.id, email: normalizedEmail }, 'Auth register user created');
 
-    for (const holding of INITIAL_HOLDINGS) {
-      await tx.holding.create({
-        data: {
-          userId: newUser.id,
-          coinId: holding.coinId,
-          quantity: holding.quantity,
-          avgPrice: holding.avgPrice,
-        },
-      });
-    }
+    await createInitialHoldings(tx, newUser.id);
 
     return newUser;
   });
@@ -240,4 +296,447 @@ export async function getCurrentUserProfile(userId: string) {
   }
 
   return toUserProfile(user);
+}
+
+export async function createSessionForUser(
+  userId: string,
+  metadata?: { userAgent?: string; ipAddress?: string },
+) {
+  const sessionId = randomUUID();
+  const refreshToken = createRefreshToken(sessionId);
+  const expiresAt = new Date(Date.now() + parseDurationMs(env.JWT_REFRESH_EXPIRES_IN));
+
+  const session = await prisma.authSession.create({
+    data: {
+      id: sessionId,
+      userId,
+      refreshTokenHash: hashRefreshToken(refreshToken),
+      userAgent: metadata?.userAgent,
+      ipAddress: metadata?.ipAddress,
+      expiresAt,
+    },
+    select: {
+      id: true,
+      expiresAt: true,
+    },
+  });
+
+  return {
+    sessionId: session.id,
+    refreshToken,
+    refreshTokenExpiresAt: session.expiresAt,
+  };
+}
+
+export async function refreshSession(refreshToken: string, metadata?: { userAgent?: string; ipAddress?: string }) {
+  const sessionId = extractSessionId(refreshToken);
+  if (!sessionId) {
+    logger.warn(
+      { domain: 'auth', action: 'refresh_failed', reason: 'malformed' },
+      '[AuthDebug] action=refresh_failed reason=malformed',
+    );
+    throw new AppError(401, 'refresh token이 올바르지 않습니다', undefined, REFRESH_TOKEN_INVALID);
+  }
+
+  const session = await prisma.authSession.findUnique({
+    where: { id: sessionId },
+    include: {
+      user: {
+        select: userProfileSelect,
+      },
+    },
+  });
+
+  if (!session) {
+    logger.warn(
+      { domain: 'auth', action: 'refresh_failed', reason: 'session_not_found', sessionId },
+      '[AuthDebug] action=refresh_failed reason=session_not_found',
+    );
+    throw new AppError(401, '세션을 찾을 수 없습니다', undefined, REFRESH_TOKEN_INVALID);
+  }
+
+  if (session.revokedAt) {
+    logger.warn(
+      { domain: 'auth', action: 'refresh_failed', reason: 'revoked', sessionId },
+      '[AuthDebug] action=refresh_failed reason=revoked',
+    );
+    throw new AppError(401, '폐기된 refresh token입니다', undefined, 'REFRESH_TOKEN_REVOKED');
+  }
+
+  if (session.expiresAt.getTime() <= Date.now()) {
+    logger.warn(
+      { domain: 'auth', action: 'refresh_failed', reason: 'expired', sessionId },
+      '[AuthDebug] action=refresh_failed reason=expired',
+    );
+    throw new AppError(401, 'refresh token이 만료되었습니다', undefined, 'REFRESH_TOKEN_EXPIRED');
+  }
+
+  if (!safeCompareHash(hashRefreshToken(refreshToken), session.refreshTokenHash)) {
+    logger.warn(
+      { domain: 'auth', action: 'refresh_failed', reason: 'hash_mismatch', sessionId },
+      '[AuthDebug] action=refresh_failed reason=hash_mismatch',
+    );
+    throw new AppError(401, 'refresh token이 올바르지 않습니다', undefined, REFRESH_TOKEN_INVALID);
+  }
+
+  const rotatedRefreshToken = createRefreshToken(session.id);
+  const updated = await prisma.authSession.update({
+    where: { id: session.id },
+    data: {
+      refreshTokenHash: hashRefreshToken(rotatedRefreshToken),
+      userAgent: metadata?.userAgent ?? session.userAgent,
+      ipAddress: metadata?.ipAddress ?? session.ipAddress,
+      lastUsedAt: new Date(),
+    },
+    select: {
+      id: true,
+      expiresAt: true,
+    },
+  });
+
+  logger.info(
+    { domain: 'auth', action: 'refresh_success', userId: session.userId, sessionId: session.id },
+    `[AuthDebug] action=refresh_success userId=${session.userId} sessionId=${session.id}`,
+  );
+
+  return {
+    user: toUserProfile(session.user),
+    sessionId: updated.id,
+    refreshToken: rotatedRefreshToken,
+    refreshTokenExpiresAt: updated.expiresAt,
+  };
+}
+
+export async function validateAccessSession(userId: string, sessionId?: string) {
+  if (!sessionId) {
+    return true;
+  }
+
+  const session = await prisma.authSession.findUnique({
+    where: { id: sessionId },
+    select: {
+      id: true,
+      userId: true,
+      expiresAt: true,
+      revokedAt: true,
+    },
+  });
+
+  if (!session) {
+    logger.warn(
+      { domain: 'auth', action: 'session_restore_failed', reason: 'session_not_found', userId, sessionId },
+      '[AuthDebug] action=session_restore_failed reason=session_not_found',
+    );
+    return false;
+  }
+
+  const active = session.userId === userId && !session.revokedAt && session.expiresAt.getTime() > Date.now();
+  if (!active) {
+    const reason = session.userId !== userId ? 'user_mismatch' : session.revokedAt ? 'revoked' : 'expired';
+    logger.warn(
+      { domain: 'auth', action: 'session_restore_failed', reason, userId, sessionId },
+      `[AuthDebug] action=session_restore_failed reason=${reason}`,
+    );
+  }
+  return active;
+}
+
+export async function getSessionSnapshot(userId: string, sessionId?: string) {
+  const user = await getCurrentUserProfile(userId);
+  if (!sessionId) {
+    return {
+      user,
+      session: null,
+      restore: {
+        state: 'access_token_only',
+        refreshAvailable: false,
+      },
+    };
+  }
+
+  const session = await prisma.authSession.findUnique({
+    where: { id: sessionId },
+    select: {
+      id: true,
+      expiresAt: true,
+      revokedAt: true,
+      lastUsedAt: true,
+      createdAt: true,
+    },
+  });
+
+  if (!session || session.revokedAt || session.expiresAt.getTime() <= Date.now()) {
+    logger.warn(
+      {
+        domain: 'auth',
+        action: 'session_restore_failed',
+        reason: !session ? 'session_not_found' : session.revokedAt ? 'revoked' : 'expired',
+        userId,
+        sessionId,
+      },
+      `[AuthDebug] action=session_restore_failed reason=${!session ? 'session_not_found' : session.revokedAt ? 'revoked' : 'expired'}`,
+    );
+    throw new AppError(401, '세션을 복구할 수 없습니다', undefined, 'SESSION_INVALID');
+  }
+
+  return {
+    user,
+    session: {
+      id: session.id,
+      expiresAt: session.expiresAt.toISOString(),
+      lastUsedAt: session.lastUsedAt.toISOString(),
+      createdAt: session.createdAt.toISOString(),
+    },
+    restore: {
+      state: 'authenticated',
+      refreshAvailable: true,
+    },
+  };
+}
+
+export async function revokeSessionByRefreshToken(refreshToken: string) {
+  const sessionId = extractSessionId(refreshToken);
+  if (!sessionId) {
+    return 0;
+  }
+
+  const result = await prisma.authSession.updateMany({
+    where: {
+      id: sessionId,
+      refreshTokenHash: hashRefreshToken(refreshToken),
+      revokedAt: null,
+    },
+    data: {
+      revokedAt: new Date(),
+    },
+  });
+  return result.count;
+}
+
+export async function revokeSessionById(userId: string, sessionId: string) {
+  const result = await prisma.authSession.updateMany({
+    where: {
+      id: sessionId,
+      userId,
+      revokedAt: null,
+    },
+    data: {
+      revokedAt: new Date(),
+    },
+  });
+  return result.count;
+}
+
+export async function revokeAllUserSessions(userId: string) {
+  const result = await prisma.authSession.updateMany({
+    where: {
+      userId,
+      revokedAt: null,
+    },
+    data: {
+      revokedAt: new Date(),
+    },
+  });
+  return result.count;
+}
+
+function normalizeSocialNickname(params: {
+  provider: string;
+  email?: string;
+  tokenName?: string;
+  requestedName?: string;
+}) {
+  const raw = params.requestedName
+    ?? params.tokenName
+    ?? params.email?.split('@')[0]
+    ?? `${params.provider} user`;
+  const normalized = raw.trim().replace(/\s+/g, ' ');
+  return (normalized || `${params.provider} user`).slice(0, 20);
+}
+
+async function findOrCreateSocialUser(params: {
+  provider: typeof GOOGLE_AUTH_PROVIDER | typeof APPLE_AUTH_PROVIDER;
+  token: VerifiedSocialToken;
+  requestedName?: string;
+}) {
+  const providerAccountId = params.token.sub;
+  const existingIdentity = await prisma.authIdentity.findUnique({
+    where: {
+      provider_providerAccountId: {
+        provider: params.provider,
+        providerAccountId,
+      },
+    },
+    include: {
+      user: {
+        select: userProfileSelect,
+      },
+    },
+  });
+
+  if (existingIdentity) {
+    if (params.token.email && params.token.email !== existingIdentity.email) {
+      await prisma.authIdentity.update({
+        where: { id: existingIdentity.id },
+        data: {
+          email: params.token.email,
+          emailVerified: params.token.emailVerified,
+        },
+      });
+    }
+    return toUserProfile(existingIdentity.user);
+  }
+
+  const legacyProviderUser = await prisma.user.findUnique({
+    where: {
+      authProvider_providerAccountId: {
+        authProvider: params.provider,
+        providerAccountId,
+      },
+    },
+    select: userProfileSelect,
+  });
+
+  if (legacyProviderUser) {
+    await prisma.authIdentity.create({
+      data: {
+        userId: legacyProviderUser.id,
+        provider: params.provider,
+        providerAccountId,
+        email: params.token.email,
+        emailVerified: params.token.emailVerified,
+      },
+    });
+    return toUserProfile(legacyProviderUser);
+  }
+
+  if (!params.token.email || !params.token.emailVerified) {
+    throw new AppError(
+      400,
+      '소셜 로그인 계정 식별을 위해 검증된 이메일이 필요합니다',
+      { provider: params.provider },
+      SOCIAL_EMAIL_REQUIRED,
+    );
+  }
+
+  const email = normalizeEmail(params.token.email);
+  const passwordHash = await bcrypt.hash(randomUUID(), 10);
+  const nickname = normalizeSocialNickname({
+    provider: params.provider,
+    email,
+    tokenName: params.token.name,
+    requestedName: params.requestedName,
+  });
+
+  try {
+    const user = await prisma.$transaction(async (tx) => {
+      const existingUser = await tx.user.findUnique({
+        where: { email },
+        select: userProfileSelect,
+      });
+
+      if (existingUser) {
+        await tx.authIdentity.create({
+          data: {
+            userId: existingUser.id,
+            provider: params.provider,
+            providerAccountId,
+            email,
+            emailVerified: true,
+          },
+        });
+        return existingUser;
+      }
+
+      const newUser = await tx.user.create({
+        data: {
+          email,
+          authProvider: params.provider,
+          providerAccountId,
+          passwordHash,
+          nickname,
+          cash: 15000000,
+          authIdentities: {
+            create: {
+              provider: params.provider,
+              providerAccountId,
+              email,
+              emailVerified: true,
+            },
+          },
+        },
+        select: userProfileSelect,
+      });
+
+      await createInitialHoldings(tx, newUser.id);
+      return newUser;
+    });
+
+    return toUserProfile(user);
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      const identity = await prisma.authIdentity.findUnique({
+        where: {
+          provider_providerAccountId: {
+            provider: params.provider,
+            providerAccountId,
+          },
+        },
+        include: {
+          user: {
+            select: userProfileSelect,
+          },
+        },
+      });
+      if (identity) {
+        return toUserProfile(identity.user);
+      }
+    }
+    throw error;
+  }
+}
+
+export async function loginWithGoogle(input: GoogleLoginInputType) {
+  const token = await verifyGoogleIdToken(input.idToken ?? input.credential ?? '');
+  return findOrCreateSocialUser({
+    provider: GOOGLE_AUTH_PROVIDER,
+    token,
+  });
+}
+
+export async function loginWithApple(input: AppleLoginInputType) {
+  const token = await verifyAppleIdentityToken(input.identityToken ?? input.idToken ?? '');
+  const fullName = input.fullName ?? [input.givenName, input.familyName].filter(Boolean).join(' ');
+  return findOrCreateSocialUser({
+    provider: APPLE_AUTH_PROVIDER,
+    token,
+    requestedName: fullName || undefined,
+  });
+}
+
+export async function deleteUserAccount(userId: string) {
+  const result = await prisma.$transaction(async (tx) => {
+    const sessionResult = await tx.authSession.deleteMany({ where: { userId } });
+    await tx.authIdentity.deleteMany({ where: { userId } });
+    await tx.orderRequest.deleteMany({ where: { userId } });
+    await tx.exchangeConnectionVerification.deleteMany({ where: { userId } });
+    await tx.exchangeConnection.deleteMany({ where: { userId } });
+    await tx.order.deleteMany({ where: { userId } });
+    await tx.holding.deleteMany({ where: { userId } });
+    await tx.favorite.deleteMany({ where: { userId } });
+    await tx.user.delete({ where: { id: userId } });
+    return sessionResult.count;
+  });
+
+  logger.info(
+    { domain: 'auth', action: 'delete_account', userId, sessionCount: result },
+    `[AccountLifecycleDebug] action=delete_account userId=${userId} sessionCount=${result}`,
+  );
+
+  return {
+    deletedAt: new Date().toISOString(),
+    revokedSessionCount: result,
+    canRejoin: true,
+    socialRelinkingPolicy: 'provider subject mappings are deleted with the account; the same social account may create or link a new Cryptory account on next login',
+  };
 }
