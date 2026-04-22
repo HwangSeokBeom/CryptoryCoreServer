@@ -3,3 +3,9 @@ dist/
 .env
 *.log
 .DS_Store
+
+# env files
+.env
+.env.*
+!.env.example
+!server.env.example
