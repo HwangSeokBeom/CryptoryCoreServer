@@ -2,6 +2,7 @@ import { afterEach, describe, it, expect, vi } from 'vitest';
 import { buildApp } from '../src/app';
 import {
   createSessionForUser,
+  loginWithApple,
   loginWithGoogle,
   refreshSession,
   registerUser,
@@ -29,6 +30,7 @@ const registerUserMock = vi.mocked(registerUser);
 const createSessionForUserMock = vi.mocked(createSessionForUser);
 const refreshSessionMock = vi.mocked(refreshSession);
 const loginWithGoogleMock = vi.mocked(loginWithGoogle);
+const loginWithAppleMock = vi.mocked(loginWithApple);
 const revokeSessionByRefreshTokenMock = vi.mocked(revokeSessionByRefreshToken);
 
 const authUser = {
@@ -58,6 +60,7 @@ describe('Auth API', () => {
     expect(routes).toContain('/api/v1/auth/session');
     expect(routes).toContain('/api/v1/auth/account');
     expect(routes).toContain('/api/v1/app/config');
+    expect(routes).toContain('/api/v1/openapi.json');
     expect(app.hasRoute({ method: 'POST', url: '/auth/register' })).toBe(true);
     expect(app.hasRoute({ method: 'POST', url: '/api/v1/auth/register' })).toBe(true);
     await app.close();
@@ -231,6 +234,153 @@ describe('Auth API', () => {
     expect(body.success).toBe(true);
     expect(body.data.user.authProvider).toBe('google');
     expect(body.data.refreshToken).toBe('session-google.refresh-token-secret');
+    await app.close();
+  });
+
+  it('POST /api/v1/auth/social/google - returns 400 when idToken is missing', async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/social/google',
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(false);
+    expect(body.code).toBe('GOOGLE_ID_TOKEN_REQUIRED');
+    expect(loginWithGoogleMock).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('POST /api/v1/auth/social/google - returns 401 for invalid provider token', async () => {
+    loginWithGoogleMock.mockRejectedValueOnce(
+      new AppError(401, '소셜 로그인 토큰 서명이 올바르지 않습니다', undefined, 'SOCIAL_TOKEN_INVALID_SIGNATURE'),
+    );
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/social/google',
+      payload: { idToken: 'header.payload.signature.long-enough' },
+    });
+
+    expect(res.statusCode).toBe(401);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(false);
+    expect(body.code).toBe('SOCIAL_TOKEN_INVALID_SIGNATURE');
+    await app.close();
+  });
+
+  it('POST /api/v1/auth/social/google - returns 403 for audience mismatch', async () => {
+    loginWithGoogleMock.mockRejectedValueOnce(
+      new AppError(403, '소셜 로그인 토큰 대상 앱이 올바르지 않습니다', undefined, 'SOCIAL_TOKEN_INVALID_AUDIENCE'),
+    );
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/social/google',
+      payload: { idToken: 'header.payload.signature.long-enough' },
+    });
+
+    expect(res.statusCode).toBe(403);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(false);
+    expect(body.code).toBe('SOCIAL_TOKEN_INVALID_AUDIENCE');
+    await app.close();
+  });
+
+  it('POST /api/v1/auth/social/apple - exchanges a verified provider user for a Cryptory session', async () => {
+    loginWithAppleMock.mockResolvedValueOnce({ ...authUser, authProvider: 'apple' });
+    createSessionForUserMock.mockResolvedValueOnce({
+      sessionId: 'session-apple',
+      refreshToken: 'session-apple.refresh-token-secret',
+      refreshTokenExpiresAt: new Date('2026-05-21T00:00:00.000Z'),
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/social/apple',
+      payload: {
+        identityToken: 'header.payload.signature.long-enough',
+        authorizationCode: 'auth-code',
+        fullName: 'Apple User',
+        email: 'apple@example.com',
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(true);
+    expect(body.data.user.authProvider).toBe('apple');
+    expect(body.data.accessToken).toBe(body.data.token);
+    expect(body.data.refreshToken).toBe('session-apple.refresh-token-secret');
+    await app.close();
+  });
+
+  it('POST /api/v1/auth/social/apple - returns 400 when identityToken is missing', async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/social/apple',
+      payload: { authorizationCode: 'auth-code' },
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(false);
+    expect(body.code).toBe('APPLE_IDENTITY_TOKEN_REQUIRED');
+    expect(loginWithAppleMock).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('POST /api/v1/auth/social/apple - returns 401 for invalid provider token', async () => {
+    loginWithAppleMock.mockRejectedValueOnce(
+      new AppError(401, '소셜 로그인 토큰 서명이 올바르지 않습니다', undefined, 'SOCIAL_TOKEN_INVALID_SIGNATURE'),
+    );
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/social/apple',
+      payload: { identityToken: 'header.payload.signature.long-enough' },
+    });
+
+    expect(res.statusCode).toBe(401);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(false);
+    expect(body.code).toBe('SOCIAL_TOKEN_INVALID_SIGNATURE');
+    await app.close();
+  });
+
+  it('POST /api/v1/auth/social/apple - returns 403 for audience mismatch', async () => {
+    loginWithAppleMock.mockRejectedValueOnce(
+      new AppError(403, '소셜 로그인 토큰 대상 앱이 올바르지 않습니다', undefined, 'SOCIAL_TOKEN_INVALID_AUDIENCE'),
+    );
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/social/apple',
+      payload: { identityToken: 'header.payload.signature.long-enough' },
+    });
+
+    expect(res.statusCode).toBe(403);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(false);
+    expect(body.code).toBe('SOCIAL_TOKEN_INVALID_AUDIENCE');
+    await app.close();
+  });
+
+  it('GET /api/v1/openapi.json - documents social login contracts', async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/v1/openapi.json',
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.openapi).toBe('3.0.3');
+    expect(body.paths['/api/v1/auth/social/google'].post.requestBody.content['application/json'].schema.required).toContain('idToken');
+    expect(body.paths['/api/v1/auth/social/apple'].post.requestBody.content['application/json'].schema.required).toContain('identityToken');
     await app.close();
   });
 

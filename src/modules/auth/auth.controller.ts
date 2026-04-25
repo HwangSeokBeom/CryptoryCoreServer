@@ -227,7 +227,8 @@ export async function authRoutes(app: FastifyInstance) {
   app.post('/api/v1/auth/social/google', async (request, reply) => {
     const parsed = GoogleLoginInput.safeParse(request.body);
     if (!parsed.success) {
-      return reply.status(400).send(createErrorResponse(parsed.error.errors[0].message));
+      const code = parsed.error.errors[0].message;
+      return reply.status(400).send(createErrorResponse(code, undefined, code));
     }
 
     try {
@@ -249,7 +250,8 @@ export async function authRoutes(app: FastifyInstance) {
   app.post('/api/v1/auth/social/apple', async (request, reply) => {
     const parsed = AppleLoginInput.safeParse(request.body);
     if (!parsed.success) {
-      return reply.status(400).send(createErrorResponse(parsed.error.errors[0].message));
+      const code = parsed.error.errors[0].message;
+      return reply.status(400).send(createErrorResponse(code, undefined, code));
     }
 
     try {

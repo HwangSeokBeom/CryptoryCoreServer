@@ -119,6 +119,15 @@ async function verifyOidcToken(params: {
   allowedAudiences: string[];
   issuerAllowed: (issuer: string | undefined) => boolean;
 }) {
+  if (params.allowedAudiences.length === 0) {
+    throw new AppError(
+      500,
+      '소셜 로그인 서버 설정이 누락되었습니다',
+      { provider: params.provider, missing: params.provider === 'google' ? 'GOOGLE_IOS_CLIENT_ID' : 'APPLE_CLIENT_ID' },
+      'SOCIAL_PROVIDER_CONFIG_MISSING',
+    );
+  }
+
   const decoded = decodeJwt(params.token);
   if (decoded.header.alg !== 'RS256' || !decoded.header.kid) {
     throw new AppError(401, '지원하지 않는 소셜 로그인 토큰입니다', undefined, 'SOCIAL_TOKEN_UNSUPPORTED');
@@ -147,7 +156,12 @@ async function verifyOidcToken(params: {
     throw new AppError(401, '소셜 로그인 토큰 발급자가 올바르지 않습니다', undefined, 'SOCIAL_TOKEN_INVALID_ISSUER');
   }
   if (!isAudienceAllowed(decoded.payload.aud, params.allowedAudiences)) {
-    throw new AppError(401, '소셜 로그인 토큰 대상 앱이 올바르지 않습니다', undefined, 'SOCIAL_TOKEN_INVALID_AUDIENCE');
+    throw new AppError(
+      403,
+      '소셜 로그인 토큰 대상 앱이 올바르지 않습니다',
+      { provider: params.provider },
+      'SOCIAL_TOKEN_INVALID_AUDIENCE',
+    );
   }
   if (!decoded.payload.sub) {
     throw new AppError(401, '소셜 로그인 토큰에 사용자 식별자가 없습니다', undefined, 'SOCIAL_TOKEN_MISSING_SUB');
@@ -176,13 +190,24 @@ async function verifyOidcToken(params: {
 }
 
 export async function verifyGoogleIdToken(idToken: string) {
-  return verifyOidcToken({
+  const verified = await verifyOidcToken({
     token: idToken,
     provider: 'google',
     jwksUrl: GOOGLE_JWKS_URL,
     allowedAudiences: env.GOOGLE_CLIENT_IDS,
     issuerAllowed: (issuer) => GOOGLE_ISSUERS.has(String(issuer)),
   });
+
+  if (!verified.email || !verified.emailVerified) {
+    throw new AppError(
+      403,
+      'Google 계정 이메일 검증이 필요합니다',
+      { provider: 'google' },
+      'GOOGLE_EMAIL_NOT_VERIFIED',
+    );
+  }
+
+  return verified;
 }
 
 export async function verifyAppleIdentityToken(identityToken: string) {

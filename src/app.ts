@@ -9,6 +9,7 @@ import { validateAccessSession } from './modules/auth/auth.service';
 // Route imports
 import { authRoutes } from './modules/auth/auth.controller';
 import { appConfigRoutes } from './modules/app-config/app-config.controller';
+import { openApiRoutes } from './modules/openapi/openapi.controller';
 import { publicMarketRoutes } from './modules/public-market/public-market.controller';
 import { privateAccountRoutes } from './modules/private-account/private-account.controller';
 import { marketRoutes } from './domains/market-data/market.routes';
@@ -117,6 +118,7 @@ export async function buildApp() {
   // Register routes
   await app.register(authRoutes);
   await app.register(appConfigRoutes);
+  await app.register(openApiRoutes);
   await app.register(publicMarketRoutes, { prefix: '/api/v1/public' });
   await app.register(privateAccountRoutes, { prefix: '/api/v1/private' });
   await app.register(marketRoutes, { prefix: '/market' });

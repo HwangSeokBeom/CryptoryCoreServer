@@ -41,6 +41,7 @@ export const LogoutInput = z.object({
 
 export const GoogleLoginInput = z.object({
   idToken: z.string().min(20).optional(),
+  accessToken: z.string().min(1).optional(),
   credential: z.string().min(20).optional(),
   deviceId: z.string().trim().max(128).optional(),
 }).refine((value) => Boolean(value.idToken ?? value.credential), {
@@ -53,6 +54,7 @@ export const AppleLoginInput = z.object({
   idToken: z.string().min(20).optional(),
   authorizationCode: z.string().min(1).optional(),
   fullName: z.string().trim().max(80).optional(),
+  email: z.string().trim().email().optional(),
   givenName: z.string().trim().max(40).optional(),
   familyName: z.string().trim().max(40).optional(),
   deviceId: z.string().trim().max(128).optional(),

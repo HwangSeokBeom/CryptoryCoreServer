@@ -12,8 +12,14 @@ const envSchema = z.object({
   JWT_ACCESS_EXPIRES_IN: z.string().optional(),
   JWT_EXPIRES_IN: z.string().default('7d'),
   JWT_REFRESH_EXPIRES_IN: z.string().default('30d'),
-  GOOGLE_CLIENT_IDS: z.string().default('142113558371-t5s22ri6gjl5aur76s81910gf2hb8p09.apps.googleusercontent.com'),
-  APPLE_CLIENT_IDS: z.string().default('com.hwb.Cryptory'),
+  GOOGLE_IOS_CLIENT_ID: z.string().optional(),
+  GOOGLE_WEB_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_IDS: z.string().optional(),
+  APPLE_CLIENT_ID: z.string().optional(),
+  APPLE_CLIENT_IDS: z.string().optional(),
+  APPLE_TEAM_ID: z.string().optional(),
+  APPLE_KEY_ID: z.string().optional(),
+  APPLE_PRIVATE_KEY: z.string().optional(),
   APP_HOMEPAGE_URL: optionalUrl,
   TERMS_URL: optionalUrl,
   PRIVACY_POLICY_URL: optionalUrl,
@@ -80,6 +86,22 @@ const envSchema = z.object({
     return;
   }
 
+  if (!value.GOOGLE_IOS_CLIENT_ID && !value.GOOGLE_CLIENT_IDS) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['GOOGLE_IOS_CLIENT_ID'],
+      message: 'GOOGLE_IOS_CLIENT_ID is required in production for Google iOS social login',
+    });
+  }
+
+  if (!value.APPLE_CLIENT_ID && !value.APPLE_CLIENT_IDS) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['APPLE_CLIENT_ID'],
+      message: 'APPLE_CLIENT_ID is required in production for Sign in with Apple',
+    });
+  }
+
   for (const key of [
     'APP_HOMEPAGE_URL',
     'TERMS_URL',
@@ -105,8 +127,14 @@ export interface Env {
   JWT_EXPIRES_IN: string;
   JWT_ACCESS_EXPIRES_IN: string;
   JWT_REFRESH_EXPIRES_IN: string;
+  GOOGLE_IOS_CLIENT_ID?: string;
+  GOOGLE_WEB_CLIENT_ID?: string;
   GOOGLE_CLIENT_IDS: string[];
+  APPLE_CLIENT_ID?: string;
   APPLE_CLIENT_IDS: string[];
+  APPLE_TEAM_ID?: string;
+  APPLE_KEY_ID?: string;
+  APPLE_PRIVATE_KEY?: string;
   APP_HOMEPAGE_URL?: string;
   TERMS_URL?: string;
   PRIVACY_POLICY_URL?: string;
@@ -177,6 +205,13 @@ function parseCsvList(value: string) {
     .filter(Boolean);
 }
 
+function appendUnique(values: string[], value?: string) {
+  const normalized = value?.trim();
+  if (normalized && !values.includes(normalized)) {
+    values.push(normalized);
+  }
+}
+
 function loadEnv(): Env {
   const parsed = envSchema.safeParse(process.env);
   if (!parsed.success) {
@@ -190,6 +225,13 @@ function loadEnv(): Env {
     process.exit(1);
   }
 
+  const googleClientIds = parseCsvList(parsed.data.GOOGLE_CLIENT_IDS ?? '');
+  appendUnique(googleClientIds, parsed.data.GOOGLE_IOS_CLIENT_ID);
+  appendUnique(googleClientIds, parsed.data.GOOGLE_WEB_CLIENT_ID);
+
+  const appleClientIds = parseCsvList(parsed.data.APPLE_CLIENT_IDS ?? '');
+  appendUnique(appleClientIds, parsed.data.APPLE_CLIENT_ID);
+
   return {
     DATABASE_URL: parsed.data.DATABASE_URL,
     REDIS_URL: parsed.data.REDIS_URL,
@@ -197,8 +239,14 @@ function loadEnv(): Env {
     JWT_EXPIRES_IN: parsed.data.JWT_EXPIRES_IN,
     JWT_ACCESS_EXPIRES_IN: parsed.data.JWT_ACCESS_EXPIRES_IN ?? parsed.data.JWT_EXPIRES_IN,
     JWT_REFRESH_EXPIRES_IN: parsed.data.JWT_REFRESH_EXPIRES_IN,
-    GOOGLE_CLIENT_IDS: parseCsvList(parsed.data.GOOGLE_CLIENT_IDS),
-    APPLE_CLIENT_IDS: parseCsvList(parsed.data.APPLE_CLIENT_IDS),
+    GOOGLE_IOS_CLIENT_ID: parsed.data.GOOGLE_IOS_CLIENT_ID,
+    GOOGLE_WEB_CLIENT_ID: parsed.data.GOOGLE_WEB_CLIENT_ID,
+    GOOGLE_CLIENT_IDS: googleClientIds,
+    APPLE_CLIENT_ID: parsed.data.APPLE_CLIENT_ID,
+    APPLE_CLIENT_IDS: appleClientIds,
+    APPLE_TEAM_ID: parsed.data.APPLE_TEAM_ID,
+    APPLE_KEY_ID: parsed.data.APPLE_KEY_ID,
+    APPLE_PRIVATE_KEY: parsed.data.APPLE_PRIVATE_KEY,
     APP_HOMEPAGE_URL: parsed.data.APP_HOMEPAGE_URL,
     TERMS_URL: parsed.data.TERMS_URL,
     PRIVACY_POLICY_URL: parsed.data.PRIVACY_POLICY_URL,
