@@ -1,5 +1,17 @@
 import { z } from 'zod';
 
+function optionalTrimmedString(max: number) {
+  return z.preprocess(
+    (value) => (value === null || value === undefined || value === '' ? undefined : value),
+    z.string().trim().max(max).optional(),
+  );
+}
+
+const OptionalEmail = z.preprocess(
+  (value) => (value === null || value === undefined || value === '' ? undefined : value),
+  z.string().trim().email().optional(),
+);
+
 export const RegisterInput = z.object({
   email: z
     .string({
@@ -52,11 +64,11 @@ export const GoogleLoginInput = z.object({
 export const AppleLoginInput = z.object({
   identityToken: z.string().min(20).optional(),
   idToken: z.string().min(20).optional(),
-  authorizationCode: z.string().min(1).optional(),
-  fullName: z.string().trim().max(80).optional(),
-  email: z.string().trim().email().optional(),
-  givenName: z.string().trim().max(40).optional(),
-  familyName: z.string().trim().max(40).optional(),
+  authorizationCode: optionalTrimmedString(2048),
+  fullName: optionalTrimmedString(80),
+  email: OptionalEmail,
+  givenName: optionalTrimmedString(40),
+  familyName: optionalTrimmedString(40),
   deviceId: z.string().trim().max(128).optional(),
 }).refine((value) => Boolean(value.identityToken ?? value.idToken), {
   message: 'APPLE_IDENTITY_TOKEN_REQUIRED',

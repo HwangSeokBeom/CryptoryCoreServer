@@ -15,6 +15,11 @@ function sendAppError(reply: { status: (statusCode: number) => { send: (payload:
   return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details, error.code));
 }
 
+function isExchangeNotConnected(error: unknown) {
+  return error instanceof AppError
+    && (error.code === 'exchange_not_connected' || error.details?.reason === 'missing_connection');
+}
+
 function parseExchange(value: string | undefined): ExchangeId | null {
   if (!value || !EXCHANGE_IDS.includes(value as ExchangeId)) {
     return null;
@@ -133,6 +138,13 @@ export async function tradingRoutes(app: FastifyInstance) {
     try {
       return createSuccessResponse(await getOpenOrders(request.user.id, exchange, symbol));
     } catch (error) {
+      if (isExchangeNotConnected(error)) {
+        return {
+          ...createSuccessResponse([]),
+          status: 'no_connection',
+          unavailableReason: 'no_connection',
+        };
+      }
       if (error instanceof AppError) {
         return sendAppError(reply, error);
       }
@@ -159,6 +171,13 @@ export async function tradingRoutes(app: FastifyInstance) {
     try {
       return createSuccessResponse(await getRecentFills(request.user.id, exchange, symbol, parsedLimit));
     } catch (error) {
+      if (isExchangeNotConnected(error)) {
+        return {
+          ...createSuccessResponse([]),
+          status: 'no_connection',
+          unavailableReason: 'no_connection',
+        };
+      }
       if (error instanceof AppError) {
         return sendAppError(reply, error);
       }

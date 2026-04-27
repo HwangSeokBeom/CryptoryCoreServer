@@ -126,4 +126,26 @@ describe('portfolio history filtering', () => {
       isVerifiedUserEvent: true,
     });
   });
+
+  it('returns an empty asset summary when a new user has no verified exchange connection', async () => {
+    listUserVerifiedExchangeConnections.mockResolvedValueOnce([]);
+    const { getAggregatedPortfolioSummary } = await import('../src/domains/portfolio/portfolio.service');
+
+    const summary = await getAggregatedPortfolioSummary('new-apple-user', 'upbit');
+
+    expect(summary).toMatchObject({
+      requestedExchanges: ['upbit'],
+      connectedExchanges: [],
+      partialSuccess: false,
+      failures: [],
+      totals: {
+        estimatedTotalAssetValueKrw: 0,
+        estimatedTotalPnlValueKrw: 0,
+        estimatedTotalPnlPercent: 0,
+      },
+      exchangeGroups: [],
+      assets: [],
+    });
+    expect(getPortfolioProvider).not.toHaveBeenCalled();
+  });
 });

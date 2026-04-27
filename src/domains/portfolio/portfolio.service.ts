@@ -433,13 +433,17 @@ export async function getAggregatedPortfolioSummary(
   userId: string,
   exchange?: ExchangeId,
 ): Promise<PortfolioSummary> {
+  const verifiedConnections = await listUserVerifiedExchangeConnections(userId);
   const requestedExchanges = exchange
     ? [exchange]
-    : (await listUserVerifiedExchangeConnections(userId)).map((connection) => connection.exchange as ExchangeId);
+    : verifiedConnections.map((connection) => connection.exchange as ExchangeId);
 
-  if (requestedExchanges.length === 0) {
+  const hasRequestedVerifiedConnection = !exchange
+    || verifiedConnections.some((connection) => connection.exchange === exchange);
+
+  if (requestedExchanges.length === 0 || !hasRequestedVerifiedConnection) {
     return {
-      requestedExchanges: [],
+      requestedExchanges,
       connectedExchanges: [],
       partialSuccess: false,
       failures: [],

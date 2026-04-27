@@ -14,7 +14,6 @@ const APPLE_AUTH_PROVIDER = 'apple';
 const EMAIL_ALREADY_EXISTS = 'EMAIL_ALREADY_EXISTS';
 const AUTH_REGISTER_FAILED = 'AUTH_REGISTER_FAILED';
 const REFRESH_TOKEN_INVALID = 'REFRESH_TOKEN_INVALID';
-const SOCIAL_EMAIL_REQUIRED = 'SOCIAL_EMAIL_REQUIRED';
 
 const userProfileSelect = {
   id: true,
@@ -35,6 +34,15 @@ const INITIAL_HOLDINGS = [
 
 function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
+}
+
+function createSocialPlaceholderEmail(provider: string, providerAccountId: string) {
+  const digest = createHash('sha256').update(`${provider}:${providerAccountId}`).digest('hex').slice(0, 32);
+  return `${provider}_${digest}@apple.local`;
+}
+
+function isPrivateRelayEmail(email: string | undefined) {
+  return Boolean(email?.toLowerCase().endsWith('@privaterelay.appleid.com'));
 }
 
 function parseDurationMs(input: string) {
@@ -101,6 +109,19 @@ function isUniqueConstraintError(error: unknown) {
     return true;
   }
   return error.code === 'P2010' && error.meta?.code === '23505';
+}
+
+function getPrismaWriteFailureDetails(error: unknown) {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError)) {
+    return undefined;
+  }
+
+  return {
+    prismaCode: error.code,
+    dbColumn: typeof error.meta?.column === 'string' ? error.meta.column : undefined,
+    dbTarget: Array.isArray(error.meta?.target) ? error.meta.target.join(',') : error.meta?.target,
+    dbErrorCode: error.meta?.code,
+  };
 }
 
 function isMissingLegacyAuthColumnError(error: unknown) {
@@ -546,12 +567,13 @@ function normalizeSocialNickname(params: {
   tokenName?: string;
   requestedName?: string;
 }) {
+  const fallback = params.provider === APPLE_AUTH_PROVIDER ? 'Apple 사용자' : `${params.provider} user`;
   const raw = params.requestedName
     ?? params.tokenName
     ?? params.email?.split('@')[0]
-    ?? `${params.provider} user`;
+    ?? fallback;
   const normalized = raw.trim().replace(/\s+/g, ' ');
-  return (normalized || `${params.provider} user`).slice(0, 20);
+  return (normalized || fallback).slice(0, 20);
 }
 
 async function findOrCreateSocialUser(params: {
@@ -560,6 +582,22 @@ async function findOrCreateSocialUser(params: {
   requestedName?: string;
 }) {
   const providerAccountId = params.token.sub;
+  const tokenEmail = params.token.email ? normalizeEmail(params.token.email) : undefined;
+  const isApple = params.provider === APPLE_AUTH_PROVIDER;
+
+  logger.info(
+    {
+      domain: 'auth',
+      provider: params.provider,
+      action: 'social_lookup_started',
+      aud: params.token.aud,
+      hasSub: Boolean(providerAccountId),
+      hasEmail: Boolean(tokenEmail),
+      isPrivateRelay: isPrivateRelayEmail(tokenEmail),
+    },
+    `[SocialAuthDebug] provider=${params.provider} action=social_lookup_started hasEmail=${Boolean(tokenEmail)}`,
+  );
+
   const existingIdentity = await prisma.authIdentity.findUnique({
     where: {
       provider_providerAccountId: {
@@ -575,11 +613,22 @@ async function findOrCreateSocialUser(params: {
   });
 
   if (existingIdentity) {
-    if (params.token.email && params.token.email !== existingIdentity.email) {
+    logger.info(
+      {
+        domain: 'auth',
+        provider: params.provider,
+        action: 'social_existing_identity_found',
+        userId: existingIdentity.user.id,
+        hasEmail: Boolean(tokenEmail),
+        isPrivateRelay: isPrivateRelayEmail(tokenEmail),
+      },
+      `[SocialAuthDebug] provider=${params.provider} action=social_existing_identity_found userId=${existingIdentity.user.id}`,
+    );
+    if (tokenEmail && tokenEmail !== existingIdentity.email) {
       await prisma.authIdentity.update({
         where: { id: existingIdentity.id },
         data: {
-          email: params.token.email,
+          email: tokenEmail,
           emailVerified: params.token.emailVerified,
         },
       });
@@ -598,59 +647,108 @@ async function findOrCreateSocialUser(params: {
   });
 
   if (legacyProviderUser) {
+    logger.info(
+      {
+        domain: 'auth',
+        provider: params.provider,
+        action: 'social_legacy_user_found',
+        userId: legacyProviderUser.id,
+        hasEmail: Boolean(tokenEmail),
+      },
+      `[SocialAuthDebug] provider=${params.provider} action=social_legacy_user_found userId=${legacyProviderUser.id}`,
+    );
     await prisma.authIdentity.create({
       data: {
         userId: legacyProviderUser.id,
         provider: params.provider,
         providerAccountId,
-        email: params.token.email,
+        email: tokenEmail,
         emailVerified: params.token.emailVerified,
       },
     });
     return toUserProfile(legacyProviderUser);
   }
 
-  if (!params.token.email || !params.token.emailVerified) {
-    throw new AppError(
-      400,
-      '소셜 로그인 계정 식별을 위해 검증된 이메일이 필요합니다',
-      { provider: params.provider },
-      SOCIAL_EMAIL_REQUIRED,
-    );
+  const requestedUserEmail = tokenEmail ?? (isApple ? createSocialPlaceholderEmail(params.provider, providerAccountId) : undefined);
+  if (!requestedUserEmail) {
+    throw new AppError(400, '소셜 로그인 계정 식별을 위해 이메일이 필요합니다', { provider: params.provider }, 'SOCIAL_EMAIL_REQUIRED');
   }
-
-  const email = normalizeEmail(params.token.email);
   const passwordHash = await bcrypt.hash(randomUUID(), 10);
   const nickname = normalizeSocialNickname({
     provider: params.provider,
-    email,
+    email: tokenEmail,
     tokenName: params.token.name,
     requestedName: params.requestedName,
   });
 
   try {
     const user = await prisma.$transaction(async (tx) => {
-      const existingUser = await tx.user.findUnique({
-        where: { email },
-        select: userProfileSelect,
-      });
+      let userEmail = requestedUserEmail;
+      const existingUser = isApple
+        ? null
+        : await tx.user.findUnique({
+            where: { email: requestedUserEmail },
+            select: userProfileSelect,
+          });
 
       if (existingUser) {
+        logger.info(
+          {
+            domain: 'auth',
+            provider: params.provider,
+            action: 'social_existing_email_user_found',
+            userId: existingUser.id,
+            hasEmail: Boolean(tokenEmail),
+            isPlaceholderEmail: !tokenEmail,
+          },
+          `[SocialAuthDebug] provider=${params.provider} action=social_existing_email_user_found userId=${existingUser.id}`,
+        );
         await tx.authIdentity.create({
           data: {
             userId: existingUser.id,
             provider: params.provider,
             providerAccountId,
-            email,
-            emailVerified: true,
+            email: tokenEmail,
+            emailVerified: params.token.emailVerified,
           },
         });
         return existingUser;
       }
 
+      if (isApple && tokenEmail) {
+        const emailOwner = await tx.user.findUnique({
+          where: { email: tokenEmail },
+          select: { id: true },
+        });
+        if (emailOwner) {
+          userEmail = createSocialPlaceholderEmail(params.provider, providerAccountId);
+          logger.info(
+            {
+              domain: 'auth',
+              provider: params.provider,
+              action: 'social_email_collision_placeholder_selected',
+              hasEmail: true,
+              isPrivateRelay: isPrivateRelayEmail(tokenEmail),
+            },
+            '[SocialAuthDebug] provider=apple action=social_email_collision_placeholder_selected',
+          );
+        }
+      }
+
+      logger.info(
+        {
+          domain: 'auth',
+          provider: params.provider,
+          action: 'social_new_user_create_started',
+          hasEmail: Boolean(tokenEmail),
+          isPlaceholderEmail: !tokenEmail,
+          isPrivateRelay: isPrivateRelayEmail(tokenEmail),
+        },
+        `[SocialAuthDebug] provider=${params.provider} action=social_new_user_create_started hasEmail=${Boolean(tokenEmail)}`,
+      );
       const newUser = await tx.user.create({
         data: {
-          email,
+          email: userEmail,
           authProvider: params.provider,
           providerAccountId,
           passwordHash,
@@ -660,8 +758,8 @@ async function findOrCreateSocialUser(params: {
             create: {
               provider: params.provider,
               providerAccountId,
-              email,
-              emailVerified: true,
+              email: tokenEmail,
+              emailVerified: params.token.emailVerified,
             },
           },
         },
@@ -672,8 +770,33 @@ async function findOrCreateSocialUser(params: {
       return newUser;
     });
 
+    logger.info(
+      {
+        domain: 'auth',
+        provider: params.provider,
+        action: 'social_user_ready',
+        userId: user.id,
+        hasEmail: Boolean(tokenEmail),
+        isPlaceholderEmail: user.email.endsWith('@apple.local'),
+        isPrivateRelay: isPrivateRelayEmail(tokenEmail),
+      },
+      `[SocialAuthDebug] provider=${params.provider} action=social_user_ready userId=${user.id}`,
+    );
     return toUserProfile(user);
   } catch (error) {
+    logger.error(
+      {
+        domain: 'auth',
+        provider: params.provider,
+        action: 'social_new_user_create_failed',
+        hasEmail: Boolean(tokenEmail),
+        isPlaceholderEmail: !tokenEmail,
+        isPrivateRelay: isPrivateRelayEmail(tokenEmail),
+        ...getPrismaWriteFailureDetails(error),
+        err: error,
+      },
+      `[SocialAuthDebug] provider=${params.provider} action=social_new_user_create_failed`,
+    );
     if (isUniqueConstraintError(error)) {
       const identity = await prisma.authIdentity.findUnique({
         where: {

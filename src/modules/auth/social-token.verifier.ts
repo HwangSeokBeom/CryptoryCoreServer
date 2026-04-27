@@ -8,6 +8,7 @@ const APPLE_JWKS_URL = 'https://appleid.apple.com/auth/keys';
 const GOOGLE_ISSUERS = new Set(['accounts.google.com', 'https://accounts.google.com']);
 const APPLE_ISSUER = 'https://appleid.apple.com';
 const JWKS_CACHE_TTL_MS = 60 * 60 * 1000;
+const JWKS_FETCH_TIMEOUT_MS = 3000;
 
 type JwksKey = {
   kid: string;
@@ -41,6 +42,7 @@ type JwtPayload = {
 type VerifiedSocialToken = {
   provider: 'google' | 'apple';
   sub: string;
+  aud?: string | string[];
   email?: string;
   emailVerified: boolean;
   name?: string;
@@ -76,14 +78,47 @@ function decodeJwt(token: string) {
   };
 }
 
+function getAudiences(audience: string | string[] | undefined) {
+  return Array.isArray(audience) ? audience : audience ? [audience] : [];
+}
+
+function isPrivateRelayEmail(email: string | undefined) {
+  return Boolean(email?.toLowerCase().endsWith('@privaterelay.appleid.com'));
+}
+
 async function fetchJwks(url: string) {
   const cached = jwksCache.get(url);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.keys;
   }
 
-  const response = await fetch(url);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), JWKS_FETCH_TIMEOUT_MS);
+  let response: Response;
+
+  try {
+    response = await fetch(url, { signal: controller.signal });
+  } catch (error) {
+    if (cached?.keys.length) {
+      logger.warn(
+        { domain: 'auth', action: 'jwks_fetch_failed_using_stale_cache', url, err: error },
+        '[SocialAuthDebug] action=jwks_fetch_failed_using_stale_cache',
+      );
+      return cached.keys;
+    }
+    throw new AppError(503, '소셜 로그인 검증 키를 가져올 수 없습니다', undefined, 'SOCIAL_JWKS_UNAVAILABLE');
+  } finally {
+    clearTimeout(timeout);
+  }
+
   if (!response.ok) {
+    if (cached?.keys.length) {
+      logger.warn(
+        { domain: 'auth', action: 'jwks_fetch_bad_status_using_stale_cache', url, statusCode: response.status },
+        '[SocialAuthDebug] action=jwks_fetch_bad_status_using_stale_cache',
+      );
+      return cached.keys;
+    }
     throw new AppError(503, '소셜 로그인 검증 키를 가져올 수 없습니다', undefined, 'SOCIAL_JWKS_UNAVAILABLE');
   }
 
@@ -94,8 +129,7 @@ async function fetchJwks(url: string) {
 }
 
 function isAudienceAllowed(audience: string | string[] | undefined, allowedAudiences: string[]) {
-  const audiences = Array.isArray(audience) ? audience : audience ? [audience] : [];
-  return audiences.some((item) => allowedAudiences.includes(item));
+  return getAudiences(audience).some((item) => allowedAudiences.includes(item));
 }
 
 function parseEmailVerified(value: boolean | string | undefined) {
@@ -133,11 +167,15 @@ async function verifyOidcToken(params: {
     throw new AppError(401, '지원하지 않는 소셜 로그인 토큰입니다', undefined, 'SOCIAL_TOKEN_UNSUPPORTED');
   }
 
-  const keys = await fetchJwks(params.jwksUrl);
-  const jwk = keys.find((key) => key.kid === decoded.header.kid);
+  let keys = await fetchJwks(params.jwksUrl);
+  let jwk = keys.find((key) => key.kid === decoded.header.kid);
   if (!jwk) {
     jwksCache.delete(params.jwksUrl);
-    throw new AppError(401, '소셜 로그인 토큰 검증 키를 찾을 수 없습니다', undefined, 'SOCIAL_TOKEN_KEY_NOT_FOUND');
+    keys = await fetchJwks(params.jwksUrl);
+    jwk = keys.find((key) => key.kid === decoded.header.kid);
+    if (!jwk) {
+      throw new AppError(401, '소셜 로그인 토큰 검증 키를 찾을 수 없습니다', undefined, 'SOCIAL_TOKEN_KEY_NOT_FOUND');
+    }
   }
 
   const publicKey = createPublicKey({ key: jwk, format: 'jwk' });
@@ -170,6 +208,7 @@ async function verifyOidcToken(params: {
   const verified: VerifiedSocialToken = {
     provider: params.provider,
     sub: decoded.payload.sub,
+    aud: decoded.payload.aud,
     email: decoded.payload.email?.trim().toLowerCase(),
     emailVerified: parseEmailVerified(decoded.payload.email_verified),
     name: decoded.payload.name,
@@ -180,10 +219,12 @@ async function verifyOidcToken(params: {
       domain: 'auth',
       provider: params.provider,
       action: 'token_verified',
-      email: verified.email,
-      sub: verified.sub,
+      aud: getAudiences(decoded.payload.aud),
+      hasSub: Boolean(verified.sub),
+      hasEmail: Boolean(verified.email),
+      isPrivateRelay: isPrivateRelayEmail(verified.email),
     },
-    `[SocialAuthDebug] provider=${params.provider} action=token_verified email=${verified.email ?? 'none'} sub=${verified.sub}`,
+    `[SocialAuthDebug] provider=${params.provider} action=token_verified hasEmail=${Boolean(verified.email)} hasSub=${Boolean(verified.sub)}`,
   );
 
   return verified;
@@ -218,6 +259,41 @@ export async function verifyAppleIdentityToken(identityToken: string) {
     allowedAudiences: env.APPLE_CLIENT_IDS,
     issuerAllowed: (issuer) => issuer === APPLE_ISSUER,
   });
+}
+
+export function inspectAppleIdentityTokenForLogging(identityToken: string | undefined) {
+  if (!identityToken) {
+    return {
+      hasIdentityToken: false,
+      aud: [],
+      hasSub: false,
+      hasEmail: false,
+      isPrivateRelay: false,
+    };
+  }
+
+  try {
+    const decoded = decodeJwt(identityToken);
+    const email = decoded.payload.email?.trim().toLowerCase();
+    return {
+      hasIdentityToken: true,
+      aud: getAudiences(decoded.payload.aud),
+      hasSub: Boolean(decoded.payload.sub),
+      hasEmail: Boolean(email),
+      isPrivateRelay: isPrivateRelayEmail(email),
+      exp: decoded.payload.exp,
+      iss: decoded.payload.iss,
+    };
+  } catch {
+    return {
+      hasIdentityToken: true,
+      aud: [],
+      hasSub: false,
+      hasEmail: false,
+      isPrivateRelay: false,
+      malformed: true,
+    };
+  }
 }
 
 export type { VerifiedSocialToken };

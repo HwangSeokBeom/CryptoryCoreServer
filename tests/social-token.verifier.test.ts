@@ -120,6 +120,41 @@ describe('social token verifier', () => {
     });
   });
 
+  it('verifies an Apple identity token without email for re-login and App Review accounts', async () => {
+    const { token, jwk } = createSignedJwt({
+      iss: 'https://appleid.apple.com',
+      aud: appleAudience,
+    });
+    const { verifyAppleIdentityToken } = await loadVerifier([jwk]);
+
+    await expect(verifyAppleIdentityToken(token)).resolves.toMatchObject({
+      provider: 'apple',
+      sub: 'provider-user-1',
+      aud: appleAudience,
+      email: undefined,
+      emailVerified: false,
+    });
+  });
+
+  it('extracts Apple login trace fields without requiring token verification', async () => {
+    const { token } = createSignedJwt({
+      iss: 'https://appleid.apple.com',
+      aud: appleAudience,
+      email: 'reviewer@privaterelay.appleid.com',
+      email_verified: 'true',
+    });
+    const { inspectAppleIdentityTokenForLogging } = await loadVerifier([]);
+
+    expect(inspectAppleIdentityTokenForLogging(token)).toMatchObject({
+      hasIdentityToken: true,
+      aud: [appleAudience],
+      hasSub: true,
+      hasEmail: true,
+      isPrivateRelay: true,
+      iss: 'https://appleid.apple.com',
+    });
+  });
+
   it('rejects an Apple identity token audience mismatch with 403', async () => {
     const { token, jwk } = createSignedJwt({
       iss: 'https://appleid.apple.com',

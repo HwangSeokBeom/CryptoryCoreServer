@@ -26,6 +26,7 @@ import {
 import { createSuccessResponse, createErrorResponse, AppError } from '../../utils/errors';
 import { env } from '../../config/env';
 import { logger } from '../../utils/logger';
+import { inspectAppleIdentityTokenForLogging } from './social-token.verifier';
 
 const registerRoutes = ['/api/v1/auth/register', '/auth/register'] as const;
 const refreshRoutes = ['/api/v1/auth/refresh', '/auth/refresh'] as const;
@@ -78,6 +79,16 @@ function getRequestMetadata(request: FastifyRequest) {
 function getSessionIdFromRequest(request: FastifyRequest) {
   const user = request.user as { sid?: string; sessionId?: string } | undefined;
   return user?.sid ?? user?.sessionId;
+}
+
+function getAppleLoginTrace(body: unknown) {
+  const payload = body && typeof body === 'object' ? body as Record<string, unknown> : {};
+  const identityToken = typeof payload.identityToken === 'string'
+    ? payload.identityToken
+    : typeof payload.idToken === 'string'
+      ? payload.idToken
+      : undefined;
+  return inspectAppleIdentityTokenForLogging(identityToken);
 }
 
 function issueAuthToken(
@@ -248,9 +259,32 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   app.post('/api/v1/auth/social/apple', async (request, reply) => {
+    const appleTrace = getAppleLoginTrace(request.body);
+    logger.info(
+      {
+        domain: 'auth',
+        route: request.url,
+        action: 'apple_login_request_received',
+        ...appleTrace,
+      },
+      `[SocialAuthDebug] provider=apple action=request_received hasIdentityToken=${appleTrace.hasIdentityToken}`,
+    );
+
     const parsed = AppleLoginInput.safeParse(request.body);
     if (!parsed.success) {
       const code = parsed.error.errors[0].message;
+      logger.warn(
+        {
+          domain: 'auth',
+          route: request.url,
+          provider: 'apple',
+          action: 'apple_login_failed',
+          statusCode: 400,
+          code,
+          ...appleTrace,
+        },
+        `[SocialAuthDebug] provider=apple action=login_failed statusCode=400 code=${code}`,
+      );
       return reply.status(400).send(createErrorResponse(code, undefined, code));
     }
 
@@ -258,14 +292,48 @@ export async function authRoutes(app: FastifyInstance) {
       const user = await loginWithApple(parsed.data);
       const data = await createAuthSessionResponse(app, request, user);
       logger.info(
-        { domain: 'auth', action: 'login_success', userId: user.id, authProvider: user.authProvider, sessionId: data.sessionId },
+        {
+          domain: 'auth',
+          action: 'login_success',
+          provider: 'apple',
+          userId: user.id,
+          authProvider: user.authProvider,
+          sessionId: data.sessionId,
+          statusCode: 200,
+          ...appleTrace,
+        },
         `[AuthDebug] action=login_success userId=${user.id} authProvider=${user.authProvider} sessionId=${data.sessionId}`,
       );
       return createSuccessResponse(data);
     } catch (err) {
       if (err instanceof AppError) {
+        logger.warn(
+          {
+            domain: 'auth',
+            route: request.url,
+            provider: 'apple',
+            action: 'apple_login_failed',
+            statusCode: err.statusCode,
+            code: err.code,
+            details: err.details,
+            ...appleTrace,
+          },
+          `[SocialAuthDebug] provider=apple action=login_failed statusCode=${err.statusCode} code=${err.code ?? 'none'}`,
+        );
         return reply.status(err.statusCode).send(createErrorResponse(err.message, err.details, err.code));
       }
+      logger.error(
+        {
+          domain: 'auth',
+          route: request.url,
+          provider: 'apple',
+          action: 'apple_login_failed',
+          statusCode: 500,
+          ...appleTrace,
+          err,
+        },
+        '[SocialAuthDebug] provider=apple action=login_failed statusCode=500',
+      );
       throw err;
     }
   });

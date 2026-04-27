@@ -317,6 +317,47 @@ describe('Auth API', () => {
     await app.close();
   });
 
+  it('POST /api/v1/auth/social/apple - accepts absent optional Apple profile fields', async () => {
+    loginWithAppleMock.mockResolvedValueOnce({
+      ...authUser,
+      email: 'apple_placeholder@example.com',
+      nickname: 'Apple 사용자',
+      authProvider: 'apple',
+    });
+    createSessionForUserMock.mockResolvedValueOnce({
+      sessionId: 'session-apple-empty-profile',
+      refreshToken: 'session-apple-empty-profile.refresh-token-secret',
+      refreshTokenExpiresAt: new Date('2026-05-21T00:00:00.000Z'),
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/social/apple',
+      payload: {
+        identityToken: 'header.payload.signature.long-enough',
+        authorizationCode: '',
+        fullName: null,
+        email: '',
+        givenName: '',
+        familyName: null,
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(loginWithAppleMock).toHaveBeenCalledWith(expect.objectContaining({
+      identityToken: 'header.payload.signature.long-enough',
+      authorizationCode: undefined,
+      fullName: undefined,
+      email: undefined,
+      givenName: undefined,
+      familyName: undefined,
+    }));
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(true);
+    expect(body.data.user.authProvider).toBe('apple');
+    await app.close();
+  });
+
   it('POST /api/v1/auth/social/apple - returns 400 when identityToken is missing', async () => {
     const app = await buildApp();
     const res = await app.inject({
