@@ -16,6 +16,7 @@ import {
   type TradingFeature,
   type TradingPermission,
 } from './trading.capabilities';
+import { assertTransactionalFeatureEnabled } from '../../middleware/compliance.middleware';
 
 function resolveTradingProvider(exchange: ExchangeId) {
   try {
@@ -344,6 +345,11 @@ function normalizeOrderChance(exchange: ExchangeId, requestedSymbol: string, cha
 }
 
 export async function getOrderChance(userId: string, exchange: ExchangeId, symbol: string) {
+  assertTransactionalFeatureEnabled('order', {
+    userId,
+    path: '/trading/chance',
+    reason: 'order_chance_disabled',
+  });
   ensureTradingFeatureSupported(exchange, 'chance');
   const provider = resolveTradingProvider(exchange);
   if (!provider.getOrderChance) {
@@ -365,6 +371,11 @@ export async function getOrderChance(userId: string, exchange: ExchangeId, symbo
 }
 
 export async function createTradingOrder(userId: string, input: CreateOrderRequest) {
+  assertTransactionalFeatureEnabled('trading', {
+    userId,
+    path: '/trading/orders',
+    reason: 'create_order_disabled',
+  });
   validateCreateOrderInput(input);
 
   const provider = resolveTradingProvider(input.exchange);
@@ -423,6 +434,11 @@ export async function createTradingOrder(userId: string, input: CreateOrderReque
 }
 
 export async function cancelTradingOrder(userId: string, exchange: ExchangeId, orderId: string, symbol?: string) {
+  assertTransactionalFeatureEnabled('trading', {
+    userId,
+    path: '/trading/orders/:exchange/:orderId',
+    reason: 'cancel_order_disabled',
+  });
   requireSymbolForOrderLookup(exchange, symbol, 'order cancellation');
   const provider = resolveTradingProvider(exchange);
   if (!provider.cancelOrder) {
@@ -443,6 +459,11 @@ export async function cancelTradingOrder(userId: string, exchange: ExchangeId, o
 }
 
 export async function getTradingOrder(userId: string, exchange: ExchangeId, orderId: string, symbol?: string) {
+  assertTransactionalFeatureEnabled('trading', {
+    userId,
+    path: '/trading/orders/:exchange/:orderId',
+    reason: 'order_lookup_disabled',
+  });
   requireSymbolForOrderLookup(exchange, symbol, 'order lookup');
   const provider = resolveTradingProvider(exchange);
   if (!provider.getOrder) {
@@ -462,6 +483,11 @@ export async function getTradingOrder(userId: string, exchange: ExchangeId, orde
 }
 
 export async function getOpenOrders(userId: string, exchange: ExchangeId, symbol?: string) {
+  assertTransactionalFeatureEnabled('trading', {
+    userId,
+    path: '/trading/open-orders',
+    reason: 'open_orders_disabled',
+  });
   ensureTradingFeatureSupported(exchange, 'openOrders');
   const provider = resolveTradingProvider(exchange);
   if (!provider.listOpenOrders) {
@@ -479,6 +505,11 @@ export async function getOpenOrders(userId: string, exchange: ExchangeId, symbol
 }
 
 export async function getRecentFills(userId: string, exchange: ExchangeId, symbol?: string, limit?: number) {
+  assertTransactionalFeatureEnabled('trading', {
+    userId,
+    path: '/trading/fills',
+    reason: 'fills_disabled',
+  });
   ensureTradingFeatureSupported(exchange, 'fills');
   const provider = resolveTradingProvider(exchange);
   if (!provider.listFills) {

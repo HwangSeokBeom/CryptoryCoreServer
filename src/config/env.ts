@@ -81,6 +81,19 @@ const envSchema = z.object({
   BINANCE_WS_URL: z.string().url().optional(),
   BINANCE_PUBLIC_WS_URL: z.string().url().optional(),
   BINANCE_PRIVATE_WS_URL: z.string().url().optional(),
+  APP_STORE_REVIEW_MODE: z.coerce.boolean().default(false),
+  FEATURE_ORDER_ENABLED: z.coerce.boolean().optional(),
+  FEATURE_TRADING_ENABLED: z.coerce.boolean().optional(),
+  FEATURE_TRANSFER_ENABLED: z.coerce.boolean().optional(),
+  FEATURE_DEPOSIT_WITHDRAW_ENABLED: z.coerce.boolean().optional(),
+  FEATURE_WALLET_ENABLED: z.coerce.boolean().optional(),
+  FEATURE_PRIVATE_EXCHANGE_TRADING_API_ENABLED: z.coerce.boolean().optional(),
+  FEATURE_MARKET_ENABLED: z.coerce.boolean().optional(),
+  FEATURE_CHART_ENABLED: z.coerce.boolean().optional(),
+  FEATURE_NEWS_ENABLED: z.coerce.boolean().optional(),
+  FEATURE_READ_ONLY_PORTFOLIO_ENABLED: z.coerce.boolean().optional(),
+  FEATURE_KIMCHI_PREMIUM_ENABLED: z.coerce.boolean().optional(),
+  FEATURE_COMMUNITY_CONTENT_ENABLED: z.coerce.boolean().optional(),
 }).superRefine((value, ctx) => {
   if (value.NODE_ENV !== 'production') {
     return;
@@ -196,6 +209,19 @@ export interface Env {
   BINANCE_WS_URL?: string;
   BINANCE_PUBLIC_WS_URL?: string;
   BINANCE_PRIVATE_WS_URL?: string;
+  APP_STORE_REVIEW_MODE: boolean;
+  FEATURE_ORDER_ENABLED?: boolean;
+  FEATURE_TRADING_ENABLED?: boolean;
+  FEATURE_TRANSFER_ENABLED?: boolean;
+  FEATURE_DEPOSIT_WITHDRAW_ENABLED?: boolean;
+  FEATURE_WALLET_ENABLED?: boolean;
+  FEATURE_PRIVATE_EXCHANGE_TRADING_API_ENABLED?: boolean;
+  FEATURE_MARKET_ENABLED?: boolean;
+  FEATURE_CHART_ENABLED?: boolean;
+  FEATURE_NEWS_ENABLED?: boolean;
+  FEATURE_READ_ONLY_PORTFOLIO_ENABLED?: boolean;
+  FEATURE_KIMCHI_PREMIUM_ENABLED?: boolean;
+  FEATURE_COMMUNITY_CONTENT_ENABLED?: boolean;
 }
 
 function parseCsvList(value: string) {
@@ -309,6 +335,19 @@ function loadEnv(): Env {
     BINANCE_WS_URL: parsed.data.BINANCE_WS_URL,
     BINANCE_PUBLIC_WS_URL: parsed.data.BINANCE_PUBLIC_WS_URL,
     BINANCE_PRIVATE_WS_URL: parsed.data.BINANCE_PRIVATE_WS_URL,
+    APP_STORE_REVIEW_MODE: parsed.data.APP_STORE_REVIEW_MODE,
+    FEATURE_ORDER_ENABLED: parsed.data.FEATURE_ORDER_ENABLED,
+    FEATURE_TRADING_ENABLED: parsed.data.FEATURE_TRADING_ENABLED,
+    FEATURE_TRANSFER_ENABLED: parsed.data.FEATURE_TRANSFER_ENABLED,
+    FEATURE_DEPOSIT_WITHDRAW_ENABLED: parsed.data.FEATURE_DEPOSIT_WITHDRAW_ENABLED,
+    FEATURE_WALLET_ENABLED: parsed.data.FEATURE_WALLET_ENABLED,
+    FEATURE_PRIVATE_EXCHANGE_TRADING_API_ENABLED: parsed.data.FEATURE_PRIVATE_EXCHANGE_TRADING_API_ENABLED,
+    FEATURE_MARKET_ENABLED: parsed.data.FEATURE_MARKET_ENABLED,
+    FEATURE_CHART_ENABLED: parsed.data.FEATURE_CHART_ENABLED,
+    FEATURE_NEWS_ENABLED: parsed.data.FEATURE_NEWS_ENABLED,
+    FEATURE_READ_ONLY_PORTFOLIO_ENABLED: parsed.data.FEATURE_READ_ONLY_PORTFOLIO_ENABLED,
+    FEATURE_KIMCHI_PREMIUM_ENABLED: parsed.data.FEATURE_KIMCHI_PREMIUM_ENABLED,
+    FEATURE_COMMUNITY_CONTENT_ENABLED: parsed.data.FEATURE_COMMUNITY_CONTENT_ENABLED,
   };
 }
 

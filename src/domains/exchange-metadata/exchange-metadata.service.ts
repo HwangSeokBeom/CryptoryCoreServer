@@ -7,6 +7,7 @@ import type {
 } from '../../modules/private-account/exchange-connections.contract';
 import { AppError } from '../../utils/errors';
 import { getTradingExchangeCapability } from '../trading/trading.capabilities';
+import { featureFlags } from '../../config/feature-flags';
 
 export type ExchangeGuide = {
   exchange: ExchangeId;
@@ -113,8 +114,29 @@ function hasCapability(exchange: ExchangeId, capability: string) {
   return EXCHANGE_METADATA[exchange].capabilities.includes(capability as never);
 }
 
+function isReadOnlyExchangeConnectionMode() {
+  return !featureFlags.isPrivateExchangeTradingAPIEnabled || !featureFlags.isTradingEnabled;
+}
+
 export function getExchangeCapabilitySummary(exchange: ExchangeId): ExchangeCapabilitySummary {
   const trading = getTradingExchangeCapability(exchange);
+  if (isReadOnlyExchangeConnectionMode()) {
+    return {
+      canTestConnection: true,
+      canReadPortfolio: hasCapability(exchange, 'portfolio:balances'),
+      canReadOrderChance: false,
+      canPlaceOrder: false,
+      canCancelOrder: false,
+      canReadOpenOrders: false,
+      canReadFills: false,
+      canUsePrivateWebSocket: false,
+      privateWebSocketMode: 'server_side_polling',
+      requiredPermissionScopes: {
+        portfolio: ['read'],
+      },
+    };
+  }
+
   return {
     canTestConnection: true,
     canReadPortfolio: hasCapability(exchange, 'portfolio:balances'),
@@ -147,6 +169,16 @@ export function getExchangeGuide(exchange: ExchangeId): ExchangeGuide {
   if (!guide) {
     throw new AppError(404, '지원하지 않는 거래소 메타데이터입니다');
   }
+  if (isReadOnlyExchangeConnectionMode()) {
+    return {
+      ...guide,
+      permissionGuides: getExchangePermissionGuides(exchange),
+      recommendedPermissions: ['read-only portfolio access'],
+      cautions: ['Use a read-only key only. Do not enable transaction or withdrawal permissions.'],
+      capabilities: getExchangeCapabilitySummary(exchange),
+    };
+  }
+
   return {
     ...guide,
     capabilities: getExchangeCapabilitySummary(exchange),
@@ -158,6 +190,17 @@ export function getExchangePermissionGuides(exchange: ExchangeId) {
   if (!guide) {
     throw new AppError(404, '지원하지 않는 거래소 메타데이터입니다');
   }
+  if (isReadOnlyExchangeConnectionMode()) {
+    return [
+      {
+        key: 'read_only' as const,
+        label: 'Read-only',
+        description: 'Allows portfolio and balance lookup only.',
+        requiredPermissions: ['read'],
+      },
+    ];
+  }
+
   return guide.permissionGuides;
 }
 

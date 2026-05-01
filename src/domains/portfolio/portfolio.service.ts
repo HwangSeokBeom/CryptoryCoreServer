@@ -19,6 +19,7 @@ import {
 import { markExchangeConnectionSync } from '../../modules/private-account/exchange-connections.service';
 import { logger } from '../../utils/logger';
 import { classifyExchangeValidationError } from '../../modules/private-account/private-adapters/validation-error-classifier';
+import { assertTransactionalFeatureEnabled } from '../../middleware/compliance.middleware';
 
 type PortfolioFailure = {
   exchange: ExchangeId;
@@ -516,6 +517,11 @@ export async function getAggregatedPortfolioSummary(
 }
 
 export async function getAssetHistory(userId: string, exchange: ExchangeId, symbol?: string, limit?: number) {
+  assertTransactionalFeatureEnabled('trading', {
+    userId,
+    path: '/portfolio/history',
+    reason: 'asset_history_can_include_fills_deposits_withdrawals',
+  });
   const provider = resolvePortfolioProvider(exchange);
   if (!provider.getAssetHistory) {
     throw new AppError(501, `${exchange} asset history is unsupported`);

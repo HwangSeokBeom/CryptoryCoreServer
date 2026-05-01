@@ -5,6 +5,7 @@ import { env } from './config/env';
 import { logger } from './utils/logger';
 import { AppError, createErrorResponse, mapInfrastructureError } from './utils/errors';
 import { validateAccessSession } from './modules/auth/auth.service';
+import { complianceMiddleware } from './middleware/compliance.middleware';
 
 // Route imports
 import { authRoutes } from './modules/auth/auth.controller';
@@ -19,6 +20,7 @@ import { portfolioRoutes } from './domains/portfolio/portfolio.routes';
 import { kimchiPremiumRoutes } from './domains/kimchi-premium/kimchi-premium.routes';
 import { exchangeConnectionRoutes } from './domains/exchange-connections/exchange-connections.routes';
 import { exchangeMetadataRoutes } from './domains/exchange-metadata/exchange-metadata.routes';
+import { newsRoutes } from './domains/news/news.routes';
 
 export async function buildApp() {
   const app = Fastify({
@@ -86,6 +88,8 @@ export async function buildApp() {
     request.raw.once('close', () => maybeLogCancellation('close'));
   });
 
+  app.addHook('onRequest', complianceMiddleware);
+
   // Global error handler
   app.setErrorHandler((error, _request, reply) => {
     const mappedError = mapInfrastructureError(error);
@@ -124,6 +128,7 @@ export async function buildApp() {
   await app.register(marketRoutes, { prefix: '/market' });
   await app.register(chartRoutes, { prefix: '/charts' });
   await app.register(kimchiPremiumRoutes, { prefix: '/kimchi-premium' });
+  await app.register(newsRoutes, { prefix: '/news' });
   await app.register(tradingRoutes, { prefix: '/trading' });
   await app.register(portfolioRoutes, { prefix: '/portfolio' });
   await app.register(exchangeConnectionRoutes, { prefix: '/exchange-connections' });

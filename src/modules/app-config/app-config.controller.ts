@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { env } from '../../config/env';
+import { featureFlags } from '../../config/feature-flags';
 import { createSuccessResponse } from '../../utils/errors';
 
 function buildAppConfig() {
@@ -22,7 +23,9 @@ function buildAppConfig() {
     appReview: {
       ready: missingRequiredLinks.length === 0,
       missingRequiredLinks,
+      mode: featureFlags.appStoreReviewMode ? 'app_store_review' : 'standard',
     },
+    features: featureFlags,
     account: {
       registerUrl: '/api/v1/auth/register',
       loginUrl: '/api/v1/auth/login',

@@ -31,6 +31,7 @@ import { toCanonicalMarket, toCanonicalSymbol, toExchangeSymbol } from '../../co
 import { WebSocketClientManager, type WebSocketReconnectMetadata } from '../../core/exchange/websocket.client-manager';
 import { BithumbAdapter } from '../../exchanges/BithumbAdapter';
 import { logger } from '../../utils/logger';
+import { assertTransactionalFeatureEnabled } from '../../middleware/compliance.middleware';
 import { BaseExchangeProvider } from './base-exchange.provider';
 import {
   normalizeExchangeTimestampFromCandidates,
@@ -478,6 +479,10 @@ export class BithumbProvider
   }
 
   async getOrderChance(symbol: string, context: ProviderContext): Promise<OrderChance> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'bithumb.getOrderChance',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const credentials = this.requireCredentials(context);
     const rawSymbol = toExchangeSymbol(this.exchange, symbol);
     const canonicalSymbol = toCanonicalSymbol(symbol);
@@ -548,6 +553,10 @@ export class BithumbProvider
   }
 
   async createOrder(request: CreateOrderRequest, context: ProviderContext): Promise<CanonicalOrder> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'bithumb.createOrder',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const credentials = this.requireCredentials(context);
     const rawSymbol = toExchangeSymbol(this.exchange, request.symbol);
     const body: Record<string, unknown> = {
@@ -587,6 +596,10 @@ export class BithumbProvider
   }
 
   async cancelOrder(request: CancelOrderRequest, context: ProviderContext): Promise<CanonicalOrder> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'bithumb.cancelOrder',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const credentials = this.requireCredentials(context);
     const query = { uuid: request.orderId };
     const headers = this.signer.createAuthorizationHeader({
@@ -604,6 +617,10 @@ export class BithumbProvider
   }
 
   async getOrder(orderId: string, symbol: string | undefined, context: ProviderContext): Promise<CanonicalOrder> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'bithumb.getOrder',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const credentials = this.requireCredentials(context);
     const query = { uuid: orderId };
     const headers = this.signer.createAuthorizationHeader({
@@ -620,6 +637,10 @@ export class BithumbProvider
   }
 
   async listOpenOrders(symbol: string | undefined, context: ProviderContext): Promise<CanonicalOrder[]> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'bithumb.listOpenOrders',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const credentials = this.requireCredentials(context);
     const query = {
       ...(symbol ? { market: toExchangeSymbol(this.exchange, symbol) } : {}),
@@ -640,6 +661,10 @@ export class BithumbProvider
   }
 
   async listFills(symbol: string | undefined, limit: number | undefined, context: ProviderContext): Promise<CanonicalFill[]> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'bithumb.listFills',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const credentials = this.requireCredentials(context);
     const query = {
       ...(symbol ? { market: toExchangeSymbol(this.exchange, symbol) } : {}),

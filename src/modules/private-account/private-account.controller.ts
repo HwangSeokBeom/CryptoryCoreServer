@@ -130,7 +130,7 @@ export async function privateAccountRoutes(app: FastifyInstance) {
       return createSuccessResponse(result);
     } catch (err) {
       if (err instanceof AppError) {
-        return reply.status(err.statusCode).send(createErrorResponse(err.message));
+        return reply.status(err.statusCode).send(createErrorResponse(err.message, err.details, err.code));
       }
       throw err;
     }
