@@ -1,5 +1,6 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { AppError, createErrorResponse, createSuccessResponse } from '../../utils/errors';
+import { featureFlags } from '../../config/feature-flags';
 import {
   getAssetCoverageAudit,
   getBaseMarketSnapshot,
@@ -18,6 +19,8 @@ import {
 import type { ExchangeId } from '../../core/exchange/exchange.types';
 import { logger } from '../../utils/logger';
 import { createMarketDataErrorBody, MarketDataAvailabilityError } from './market-data.errors';
+import { getMarketTrends } from './market-trends.service';
+import { getMarketThemes } from './market-themes.service';
 
 const VALID_EXCHANGES = new Set<ExchangeId>(['upbit', 'bithumb', 'coinone', 'korbit', 'binance']);
 
@@ -90,7 +93,45 @@ function resolveCandleLimit(interval: string, limit?: string, range?: string) {
   return Math.max(Math.min(Math.ceil(rangeMs / normalizedInterval), 500), 1);
 }
 
+function routePath(request: FastifyRequest) {
+  return request.routeOptions?.url ?? request.url.split('?')[0];
+}
+
+function logInformationalRoute(request: FastifyRequest, status: number) {
+  logger.info(
+    {
+      domain: 'informational-route',
+      method: request.method,
+      path: routePath(request),
+      originalUrl: request.url,
+      normalizedSymbol: null,
+      status,
+    },
+    `[InformationalRoute] method=${request.method} path=${routePath(request)} originalUrl=${request.url} normalizedSymbol= status=${status}`,
+  );
+}
+
 export async function marketRoutes(app: FastifyInstance) {
+  app.get('/trends', async (request, reply) => {
+    if (!featureFlags.isMarketTrendsEnabled) {
+      return reply.status(404).send(createErrorResponse('market trends are unavailable', undefined, 'FEATURE_DISABLED'));
+    }
+
+    const data = await getMarketTrends({ userId: request.user?.id ?? null });
+    logInformationalRoute(request, reply.statusCode);
+    return createSuccessResponse(data);
+  });
+
+  app.get('/themes', async (_request, reply) => {
+    if (!featureFlags.isMarketThemesEnabled) {
+      return reply.status(404).send(createErrorResponse('market themes are unavailable', undefined, 'FEATURE_DISABLED'));
+    }
+
+    const data = await getMarketThemes();
+    logInformationalRoute(_request, reply.statusCode);
+    return createSuccessResponse(data);
+  });
+
   app.get('/overview', async (request, reply) => {
     const { exchange, limit, debug } = request.query as {
       exchange?: string;

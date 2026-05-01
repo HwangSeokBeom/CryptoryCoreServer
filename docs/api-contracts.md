@@ -122,6 +122,170 @@ These public endpoints expose `appName`, legal/support URLs, account route contr
 
 ## Public Market Routes
 
+## Informational Public Routes
+
+Canonical client paths are root-level routes. `/api/v1/news`, `/api/v1/coins`, and `/api/v1/market`
+are compatibility aliases only; clients should not probe `/api/v1` first and then fall back to root.
+
+- `GET /news`
+- `GET /news/:newsId`
+- `GET /coins/:symbol/info`
+- `GET /coins/:symbol/analysis?timeframe=1m|5m|15m|30m|1h|2h`
+- `GET /coins/:symbol/community`
+- `POST /coins/:symbol/community` (requires access token)
+- `POST /coins/:symbol/votes` (requires access token; accepts `bullish` or `bearish`)
+- `GET /market/trends`
+- `GET /market/themes`
+
+All successful responses use `{ "success": true, "data": ... }`. Provider failures should return a
+200 response with null-safe fallback fields when a meaningful informational shell can still be built.
+The informational APIs must not include buy/sell/recommendation/investment-advice wording in response
+copy.
+
+Coin symbols are normalized before lookup, so `DRIFT/KRW`, `KRW-DRIFT`, and `drift` all resolve to
+`DRIFT`.
+
+### `GET /coins/:symbol/info`
+
+```json
+{
+  "success": true,
+  "data": {
+    "symbol": "DRIFT",
+    "displaySymbol": "DRIFT/KRW",
+    "name": "Drift",
+    "logoUrl": "https://...",
+    "provider": "coingecko",
+    "providerId": "drift-protocol",
+    "description": "...",
+    "homepageUrl": "https://...",
+    "explorerUrl": "https://...",
+    "market": {
+      "price": 86.8,
+      "priceCurrency": "KRW",
+      "priceChangePercent24h": 2.97,
+      "high24h": 86.8,
+      "low24h": 86.8,
+      "volume24h": 78770000000,
+      "tradeValue24h": 78770000000,
+      "marketCap": null,
+      "marketCapRank": null,
+      "circulatingSupply": null,
+      "totalSupply": null,
+      "maxSupply": null,
+      "ath": null,
+      "atl": null,
+      "asOf": "2026-05-01T15:24:04.697Z"
+    },
+    "source": {
+      "metadata": "coingecko",
+      "market": "market_snapshot",
+      "fallbackUsed": false
+    }
+  }
+}
+```
+
+### `GET /coins/:symbol/analysis`
+
+```json
+{
+  "success": true,
+  "data": {
+    "symbol": "DRIFT",
+    "timeframe": "1h",
+    "summary": {
+      "status": "neutral",
+      "label": "중립",
+      "score": 0,
+      "bullishCount": 0,
+      "bearishCount": 0,
+      "neutralCount": 1
+    },
+    "indicators": [
+      {
+        "key": "recent_price_change",
+        "label": "최근 가격 변화",
+        "state": "neutral",
+        "valueText": "데이터 부족",
+        "description": "최근 캔들 데이터가 부족합니다."
+      }
+    ],
+    "source": {
+      "type": "server_analysis",
+      "fallbackUsed": true
+    },
+    "asOf": "2026-05-01T15:24:04.697Z"
+  }
+}
+```
+
+### `GET /coins/:symbol/community`
+
+```json
+{
+  "success": true,
+  "data": {
+    "symbol": "DRIFT",
+    "vote": {
+      "bullishCount": 0,
+      "bearishCount": 0,
+      "participantCount": 0,
+      "myVote": null
+    },
+    "items": [],
+    "nextCursor": null
+  }
+}
+```
+
+### `GET /news`
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [],
+    "nextCursor": null
+  }
+}
+```
+
+News item fields are null-safe: `source`, `url`, `thumbnailUrl`, `symbols`, and `category` are always
+present on returned items.
+
+### `GET /market/trends`
+
+```json
+{
+  "success": true,
+  "data": {
+    "summary": {
+      "totalMarketCap": null,
+      "volume24h": 78770000000,
+      "btcDominance": null,
+      "ethDominance": null,
+      "fearGreedIndex": null,
+      "altcoinIndex": null
+    },
+    "movers": {
+      "topGainers": [],
+      "topLosers": [],
+      "topVolume": []
+    },
+    "series": {
+      "marketCap": [],
+      "volume": []
+    },
+    "source": {
+      "primary": "market_snapshot",
+      "fallbackUsed": true
+    },
+    "asOf": "2026-05-01T15:24:04.697Z"
+  }
+}
+```
+
 Base paths:
 
 - `GET /market/markets`

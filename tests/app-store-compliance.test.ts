@@ -108,6 +108,10 @@ describe('App Store compliance feature flags', () => {
     expect(flags.isReadOnlyPortfolioEnabled).toBe(true);
     expect(flags.isKimchiPremiumEnabled).toBe(true);
     expect(flags.isCommunityContentEnabled).toBe(true);
+    expect(flags.isCoinInfoEnabled).toBe(true);
+    expect(flags.isMarketTrendsEnabled).toBe(true);
+    expect(flags.isMarketThemesEnabled).toBe(true);
+    expect(flags.isAnalysisReferenceDataEnabled).toBe(true);
     expect(flags.isOrderEnabled).toBe(false);
     expect(flags.isTradingEnabled).toBe(false);
     expect(flags.isTransferEnabled).toBe(false);
@@ -159,6 +163,7 @@ describe('App Store compliance middleware', () => {
     await expectBlocked('GET', '/withdraw');
     await expectBlocked('GET', '/deposit');
     await expectBlocked('GET', '/wallet');
+    await expectBlocked('POST', '/coins/BTC/orders', { side: 'buy' });
   }, 30000);
 
   it('keeps read-only portfolio and news available', async () => {
@@ -178,6 +183,28 @@ describe('App Store compliance middleware', () => {
     const newsBody = JSON.parse(news.body);
     expect(newsBody.data.items.length).toBeGreaterThan(0);
     expect(JSON.stringify(newsBody).toLowerCase()).not.toMatch(/\b(buy|sell|trade|order|transfer|withdraw|deposit|wallet)\b/);
+
+    const analysis = await app.inject({ method: 'GET', url: '/coins/ORCA%2FKRW/analysis?timeframe=1h' });
+    expect(analysis.statusCode).toBe(200);
+    expect(JSON.parse(analysis.body).data.symbol).toBe('ORCA');
+
+    const community = await app.inject({ method: 'GET', url: '/api/v1/coins/KRW-ORCA/community' });
+    expect(community.statusCode).toBe(200);
+    expect(JSON.parse(community.body).data).toMatchObject({
+      symbol: 'ORCA',
+      items: [],
+      nextCursor: null,
+    });
+
+    const unauthenticatedVote = await app.inject({
+      method: 'POST',
+      url: '/coins/ORCA/votes',
+      payload: { direction: 'bullish' },
+    });
+    expect(unauthenticatedVote.statusCode).toBe(401);
+
+    const trends = await app.inject({ method: 'GET', url: '/api/v1/market/trends' });
+    expect(trends.statusCode).toBe(200);
     await app.close();
   }, 30000);
 });

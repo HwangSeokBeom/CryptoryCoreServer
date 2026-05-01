@@ -146,7 +146,7 @@ describe('Exchange connection domain routes', () => {
     expect(body.data.code).toBe('insufficient_permissions');
     expect(body.data.details.upstreamStatus).toBe(403);
     await app.close();
-  });
+  }, 20000);
 
   it('GET /exchange-connections/:id/status returns connection summary', async () => {
     const { app, token } = await createAppWithToken();

@@ -21,6 +21,7 @@ import { kimchiPremiumRoutes } from './domains/kimchi-premium/kimchi-premium.rou
 import { exchangeConnectionRoutes } from './domains/exchange-connections/exchange-connections.routes';
 import { exchangeMetadataRoutes } from './domains/exchange-metadata/exchange-metadata.routes';
 import { newsRoutes } from './domains/news/news.routes';
+import { coinRoutes } from './domains/coins/coins.routes';
 
 export async function buildApp() {
   const app = Fastify({
@@ -129,6 +130,10 @@ export async function buildApp() {
   await app.register(chartRoutes, { prefix: '/charts' });
   await app.register(kimchiPremiumRoutes, { prefix: '/kimchi-premium' });
   await app.register(newsRoutes, { prefix: '/news' });
+  await app.register(coinRoutes, { prefix: '/coins' });
+  await app.register(newsRoutes, { prefix: '/api/v1/news' });
+  await app.register(coinRoutes, { prefix: '/api/v1/coins' });
+  await app.register(marketRoutes, { prefix: '/api/v1/market' });
   await app.register(tradingRoutes, { prefix: '/trading' });
   await app.register(portfolioRoutes, { prefix: '/portfolio' });
   await app.register(exchangeConnectionRoutes, { prefix: '/exchange-connections' });

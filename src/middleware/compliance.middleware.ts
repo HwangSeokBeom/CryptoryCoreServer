@@ -26,6 +26,8 @@ const featureFlagKey: Record<TransactionalFeature, keyof typeof featureFlags> = 
 
 const publicMarketPrefixes = [
   '/api/v1/public',
+  '/api/v1/market',
+  '/api/v1/news',
   '/market',
   '/charts',
   '/kimchi-premium',
@@ -47,7 +49,20 @@ function getPathSegments(path: string) {
 }
 
 function isPublicMarketDataPath(path: string) {
-  return publicMarketPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
+  return publicMarketPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))
+    || isInformationalCoinPath(path);
+}
+
+function isInformationalCoinPath(path: string) {
+  const segments = getPathSegments(path);
+  const offset = segments[0] === 'api' && segments[1] === 'v1' ? 2 : 0;
+  if (segments[offset] !== 'coins') {
+    return false;
+  }
+
+  const informationalAction = segments[offset + 2];
+  return segments.length === offset + 3
+    && ['info', 'analysis', 'community', 'votes'].includes(informationalAction);
 }
 
 export function detectTransactionalFeatureFromPath(method: string, url: string): TransactionalFeature | null {
