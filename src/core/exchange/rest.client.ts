@@ -12,8 +12,10 @@ export interface RestRequestOptions extends Omit<RequestInit, 'body'> {
   timeoutMs?: number;
 }
 
+export type RestClientOwner = ExchangeId | 'fx' | 'coingecko' | 'coinmarketcap' | 'translation' | 'news';
+
 export type RestResponseMeta = {
-  owner: ExchangeId | 'fx' | 'coingecko';
+  owner: RestClientOwner;
   path: string;
   requestUrl: string;
   statusCode: number;
@@ -225,7 +227,7 @@ function isExchangeRequestError(error: unknown): error is ExchangeRequestError {
 
 export class RestClient {
   constructor(
-    private readonly owner: ExchangeId | 'fx' | 'coingecko',
+    private readonly owner: RestClientOwner,
     private readonly baseUrl: string,
   ) {}
 

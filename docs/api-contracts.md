@@ -14,13 +14,17 @@ Errors use:
 ```json
 {
   "success": false,
+  "message": "message",
   "error": "message",
   "code": "MACHINE_READABLE_CODE",
   "details": {}
 }
 ```
 
-`code` and `details` are optional, but auth endpoints return them for validation and duplicate-resource cases.
+`message` is the canonical user-displayable error text. `error` remains as a compatibility alias.
+`code` is always present; routes that do not provide a more specific code use `REQUEST_FAILED`.
+`details` is optional and must not contain credentials, tokens, API keys, signatures, or raw
+authorization headers.
 
 ## Auth And Account Routes
 
@@ -97,7 +101,7 @@ iOS Sign in with Apple checklist:
 - `GET /api/v1/app/config`
 - `GET /api/v1/legal/config`
 
-These public endpoints expose `appName`, legal/support URLs, account route contracts, social login client ids, and app-review readiness. Production startup requires all public legal/support URL env vars to be set to valid URLs: `APP_HOMEPAGE_URL`, `TERMS_URL`, `PRIVACY_POLICY_URL`, `SUPPORT_URL`, `ACCOUNT_DELETION_URL`, and `INVESTMENT_DISCLAIMER_URL`.
+These public endpoints expose `appName`, legal/support URLs, account route contracts, social login client ids, and app-review readiness. Production startup requires all public legal/support URL env vars to be set to valid URLs: `APP_HOMEPAGE_URL`, `TERMS_URL`, `PRIVACY_POLICY_URL`, `SUPPORT_URL`, `ACCOUNT_DELETION_URL`, `INVESTMENT_DISCLAIMER_URL`, and `COMMUNITY_POLICY_URL`.
 
 ## Security
 
@@ -122,28 +126,504 @@ These public endpoints expose `appName`, legal/support URLs, account route contr
 
 ## Public Market Routes
 
+### `GET /market/candles`
+
+Auth: not required. Compatibility alias: `GET /api/v1/market/candles`.
+
+Query:
+
+- `exchange`: `upbit | bithumb`
+- `symbol`: base symbol or provider market id, for example `BTC`, `ETH`, `KRW-BTC`, `BTC-ETH`, `BTC/KRW`
+- `quoteCurrency`: `KRW | BTC`
+- `timeframe`: `1M | 5M | 15M | 1H | 4H | 1D | 1W`
+- `limit`: default `200`, max `500`
+
+Compatibility: `interval=1m|5m|15m|1h|4h|1d|1w` is accepted and normalized to `timeframe`, but the response shape remains the canonical iOS shape below. `/market/candles` does not return both `data[]` and `data.candles[]` unless the deprecated legacy mode below is used without `quoteCurrency`/`timeframe`.
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "exchange": "upbit",
+    "symbol": "BTC",
+    "quoteCurrency": "KRW",
+    "market": "KRW-BTC",
+    "timeframe": "1H",
+    "source": "upbit",
+    "candles": [
+      {
+        "timestamp": "2026-05-04T12:00:00.000Z",
+        "open": 95000000,
+        "high": 96000000,
+        "low": 94000000,
+        "close": 95500000,
+        "volume": 12.345,
+        "quoteVolume": 1170000000
+      }
+    ],
+    "summary": {
+      "currentPrice": 95500000,
+      "high24h": 97000000,
+      "low24h": 93000000,
+      "changeRate24h": 1.52,
+      "volume24h": 201575000000
+    }
+  }
+}
+```
+
+Candles are sorted ascending by `timestamp`. `4H` is aggregated from `1H`; `1W` is aggregated from `1D`.
+The server applies a short TTL cache controlled by `CANDLE_CACHE_TTL_SECONDS`.
+
+### `GET /market/exchanges`
+
+Auth: not required. Compatibility alias: `GET /api/v1/market/exchanges`.
+
+Returns the market quote capability contract clients should use before showing quote tabs.
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "exchange": "upbit",
+        "displayName": "업비트",
+        "supportedQuotes": ["KRW", "BTC"],
+        "defaultQuoteCurrency": "KRW",
+        "enabled": true,
+        "status": "active",
+        "reason": null
+      },
+      {
+        "exchange": "binance",
+        "displayName": "바이낸스",
+        "supportedQuotes": ["USDT", "BTC", "ETH"],
+        "defaultQuoteCurrency": "USDT",
+        "enabled": true,
+        "status": "active",
+        "reason": null
+      }
+    ]
+  }
+}
+```
+
+### `GET /market/tickers`
+
+Auth: not required. Compatibility alias: `GET /api/v1/market/tickers`.
+
+Query:
+
+- `exchange`: `upbit | bithumb | coinone | korbit | binance`
+- `quoteCurrency`: optional. Supported values depend on `exchange`.
+- `sort`: optional `volume | changeRate | price | name | volume_desc | change_desc | price_desc`
+- `order`: optional `asc | desc`
+- `limit`: optional, max `500`
+
+Exchange quote contract:
+
+| exchange | displayName | supportedQuotes | defaultQuoteCurrency | note |
+| --- | --- | --- | --- | --- |
+| `upbit` | 업비트 | `KRW`, `BTC` | `KRW` | `KRW-BTC` is `BTC/KRW`, not a BTC quote market. BTC quote markets are `BTC-*`. |
+| `bithumb` | 빗썸 | `KRW`, `BTC` | `KRW` | External rows are normalized to `marketId` and `displayPair` that match the requested quote. |
+| `coinone` | 코인원 | `KRW` | `KRW` | BTC requests return unsupported diagnostics. |
+| `korbit` | 코빗 | `KRW` | `KRW` | BTC requests return unsupported diagnostics. |
+| `binance` | 바이낸스 | `USDT`, `BTC`, `ETH` | `USDT` | Binance is not KRW-centered. `exchange=binance` without `quoteCurrency` defaults to `USDT`; `KRW` is unsupported unless a separate conversion contract is introduced. |
+
+Clients should call `GET /market/exchanges` or read `supportedQuotes` from `/market/tickers` before rendering quote segmented controls. Unsupported quote requests return `success=true` with `items=[]` and diagnostics instead of an ambiguous empty list.
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "exchange": "upbit",
+    "quoteCurrency": "BTC",
+    "supportedQuotes": ["KRW", "BTC"],
+    "defaultQuoteCurrency": "KRW",
+    "items": [
+      {
+        "exchange": "upbit",
+        "exchangeName": "업비트",
+        "market": "BTC-ETH",
+        "exchangeSymbol": "BTC-ETH",
+        "marketId": "BTC-ETH",
+        "rawSymbol": "BTC-ETH",
+        "symbol": "ETH",
+        "baseCurrency": "ETH",
+        "quoteCurrency": "BTC",
+        "displayPair": "ETH/BTC",
+        "koreanName": "이더리움",
+        "englishName": "Ethereum",
+        "displayName": "이더리움",
+        "currentPrice": 0.03,
+        "price": 0.03,
+        "current": 0.03,
+        "changeRate24h": 1.52,
+        "change24h": 1.52,
+        "percent": 1.52,
+        "signedChangePrice24h": 0.0004,
+        "accTradePrice24h": 120.5,
+        "accTradeVolume24h": 4012.1,
+        "volume24h": 4012.1,
+        "high24h": 0.031,
+        "low24h": 0.029,
+        "timestamp": 1777809600000,
+        "sourceTimestamp": 1777809600000,
+        "stale": false,
+        "sparkline": [0.0296, 0.0297, 0.0298, 0.0299, 0.03, 0.0301],
+        "sparklinePoints": [
+          { "price": 0.0296, "timestamp": 1777723200000 },
+          { "price": 0.0301, "timestamp": 1777809600000 }
+        ],
+        "sparklineSource": "derived_change24h",
+        "sparklineQuality": "derived_preview",
+        "sparklinePointCount": 6,
+        "sparklineIsDerived": true
+      }
+    ],
+    "diagnostics": {
+      "requestedExchange": "upbit",
+      "requestedQuoteCurrency": "BTC",
+      "supported": true,
+      "unsupported": false,
+      "providerStatus": "active",
+      "providerLatencyMs": 123,
+      "rawCount": 10,
+      "mappedCount": 10,
+      "returnedCount": 10,
+      "omittedCount": 0,
+      "zeroPriceCount": 0,
+      "zeroVolumeCount": 0,
+      "staleCount": 0,
+      "reason": null
+    }
+  }
+}
+```
+
+`/market/tickers` returns one market list scoped by `exchange + quoteCurrency`. Every item must echo the same `exchange` and `quoteCurrency` as `data.exchange` and `data.quoteCurrency`; rows with mismatched `marketId`/`displayPair` are dropped before response and logged.
+`quoteCurrency=BTC` returns only BTC quote markets. Upbit `KRW-BTC` is the Bitcoin/KRW market and must not appear in an Upbit BTC quote response. The server applies `TICKER_CACHE_TTL_SECONDS`.
+`/market/tickers` is ticker-first: it never calls all-symbol trades/candles/history APIs to build first-paint rows.
+Ticker rows include both canonical fields (`currentPrice`, `changeRate24h`, `accTradePrice24h`) and compatibility aliases (`exchangeSymbol`, `displayName`, `price`, `current`, `percent`, `volume24h`, `timestamp`, `sourceTimestamp`, `stale`) so old and new iOS mappers can render rows without dropping them.
+Ticker sparkline values are first-paint previews. `derived_change24h` is not a real time series and is marked with `sparklineQuality=derived_preview` and `sparklineIsDerived=true` so clients can replace it with `/market/sparkline` for visible rows.
+
+Unsupported quote example:
+
+```json
+{
+  "success": true,
+  "data": {
+    "exchange": "coinone",
+    "quoteCurrency": "BTC",
+    "supportedQuotes": ["KRW"],
+    "defaultQuoteCurrency": "KRW",
+    "status": "unsupported",
+    "items": [],
+    "diagnostics": {
+      "requestedExchange": "coinone",
+      "requestedQuoteCurrency": "BTC",
+      "supported": false,
+      "unsupported": true,
+      "providerStatus": "unsupported",
+      "reason": "quote_currency_not_supported",
+      "returnedCount": 0
+    }
+  }
+}
+```
+
+Empty, unsupported, and provider error are distinct:
+
+- `unsupported`: requested quote is not in `supportedQuotes`; clients should hide/disable that tab.
+- `empty`: quote is supported but provider returned no usable rows; clients can show an empty state and retry.
+- `provider error`: response has `success=false`, `error.code=PROVIDER_UNAVAILABLE` or exchange error code, and `data.diagnostics.providerStatus="error"`.
+
+### Public WebSocket `market.candle`
+
+Path: `/ws/market`. Auth: not required. REST candle snapshots remain the initial chart source;
+WebSocket candle events are incremental updates after the first REST paint.
+
+Subscribe:
+
+```json
+{
+  "type": "subscribe",
+  "channel": "market.candle",
+  "exchange": "upbit",
+  "symbol": "BTC",
+  "quoteCurrency": "KRW",
+  "timeframe": "1H"
+}
+```
+
+Event:
+
+```json
+{
+  "type": "candle",
+  "exchange": "upbit",
+  "symbol": "BTC",
+  "quoteCurrency": "KRW",
+  "market": "KRW-BTC",
+  "timeframe": "1H",
+  "candle": {
+    "timestamp": "2026-05-04T12:00:00.000Z",
+    "open": 95000000,
+    "high": 96000000,
+    "low": 94000000,
+    "close": 95500000,
+    "volume": 0,
+    "quoteVolume": 0
+  },
+  "isFinal": false
+}
+```
+
+Unsubscribe uses the same payload with `"type": "unsubscribe"`.
+
+### Price Alerts
+
+All `/alerts/price` routes require an access token. Compatibility alias: `/api/v1/alerts/price`.
+
+- `GET /alerts/price`: lists the current user's alerts. Optional query: `symbol`, `exchange`, `quoteCurrency`, `isActive`.
+- `POST /alerts/price`: creates or reactivates a duplicate alert for the current user.
+- `PATCH /alerts/price/{alertId}`: updates only the current user's alert.
+- `DELETE /alerts/price/{alertId}`: deletes only the current user's alert.
+
+Create body:
+
+```json
+{
+  "exchange": "upbit",
+  "symbol": "BTC",
+  "quoteCurrency": "KRW",
+  "condition": "ABOVE",
+  "targetPrice": 100000000,
+  "repeatMode": "ONCE",
+  "isActive": true
+}
+```
+
+`condition` is `ABOVE | BELOW`; `repeatMode` is `ONCE | REPEAT`. `targetPrice` must be greater than `0`.
+`REPEAT` alerts use `PRICE_ALERT_REPEAT_COOLDOWN_SECONDS`; `ONCE` alerts are deactivated after a successful FCM send.
+
+### FCM Tokens
+
+All routes require an access token. Compatibility alias: `/api/v1/push/fcm-token`.
+
+`POST /push/fcm-token` body:
+
+```json
+{
+  "token": "fcm_registration_token",
+  "platform": "IOS",
+  "deviceId": "optional-device-id",
+  "appVersion": "1.0.0",
+  "environment": "dev"
+}
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "registered": true
+  }
+}
+```
+
+`DELETE /push/fcm-token` body:
+
+```json
+{
+  "token": "fcm_registration_token"
+}
+```
+
+The token is stored in the DB but never logged raw. Logs include only a SHA-256 prefix.
+Invalid/unregistered FCM token failures deactivate the stored token.
+
+### FCM Price Alert Payload
+
+```json
+{
+  "notification": {
+    "title": "BTC 가격 알림",
+    "body": "BTC가 ₩100,000,000 이상에 도달했습니다."
+  },
+  "data": {
+    "type": "PRICE_ALERT",
+    "alertId": "alert-id",
+    "exchange": "upbit",
+    "symbol": "BTC",
+    "quoteCurrency": "KRW",
+    "condition": "ABOVE",
+    "targetPrice": "100000000",
+    "currentPrice": "100250000"
+  }
+}
+```
+
+Required env:
+
+- `FIREBASE_PROJECT_ID`
+- `FIREBASE_CLIENT_EMAIL`
+- `FIREBASE_PRIVATE_KEY`
+- `FCM_ENABLED`
+- `FCM_DRY_RUN`
+- `PRICE_ALERT_WORKER_ENABLED`
+- `PRICE_ALERT_POLL_INTERVAL_MS`
+- `PRICE_ALERT_REPEAT_COOLDOWN_SECONDS`
+- `MARKET_DATA_PROVIDER`
+- `CANDLE_CACHE_TTL_SECONDS`
+- `TICKER_CACHE_TTL_SECONDS`
+- `MARKET_COLLECTOR_ENABLED` defaults to `false`; public market streaming/background collection starts only when explicitly `true`.
+- `MARKET_TRADE_COLLECTOR_ENABLED` defaults to `false`; exchange trades hydration starts only when explicitly `true`.
+- `MARKET_TREND_SNAPSHOT_ENABLED` defaults to `false`; global market history snapshot persistence starts only when explicitly `true`.
+- `MARKET_STARTUP_WARMUP_ENABLED` defaults to `false`; startup warmup remains disabled unless explicitly enabled.
+
+Firebase Admin SDK service-account JSON files must not be committed or returned to clients.
+`FIREBASE_PRIVATE_KEY` converts escaped `\n` sequences to real newlines at startup.
+
 ## Informational Public Routes
 
 Canonical client paths are root-level routes. `/api/v1/news`, `/api/v1/coins`, and `/api/v1/market`
-are compatibility aliases only; clients should not probe `/api/v1` first and then fall back to root.
+are compatibility aliases only; clients should document and prefer the root paths. If the alias is
+enabled, it returns the same envelope and body shape.
 
+Status policy:
+
+- GET success: `200`.
+- POST create success: `201`.
+- POST vote/upsert success: `200`.
+- Invalid request: `400`.
+- Auth required or failed: `401`.
+- Permission denied: `403`.
+- Missing resource: `404`.
+- Server error: `500`.
+
+Informational routes:
+
+- `GET /calculators/usdt-rate`
 - `GET /news`
+- `GET /news/overview`
 - `GET /news/:newsId`
+- `GET /coins/:symbol/news`
+- `GET /coins/:symbol`
 - `GET /coins/:symbol/info`
 - `GET /coins/:symbol/analysis?timeframe=1m|5m|15m|30m|1h|2h`
 - `GET /coins/:symbol/community`
-- `POST /coins/:symbol/community` (requires access token)
-- `POST /coins/:symbol/votes` (requires access token; accepts `bullish` or `bearish`)
-- `GET /market/trends`
+- `POST /coins/:symbol/community` (requires access token, returns `201`)
+- `POST /coins/:symbol/community/:itemId/like` (requires access token)
+- `DELETE /coins/:symbol/community/:itemId/like` (requires access token)
+- `GET /coins/:symbol/community/:itemId/comments`
+- `POST /coins/:symbol/community/:itemId/comments` (requires access token)
+- `POST /users/:userId/follow` (requires access token)
+- `DELETE /users/:userId/follow` (requires access token)
+- `GET /users/:userId/follow-state`
+- `GET /coins/:symbol/sentiment`
+- `POST /coins/:symbol/sentiment` (requires access token, upsert, returns `200`)
+- `POST /translate` (legacy server-side fallback; current iOS news translation should prefer Apple Translation on-device)
+- `GET /market/data` (legacy/deprecated for the news tab calculator flow)
+- `GET /market/trends?range=7d|30d&currency=KRW` (legacy/deprecated for the news tab calculator flow)
+- `GET /market/sentiment`
+- `POST /market/sentiment` (requires access token, upsert, returns `200`)
 - `GET /market/themes`
 
 All successful responses use `{ "success": true, "data": ... }`. Provider failures should return a
 200 response with null-safe fallback fields when a meaningful informational shell can still be built.
-The informational APIs must not include buy/sell/recommendation/investment-advice wording in response
-copy.
+Missing provider data is represented with `available: false`, `reason`, `unavailableReasons`,
+`dataState.emptyReason`, or an explicit empty-state object. Partial responses keep successful
+subsections and mark missing provider sections with `available: false`, `reason`, `source`,
+`provider`, `isStale`, or `emptyState`. The server must not return a bare empty array when the client
+needs to distinguish "empty" from "not ready".
 
-Coin symbols are normalized before lookup, so `DRIFT/KRW`, `KRW-DRIFT`, and `drift` all resolve to
-`DRIFT`.
+The informational APIs must not include buy/sell/recommendation/investment-advice wording in response
+copy. Coin symbols are normalized before lookup, so `DRIFT/KRW`, `KRW-DRIFT`, and `drift` all resolve
+to `DRIFT`; `ORCA/KRW`, `KRW-ORCA`, and `orca` all resolve to `ORCA`.
+
+### `GET /calculators/usdt-rate`
+
+USDT/KRW display rate for the News tab calculator segment. This is the only calculator API currently
+needed by the client; profit/loss and averaging-down calculators must run locally on-device and must
+not send user investment inputs to the server. The CoinMarketCap API key stays server-side and is
+never returned to clients.
+
+The server uses CoinMarketCap `GET /v2/cryptocurrency/quotes/latest` with `id=825` by default
+(`USDT_COINMARKETCAP_ID` can override it), `convert=KRW`, and the `X-CMC_PRO_API_KEY` header. A
+Redis-backed cache is used first, with in-memory fallback if Redis is unavailable. The host remains
+`https://pro-api.coinmarketcap.com`; `pro-api` is the official API host name and does not imply a
+Professional plan requirement.
+
+Fresh response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "symbol": "USDT",
+    "name": "Tether USDt",
+    "convert": "KRW",
+    "price": 1375.25,
+    "source": "coinmarketcap",
+    "cacheHit": false,
+    "updatedAt": "2026-05-03T22:35:00.000Z",
+    "expiresAt": "2026-05-03T22:40:00.000Z",
+    "reason": null
+  }
+}
+```
+
+Stale cache fallback:
+
+```json
+{
+  "success": true,
+  "data": {
+    "symbol": "USDT",
+    "name": "Tether USDt",
+    "convert": "KRW",
+    "price": 1374.8,
+    "source": "cache",
+    "cacheHit": true,
+    "updatedAt": "2026-05-03T22:30:00.000Z",
+    "expiresAt": "2026-05-03T22:35:00.000Z",
+    "reason": "using_stale_cache"
+  }
+}
+```
+
+Unavailable response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "symbol": "USDT",
+    "name": "Tether USDt",
+    "convert": "KRW",
+    "price": null,
+    "source": "none",
+    "cacheHit": false,
+    "updatedAt": null,
+    "expiresAt": null,
+    "reason": "coinmarketcap_api_key_missing"
+  }
+}
+```
+
+Failure reasons are `coinmarketcap_api_key_missing`, `coinmarketcap_rate_limited`,
+`coinmarketcap_auth_failed`, `coinmarketcap_timeout`, `coinmarketcap_unavailable`,
+`coinmarketcap_malformed_response`, `coinmarketcap_price_missing`, and `using_stale_cache`.
+External provider failures return `200` with `price: null` when no stale cache exists;
+validation/auth/internal server errors keep the normal error envelope.
 
 ### `GET /coins/:symbol/info`
 
@@ -152,18 +632,45 @@ Coin symbols are normalized before lookup, so `DRIFT/KRW`, `KRW-DRIFT`, and `dri
   "success": true,
   "data": {
     "symbol": "DRIFT",
+    "scope": "coin",
+    "marketId": "KRW-DRIFT",
     "displaySymbol": "DRIFT/KRW",
     "name": "Drift",
+    "nameKo": "드리프트",
     "logoUrl": "https://...",
     "provider": "coingecko",
     "providerId": "drift-protocol",
-    "description": "...",
+    "description": {
+      "available": true,
+      "ko": null,
+      "en": "English plain text",
+      "plainTextKo": null,
+      "plainTextEn": "English plain text",
+      "rawHtml": "<p>English plain text</p>",
+      "sourceLanguage": "en",
+      "renderLanguage": "ko",
+      "translated": false,
+      "translationProvider": "unavailable",
+      "reason": "TRANSLATION_PROVIDER_NOT_CONFIGURED",
+      "updatedAt": "2026-05-02T13:22:00.000Z"
+    },
+    "links": {
+      "homepage": "https://...",
+      "whitepaper": null,
+      "explorer": "https://..."
+    },
     "homepageUrl": "https://...",
     "explorerUrl": "https://...",
     "market": {
       "price": 86.8,
       "priceCurrency": "KRW",
       "priceChangePercent24h": 2.97,
+      "priceChangePercent7d": null,
+      "priceChangePercent14d": null,
+      "priceChangePercent30d": null,
+      "priceChangePercent60d": null,
+      "priceChangePercent200d": null,
+      "priceChangePercent1y": null,
       "high24h": 86.8,
       "low24h": 86.8,
       "volume24h": 78770000000,
@@ -177,7 +684,9 @@ Coin symbols are normalized before lookup, so `DRIFT/KRW`, `KRW-DRIFT`, and `dri
       "atl": null,
       "asOf": "2026-05-01T15:24:04.697Z"
     },
-    "source": {
+    "source": "coingecko",
+    "updatedAt": "2026-05-02T13:22:00.000Z",
+    "sourceDetail": {
       "metadata": "coingecko",
       "market": "market_snapshot",
       "fallbackUsed": false
@@ -185,6 +694,21 @@ Coin symbols are normalized before lookup, so `DRIFT/KRW`, `KRW-DRIFT`, and `dri
   }
 }
 ```
+
+Period price change fields are null-safe. The server maps provider values when available and returns
+`null` when a provider does not publish that period; it does not synthesize historical period changes.
+`GET /coins/:symbol` is the canonical coin info route and `GET /coins/:symbol/info` is kept as a
+compatibility alias with the same body shape. Symbols are normalized before lookup:
+`ORCA`, `orca`, `KRW-ORCA`, and `ORCA/KRW` all resolve to `ORCA`.
+
+Description policy:
+
+- CoinGecko `description.ko` is used first when present.
+- If only English exists, the server attempts the configured translation provider. When translation
+  is not configured, `plainTextEn`/`en` are populated and Korean fields are `null` with
+  `translationProvider: "unavailable"` and `reason="TRANSLATION_PROVIDER_NOT_CONFIGURED"`.
+- HTML is preserved only in `rawHtml`; display fields are stripped and entity-decoded plain text.
+- If no description exists, `description.available=false` and `reason="DESCRIPTION_NOT_AVAILABLE"`.
 
 ### `GET /coins/:symbol/analysis`
 
@@ -226,18 +750,282 @@ Coin symbols are normalized before lookup, so `DRIFT/KRW`, `KRW-DRIFT`, and `dri
 {
   "success": true,
   "data": {
-    "symbol": "DRIFT",
-    "vote": {
-      "bullishCount": 0,
-      "bearishCount": 0,
-      "participantCount": 0,
-      "myVote": null
+    "symbol": "ORCA",
+    "items": [
+      {
+        "id": "community_item_id",
+        "symbol": "ORCA",
+        "content": "12313",
+        "author": {
+          "id": "user_id",
+          "nickname": null,
+          "displayName": "us***@example.com",
+          "emailMasked": "us***@example.com",
+          "isPrivateRelay": false,
+          "avatarUrl": null,
+          "isFollowing": false,
+          "followable": true,
+          "isMe": false
+        },
+        "createdAt": "2026-05-02T02:24:27.420Z",
+        "updatedAt": "2026-05-02T02:24:27.420Z",
+        "likeCount": 0,
+        "replyCount": 0,
+        "commentCount": 0,
+        "isLiked": false,
+        "myReaction": null
+      }
+    ],
+    "pagination": {
+      "nextCursor": null,
+      "hasMore": false
     },
-    "items": [],
-    "nextCursor": null
+    "summary": {
+      "itemCount": 1,
+      "participantCount": 1
+    }
   }
 }
 ```
+
+Compatibility fields `vote` and `nextCursor` can be present for older clients. New clients should use
+`pagination` and `summary`.
+
+### `POST /coins/:symbol/community`
+
+Requires a valid access token. Missing, invalid, and expired access tokens return stable 401 codes:
+`ACCESS_TOKEN_REQUIRED`, `ACCESS_TOKEN_INVALID`, or `ACCESS_TOKEN_EXPIRED`.
+
+```json
+{
+  "success": true,
+  "data": {
+    "item": {
+      "id": "community-item-id",
+      "symbol": "ORCA",
+      "content": "12313",
+      "author": {
+        "id": "user-id",
+        "nickname": null,
+        "displayName": "us***@example.com",
+        "emailMasked": "us***@example.com",
+        "isPrivateRelay": false,
+        "avatarUrl": null,
+        "isFollowing": false,
+        "followable": true,
+        "isMe": true
+      },
+      "createdAt": "2026-05-02T00:00:00.000Z",
+      "updatedAt": "2026-05-02T00:00:00.000Z",
+      "likeCount": 0,
+      "replyCount": 0,
+      "commentCount": 0,
+      "isLiked": false,
+      "myReaction": null
+    },
+    "summary": {
+      "itemCount": 1,
+      "participantCount": 1
+    }
+  }
+}
+```
+
+POST trims `content`, rejects empty content with `400 INVALID_COMMUNITY_CONTENT`, and returns an
+`item` with the same canonical shape used by GET `items[]`. `id` is always a string, timestamps are ISO
+strings, and `author` is never null. `participantCount` is the unique author count for the symbol and
+includes the newly created post author.
+
+### Community Likes
+
+`POST /coins/:symbol/community/:itemId/like` creates a like for the authenticated user. Repeated
+POST calls are idempotent and do not increase `likeCount` more than once. `DELETE` removes the like;
+deleting a missing like is also idempotent.
+
+```json
+{
+  "success": true,
+  "data": {
+    "itemId": "community_item_id",
+    "symbol": "ORCA",
+    "isLiked": true,
+    "likeCount": 12,
+    "updatedAt": "2026-05-02T14:00:00.000Z"
+  }
+}
+```
+
+Missing items return `404 COMMUNITY_ITEM_NOT_FOUND`. Community item list and create DTOs include
+`likeCount`, `isLiked`, and `myReaction`.
+
+### Community Comments
+
+`GET /coins/:symbol/community/:itemId/comments` returns a cursor page and comment summary.
+`POST /coins/:symbol/community/:itemId/comments` requires auth and body `{ "content": "댓글 내용" }`.
+Content is trimmed; empty content returns `400 INVALID_COMMENT_CONTENT`.
+
+```json
+{
+  "success": true,
+  "data": {
+    "symbol": "ORCA",
+    "itemId": "community_item_id",
+    "items": [
+      {
+        "id": "comment_id",
+        "itemId": "community_item_id",
+        "content": "댓글 내용",
+          "author": {
+            "id": "user_id",
+            "nickname": null,
+            "displayName": "Apple 사용자",
+            "emailMasked": "w9***@privaterelay.appleid.com",
+            "isPrivateRelay": true,
+            "avatarUrl": null,
+            "isFollowing": false,
+            "followable": true,
+            "isMe": false
+          },
+        "createdAt": "2026-05-02T14:00:00.000Z",
+        "updatedAt": "2026-05-02T14:00:00.000Z"
+      }
+    ],
+    "pagination": { "nextCursor": null, "hasMore": false },
+    "summary": { "commentCount": 1 }
+  }
+}
+```
+
+### Author Follow
+
+Discussion-card follow state is author follow, not coin watch/star state. `POST /users/:userId/follow`
+and `DELETE /users/:userId/follow` are idempotent. Self-follow returns `400 CANNOT_FOLLOW_SELF`.
+
+```json
+{
+  "success": true,
+  "data": {
+    "targetUserId": "user_id",
+    "isFollowing": true,
+    "followerCount": 10,
+    "updatedAt": "2026-05-02T14:00:00.000Z"
+  }
+}
+```
+
+Community item and comment `author` is never `null` and includes `displayName`, `nickname`,
+`emailMasked`, `isPrivateRelay`, `isFollowing`, `followable`, and `isMe`. Display-name priority is:
+profile display name, nickname, name, Apple private relay fallback `"Apple 사용자"`, masked normal
+email local part, then `"사용자"`. The raw email address is never returned as `displayName`; email
+exposure is limited to `emailMasked`. When `author.id` is missing, `followable=false` so the client can
+disable follow actions.
+
+Auth error example:
+
+```json
+{
+  "success": false,
+  "message": "인증이 필요합니다",
+  "error": "인증이 필요합니다",
+  "code": "ACCESS_TOKEN_REQUIRED",
+  "details": {
+    "hasAuthorization": false,
+    "tokenLength": 0
+  }
+}
+```
+
+### Coin Sentiment
+
+`GET /coins/:symbol/sentiment` and `POST /coins/:symbol/sentiment` are scoped to one normalized coin
+symbol. POST accepts `{ "vote": "bullish" }` or `{ "vote": "bearish" }`, requires auth, and upserts
+one vote per `user + symbol + UTC date`.
+
+```json
+{
+  "success": true,
+  "data": {
+    "scope": "coin",
+    "symbol": "ORCA",
+    "date": "2026-05-02",
+    "totalParticipants": 12,
+    "bullishCount": 7,
+    "bearishCount": 5,
+    "bullishRatio": 58.33,
+    "bearishRatio": 41.67,
+    "ratioScale": "percent",
+    "myVote": "bullish",
+    "updatedAt": "2026-05-02T02:24:27.420Z"
+  }
+}
+```
+
+`POST /coins/:symbol/votes` remains a compatibility alias for the older community poll shape and
+should not be used for new client work.
+Invalid sentiment votes return `400 INVALID_SENTIMENT_VOTE`.
+
+### Market Sentiment
+
+`GET /market/sentiment` and `POST /market/sentiment` are scoped to the whole market, not a coin. POST
+accepts `{ "vote": "bullish" }` or `{ "vote": "bearish" }`, requires auth, and upserts one vote per
+`user + UTC date`.
+
+```json
+{
+  "success": true,
+  "data": {
+    "scope": "market",
+    "date": "2026-05-02",
+    "totalParticipants": 120,
+    "bullishCount": 70,
+    "bearishCount": 50,
+    "bullishRatio": 58.33,
+    "bearishRatio": 41.67,
+    "ratioScale": "percent",
+    "myVote": "bearish",
+    "updatedAt": "2026-05-02T02:24:27.420Z"
+  }
+}
+```
+
+GET is public and returns `myVote: null` when no authenticated user is available. Invalid POST votes
+return `400 INVALID_SENTIMENT_VOTE`; missing/invalid auth returns `401` with the auth error code.
+
+### `POST /translate`
+
+Server-side translation endpoint for coin descriptions and news fallback translation. External
+provider credentials stay in server environment only.
+
+```json
+{
+  "success": true,
+  "data": {
+    "sourceLanguage": "en",
+    "targetLanguage": "ko",
+    "translatedText": "한국어 번역문",
+    "provider": "openai",
+    "cached": false,
+    "updatedAt": "2026-05-02T14:00:00.000Z"
+  }
+}
+```
+
+Supported providers are `TRANSLATION_PROVIDER=openai|papago|google`. Cache key is normalized plain
+text hash + source language + target language. HTML input is converted to plain text before
+translation. Text longer than `TRANSLATION_MAX_TEXT_LENGTH` returns `400 TRANSLATION_TEXT_TOO_LONG`
+with chunking guidance. Missing provider credentials return `503 TRANSLATION_PROVIDER_NOT_CONFIGURED`.
+Successful translation results are cached by text hash + target language. Provider failures are not
+cached as long-lived successes; coin description responses keep English text and set
+`description.reason` instead.
+
+Coin info description contract:
+
+- `description.ko/plainTextKo` use CoinGecko `description.ko` first.
+- If Korean text is missing and English text exists, the server calls the configured translation
+  provider and sets `translationProvider` to the concrete provider name such as `openai`.
+- If translation cannot run, `ko/plainTextKo=null`, `en/plainTextEn` remain populated, and `reason`
+  is `TRANSLATION_PROVIDER_NOT_CONFIGURED` or `TRANSLATION_FAILED`.
+- `rawHtml` is the provider HTML, while `plainTextKo/plainTextEn` are safe display text.
 
 ### `GET /news`
 
@@ -245,46 +1033,366 @@ Coin symbols are normalized before lookup, so `DRIFT/KRW`, `KRW-DRIFT`, and `dri
 {
   "success": true,
   "data": {
-    "items": [],
+    "scope": "market",
+    "sourceStatus": {
+      "externalConfigured": true,
+      "externalAvailable": true,
+      "providers": ["cryptopanic", "coindesk_rss"],
+      "fallbackUsed": false,
+      "reason": null,
+      "externalCount": 20,
+      "fallbackCount": 0
+    },
+    "items": [
+      {
+        "id": "btc-market-overview-2026-04-30",
+        "scope": "market",
+        "symbols": ["BTC"],
+        "title": "Bitcoin market data shows steady liquidity across major venues",
+        "titleKo": "비트코인 시장 데이터, 주요 거래소에서 안정적인 유동성 보여",
+        "summary": "English summary",
+        "summaryKo": "한국어 요약",
+        "source": "Cryptory Research",
+        "provider": "cryptory_research",
+        "publishedAt": "2026-04-30T00:00:00.000Z",
+        "url": "https://cryptory.example/news/btc-market-overview-2026-04-30",
+        "imageUrl": null,
+        "tags": ["market", "bitcoin", "BTC"],
+        "language": "en",
+        "translated": true,
+        "translationProvider": "server",
+        "tone": "neutral"
+      }
+    ],
+    "pagination": {
+      "nextCursor": null,
+      "hasMore": false
+    },
+    "emptyState": {
+      "isEmpty": false,
+      "reason": null
+    },
+    "updatedAt": "2026-05-02T13:22:00.000Z",
     "nextCursor": null
   }
 }
 ```
 
-News item fields are null-safe: `source`, `url`, `thumbnailUrl`, `symbols`, and `category` are always
-present on returned items.
+Market news uses `scope: "market"`. `source` is always a non-empty string on items. List responses
+also include `source`, `cacheHit`, `providerStatus`, `reason`, `date`, and the applied
+`sort: { orderBy, direction }` so clients can distinguish provider outages from valid empty results.
+External fetch
+uses `NEWS_PROVIDER=cryptopanic|cryptocurrency_cv|newsapi`. CryptoPanic uses only
+`CRYPTOPANIC_API_BASE_URL` and is skipped when `CRYPTOPANIC_API_KEY` is empty.
+`cryptocurrency_cv` uses `CRYPTOCURRENCY_CV_API_BASE_URL` with no auth header and no API key query:
+`/news` for market news, `/search?q={symbol}` for coin news, and `/digest` for the news overview.
+`newsapi` uses `NEWSAPI_API_BASE_URL` and sends the key server-side through `X-Api-Key`. When
+`NEWS_PROVIDER=newsapi`, NewsAPI is the primary provider for market and coin news. When another
+selected provider is unavailable, NewsAPI is used as fallback if `NEWSAPI_API_KEY` is configured;
+otherwise the server falls back to public RSS feeds
+(`NEWS_RSS_FEEDS` or defaults: CoinDesk, Cointelegraph, Decrypt). `cryptory_research` items are the
+last fallback only and are marked through `sourceStatus.fallbackUsed=true`; they are not presented as
+external provider data. `sourceStatus.providers` includes `cryptocurrency_cv` when that provider is
+selected. Successful provider results are cached for `NEWS_CACHE_TTL_SECONDS`; provider failure or
+rate limit falls back to the cached payload before returning an empty response. Items are deduped by
+URL hash and normalized title, then sorted by the requested `sort/orderBy/direction` with
+`publishedAt desc` as the default.
 
-### `GET /market/trends`
+### `GET /coins/:symbol/news`
 
 ```json
 {
   "success": true,
   "data": {
-    "summary": {
-      "totalMarketCap": null,
-      "volume24h": 78770000000,
-      "btcDominance": null,
-      "ethDominance": null,
-      "fearGreedIndex": null,
-      "altcoinIndex": null
+    "scope": "coin",
+    "symbol": "ORCA",
+    "coinName": "Orca",
+    "provider": "cryptopanic",
+    "sourceStatus": {
+      "externalConfigured": true,
+      "externalAvailable": true,
+      "providers": ["cryptopanic", "coindesk_rss"],
+      "fallbackUsed": false,
+      "reason": null,
+      "externalCount": 20,
+      "fallbackCount": 0
     },
-    "movers": {
-      "topGainers": [],
-      "topLosers": [],
-      "topVolume": []
+    "items": [],
+    "relatedItems": [],
+    "pagination": {
+      "nextCursor": null,
+      "hasMore": false
     },
-    "series": {
-      "marketCap": [],
-      "volume": []
+    "emptyState": {
+      "isEmpty": true,
+      "reason": "NO_DIRECT_COIN_NEWS"
     },
-    "source": {
-      "primary": "market_snapshot",
-      "fallbackUsed": true
-    },
-    "asOf": "2026-05-01T15:24:04.697Z"
+    "updatedAt": "2026-05-02T13:22:00.000Z",
+    "nextCursor": null
   }
 }
 ```
+
+Coin news uses `scope: "coin"` and keeps direct and ecosystem-related items separate. Direct matching
+order is provider `currencies/symbols`, exact tags, title/summary keyword, then coin-name keyword.
+`relatedItems` may contain ecosystem context such as Solana/DEX/DeFi for ORCA, and clients should
+label it as related fallback rather than direct token news. A coin with no direct news returns `200`
+with `emptyState.reason="NO_DIRECT_COIN_NEWS"` when `relatedItems` exists, or
+`NO_RELATED_COIN_NEWS` when neither direct nor related items are available. The top-level `reason`
+uses client-facing lower-case values such as `no_related_news`,
+`provider_limit_or_error_and_cache_empty`, or `providers_disabled_and_cache_empty`. Ambiguous symbols
+such as `BIO` use metadata keywords such as `BIO Protocol`, `BIO token`, `BIO crypto`, `DeSci`, and
+`bio.xyz` rather than bare word matching.
+
+### `GET /market/data`
+
+Canonical market dashboard endpoint. Existing exchange list endpoint `GET /market/overview?exchange=...`
+is a separate market-list route and is not the dashboard contract.
+
+```json
+{
+  "success": true,
+  "data": {
+    "scope": "market",
+    "currency": "KRW",
+    "source": "coingecko",
+    "updatedAt": "2026-05-02T02:24:00.000Z",
+    "isStale": false,
+    "sourceStatus": {
+      "marketDataAvailable": true,
+      "fearGreedAvailable": true,
+      "fallbackUsed": false,
+      "staleCacheUsed": false,
+      "reasons": []
+    },
+    "metrics": {
+      "totalMarketCap": {
+        "value": 2680000000000,
+        "formatted": "KRW 2.68조",
+        "currency": "KRW",
+        "source": "coingecko",
+        "updatedAt": "2026-05-02T02:24:00.000Z",
+        "available": true,
+        "reason": null
+      },
+      "totalVolume24h": {
+        "value": 83225000000,
+        "formatted": "KRW 832.25억",
+        "currency": "KRW",
+        "source": "coingecko",
+        "updatedAt": "2026-05-02T02:24:00.000Z",
+        "available": true,
+        "reason": null
+      },
+      "btcDominance": { "value": 58.47, "unit": "percent", "source": "coingecko", "available": true, "reason": null },
+      "ethDominance": { "value": 10.37, "unit": "percent", "source": "coingecko", "available": true, "reason": null },
+      "fearGreedIndex": {
+        "value": 26,
+        "unit": "index",
+        "label": "fear",
+        "labelKo": "공포",
+        "scale": { "min": 0, "max": 100 },
+        "available": true,
+        "source": "alternative.me",
+        "reason": null
+      },
+      "altcoinIndex": {
+        "value": null,
+        "unit": "index",
+        "label": null,
+        "labelKo": null,
+        "available": false,
+        "source": null,
+        "reason": "ALTCOIN_INDEX_SOURCE_NOT_CONFIGURED"
+      }
+    },
+    "availability": {
+      "totalMarketCap": true,
+      "totalVolume24h": true,
+      "btcDominance": true,
+      "ethDominance": true,
+      "fearGreedIndex": true,
+      "altcoinIndex": false
+    },
+    "unavailableReasons": {
+      "altcoinIndex": "ALTCOIN_INDEX_SOURCE_NOT_CONFIGURED"
+    }
+  }
+}
+```
+
+Fear & Greed thresholds:
+
+- `0..24`: `extreme_fear` / `극단적 공포`
+- `25..44`: `fear` / `공포`
+- `45..55`: `neutral` / `중립`
+- `56..75`: `greed` / `탐욕`
+- `76..100`: `extreme_greed` / `극단적 탐욕`
+
+Therefore score `26` must be `fear` / `공포`, not neutral.
+
+### `GET /market/trends?range=7d|30d&currency=KRW`
+
+Market trend series uses provider snapshots accumulated by the server. CoinGecko global data provides
+current values only, so the server records current snapshots and returns explicit partial state until
+there are enough points for a chart.
+
+```json
+{
+  "success": true,
+  "data": {
+    "scope": "market",
+    "range": "7d",
+    "currency": "KRW",
+    "source": "coingecko+news_provider",
+    "updatedAt": "2026-05-02T02:24:00.000Z",
+    "pointCount": 2,
+    "chartReady": false,
+    "renderHint": "limited_points",
+    "dataQuality": {
+      "level": "low",
+      "messageKo": "추이 차트를 표시하기에는 데이터가 아직 적습니다.",
+      "reason": "INSUFFICIENT_POINTS"
+    },
+    "availability": {
+      "totalMarketCap": true,
+      "totalVolume": true,
+      "btcDominance": true,
+      "ethDominance": true,
+      "fearGreedIndex": false
+    },
+    "unavailableReasons": {
+      "fearGreedIndex": "HISTORICAL_FEAR_GREED_NOT_AVAILABLE"
+    },
+    "points": [
+      {
+        "timestamp": "2026-04-26T00:00:00.000Z",
+        "totalMarketCap": 2600000000000,
+        "totalVolume": 79000000000,
+        "btcDominance": 57.9,
+        "ethDominance": 10.1,
+        "fearGreedIndex": null
+      }
+    ],
+    "emptyState": {
+      "isEmpty": false,
+      "reason": null
+    }
+  }
+}
+```
+
+`pointCount` is the number of returned points. `chartReady=false` when fewer than 7 points exist.
+`renderHint` values are `limited_points` for 0-2 points, `limited` for 3-6 points, and `chart` for
+7 or more points. The iOS client must not render the large trend chart when `chartReady=false`; it may
+show a compact/empty state using `dataQuality.messageKo`. `points[]` shape is fixed, timestamps are
+ISO strings, and numeric fields are numbers or `null`.
+
+### `GET /news/overview`
+
+Latest-trends/news overview endpoint for the segmented news screen.
+
+```json
+{
+  "success": true,
+  "data": {
+    "scope": "market",
+    "updatedAt": "2026-05-02T02:24:00.000Z",
+    "source": "coingecko+news_provider",
+    "sourceStatus": {
+      "marketDataAvailable": true,
+      "fearGreedAvailable": true,
+      "newsAvailable": true,
+      "fallbackUsed": false,
+      "reasons": [],
+      "news": {
+        "externalConfigured": true,
+        "externalAvailable": true,
+        "providers": ["cryptopanic", "coindesk_rss"],
+        "fallbackUsed": false,
+        "reason": null
+      }
+    },
+    "summary": {
+      "title": "오늘 시장 요약",
+      "headline": "현재 시장 심리는 공포 구간입니다.",
+      "headlineKo": "현재 시장 심리는 공포 구간입니다.",
+      "description": "BTC dominance is 58.47% and 24h volume is KRW 832.25억.",
+      "descriptionKo": "BTC 도미넌스는 58.47%, 24시간 거래량은 KRW 832.25억입니다.",
+      "tone": "fear",
+      "available": true,
+      "reason": null
+    },
+    "mood": {
+      "score": 26,
+      "label": "fear",
+      "labelKo": "공포",
+      "scale": { "min": 0, "max": 100 },
+      "thresholds": [
+        { "min": 0, "max": 24, "label": "extreme_fear", "labelKo": "극단적 공포" },
+        { "min": 25, "max": 44, "label": "fear", "labelKo": "공포" },
+        { "min": 45, "max": 55, "label": "neutral", "labelKo": "중립" },
+        { "min": 56, "max": 75, "label": "greed", "labelKo": "탐욕" },
+        { "min": 76, "max": 100, "label": "extreme_greed", "labelKo": "극단적 탐욕" }
+      ],
+      "source": "alternative.me",
+      "available": true,
+      "reason": null,
+      "updatedAt": "2026-05-02T02:24:00.000Z"
+    },
+    "marketSentiment": {
+      "scope": "market",
+      "date": "2026-05-02",
+      "totalParticipants": 0,
+      "bullishCount": 0,
+      "bearishCount": 0,
+      "bullishRatio": 0,
+      "bearishRatio": 0,
+      "ratioScale": "percent",
+      "myVote": null,
+      "updatedAt": "2026-05-02T02:24:00.000Z"
+    },
+    "topNews": [
+      {
+        "id": "news_id",
+        "title": "뉴스 제목",
+        "titleKo": "뉴스 제목",
+        "summary": "summary",
+        "summaryKo": "요약",
+        "source": "source name",
+        "provider": "cryptopanic",
+        "publishedAt": "2026-05-02T01:00:00.000Z",
+        "url": "https://example.com/news",
+        "imageUrl": null,
+        "tags": ["BTC"],
+        "symbols": ["BTC"]
+      }
+    ]
+  }
+}
+```
+
+`events` and `eventsState` are removed from the canonical overview contract. Older clients should
+hide the major-events card when those optional deprecated fields are absent.
+
+### External Provider Environment
+
+- Coin info and market dashboard: `COINGECKO_API_BASE_URL`, optional `COINGECKO_API_KEY`.
+- Calculator USDT/KRW rate: `COINMARKETCAP_API_BASE_URL`, `COINMARKETCAP_API_KEY`,
+  `COINMARKETCAP_TIMEOUT_MS`, `USDT_RATE_CACHE_TTL_SECONDS`, `USDT_COINMARKETCAP_ID`.
+- Market history cache: `MARKET_DATA_CACHE_TTL_SECONDS`; optional `COINMARKETCAP_API_KEY` and
+  `CRYPTOCOMPARE_API_KEY` are accepted without making startup depend on them.
+- Fear & Greed: Alternative.me public endpoint.
+- News: `NEWS_PROVIDER=cryptopanic|cryptocurrency_cv|newsapi`; optional `CRYPTOPANIC_API_KEY`,
+  `CRYPTOPANIC_API_BASE_URL`; `CRYPTOCURRENCY_CV_API_BASE_URL` for the no-auth cryptocurrency.cv
+  provider; `NEWSAPI_API_KEY`/`NEWSAPI_API_BASE_URL` for NewsAPI primary or fallback;
+  `NEWS_CACHE_TTL_SECONDS`.
+- News RSS fallback: optional `NEWS_RSS_FEEDS` comma-separated URLs. If omitted, the server uses
+  public CoinDesk, Cointelegraph, and Decrypt RSS feeds before falling back to `cryptory_research`.
+- Translation: `TRANSLATION_PROVIDER`, `TRANSLATION_API_BASE_URL`, `TRANSLATION_MODEL`,
+  `TRANSLATION_MAX_TEXT_LENGTH`, plus provider credentials `OPENAI_API_KEY`,
+  `PAPAGO_CLIENT_ID/PAPAGO_CLIENT_SECRET`, or `GOOGLE_TRANSLATE_API_KEY`.
+- External API keys are never returned to clients and are redacted from logs.
 
 Base paths:
 
@@ -372,7 +1480,11 @@ Example response:
 }
 ```
 
-### `GET /market/tickers`
+### Deprecated Legacy `GET /market/tickers`
+
+The canonical active client contract is the iOS first-paint contract documented near the top of this file: `GET /market/tickers?exchange=upbit&quoteCurrency=KRW|BTC&sort=&order=&limit=` returning `data.items[]`.
+
+This legacy shape is retained only for older clients that omit `quoteCurrency`.
 
 Query:
 
@@ -640,77 +1752,86 @@ Policy:
 
 Query:
 
-- `exchange`: required, `upbit | bithumb | coinone | korbit | binance`
-- `symbols`: required, comma-separated symbols
+- `exchange`: required. Supports `upbit | bithumb | coinone | korbit | binance`.
+- `quoteCurrency`: optional per exchange. Defaults to the exchange default (`binance` defaults to `USDT`).
+- `symbols`: comma-separated base symbols.
+- `marketIds`: comma-separated market ids. Use this when available to avoid ambiguity.
+- `interval`: optional, defaults to `1H`
+- `limit`: optional, defaults to `24`, max `60`
 - `batchIndex?`: optional non-negative client batch index for logs/debugging
 - `allowStale?`: optional, defaults to allowing short stale sparkline cache reuse
 - `debug?`: optional
 
+Either `symbols` or `marketIds` is required. Wildcards such as `all`, `*`, `null`, and `undefined` are rejected.
+
 Policy:
 
-- Optimized for visible-first graph hydration. 5 to 20 symbols should be requested for the first viewport; larger lists should be split into 10 to 50 symbol batches.
-- The server checks an `exchange + symbol + visible window` sparkline cache first, then hydrates only cache misses or pending rows.
-- If a fresh row is unavailable but a renderable stale sparkline is still usable, the server returns the stale row instead of a blank graph. `symbolMeta`, `usableSymbols`, and `usableStaleSymbols` distinguish usable stale data from true no-data states, and `isRenderable` plus `renderPriority` let the client keep drawing without waiting for a retry.
-- One bad symbol does not fail the route. `rejectedSymbols`, `unsupportedSymbols`, and `unavailableSymbols` let the client patch successful rows and retry only failures.
+- `/market/tickers` is for fast first paint rows plus a derived preview.
+- `/market/sparkline?quoteCurrency=...` is for visible row mini graphs keyed by `exchange + quoteCurrency + marketId`.
+- The prepared ring buffer key is `exchange:quoteCurrency:marketId:interval`; Upbit `KRW-BIO` and Bithumb `KRW-BIO` never share points.
+- It uses prepared in-memory ticker snapshot ring buffers, last-known-good prepared rows, then explicit fallback (`derived_change24h` or `flat_current`).
+- The canonical sparkline route does not call trades, orderbook, or selected-symbol candle fan-out. `/market/candles` remains the selected detail chart endpoint.
+- Symbol cap is 50. Cap violations return `400 SYMBOLS_LIMIT_EXCEEDED`; partial success is allowed for unsupported or unavailable symbols.
+- Quality enum: `placeholder`, `flat_current`, `derived_preview`, `provider_mini`, `prepared_cache`, `refined_mini`, `selected_chart`.
+- `pointCount = points.length`.
+- `pointCount <= 6` must be `derived_preview`, `flat_current`, `placeholder`, or unavailable; it must not be reported as prepared/provider quality.
+- `prepared_cache`, `refined_mini`, and `provider_mini` mean `isDerived=false`. `pointCount >= 20` is required for prepared/refined rows.
+- Server start or cold buffer returns `derived_preview` or `unavailable`, not a fake prepared cache.
 
 ```json
 {
   "success": true,
   "data": {
-    "selectedExchange": "upbit",
-    "partial": true,
-    "requestedSymbols": ["BTC", "ETH", "BAD"],
-    "acceptedSymbols": ["BTC", "ETH"],
-    "rejectedSymbols": [],
-    "unsupportedSymbols": [
-      { "symbol": "BAD", "reason": "symbol_mapping_not_found", "retryable": false }
-    ],
-    "unavailableSymbols": [],
-    "source": "mixed",
-    "freshness": "slightly_delayed",
-    "generatedAt": 1712345679000,
-    "missingSymbols": ["BAD"],
-    "usableSymbols": ["BTC", "ETH"],
-    "usableStaleSymbols": ["ETH"],
-    "symbolMeta": [
-      {
-        "symbol": "BTC",
-        "source": "fresh_cache",
-        "isRenderable": true,
-        "usable": true,
-        "renderPriority": "cached",
-        "pointCount": 20,
-        "lastSuccessfulGraphAt": "2024-04-05T19:34:38.000Z",
-        "graphLatencyBucket": "fast",
-        "freshnessBucket": "fresh",
-        "generatedAt": 1712345678000
-      },
-      {
-        "symbol": "ETH",
-        "source": "stale_cache",
-        "isRenderable": true,
-        "usable": true,
-        "renderPriority": "stale",
-        "pointCount": 12,
-        "lastSuccessfulGraphAt": "2024-04-05T19:34:30.000Z",
-        "graphLatencyBucket": "delayed",
-        "freshnessBucket": "slightly_delayed",
-        "generatedAt": 1712345670000,
-        "fallbackReason": "stale_cache"
-      }
-    ],
-    "cache": { "hit": 1, "miss": 1, "stale": 1 },
-    "batch": { "index": 0, "requestedCount": 3, "success": 2, "failed": 1 },
+    "exchange": "upbit",
+    "quoteCurrency": "KRW",
+    "supportedQuotes": ["KRW", "BTC"],
+    "defaultQuoteCurrency": "KRW",
+    "interval": "1H",
     "items": [
       {
+        "exchange": "upbit",
         "symbol": "BTC",
-        "displayName": "비트코인",
-        "sparkline": [99000000, 100000000],
-        "sparklinePointCount": 20,
-        "displayStatus": "fresh",
-        "partial": false
+        "marketId": "KRW-BTC",
+        "baseCurrency": "BTC",
+        "quoteCurrency": "KRW",
+        "displayPair": "BTC/KRW",
+        "points": [
+          { "price": 99000000, "timestamp": 1710000000000 },
+          { "price": 100000000, "timestamp": 1710003600000 }
+        ],
+        "sparkline": [99000000, 99500000, 100000000],
+        "sparklinePoints": [
+          { "price": 99000000, "timestamp": 1710000000000 },
+          { "price": 100000000, "timestamp": 1710003600000 }
+        ],
+        "source": "prepared_cache",
+        "sparklineSource": "prepared_cache",
+        "quality": "refined_mini",
+        "sparklineQuality": "refined_mini",
+        "sparklinePointCount": 24,
+        "pointCount": 24,
+        "isRenderable": true,
+        "isDerived": false,
+        "stale": false,
+        "updatedAt": 1710003600000,
+        "interval": "1H",
+        "from": 1710000000000,
+        "to": 1710003600000,
+        "generatedAt": "2026-05-04T10:00:00.000Z",
+        "sourceReason": "ticker_snapshot_ring_buffer"
       }
-    ]
+    ],
+    "unsupportedSymbols": [],
+    "unavailableSymbols": [],
+    "diagnostics": {
+      "requestedExchange": "upbit",
+      "requestedQuoteCurrency": "KRW",
+      "unsupported": false,
+      "reason": null,
+      "returnedCount": 1,
+      "pointCountMin": 24,
+      "pointCountMax": 24
+    }
   }
 }
 ```
@@ -834,7 +1955,11 @@ Policy:
 }
 ```
 
-### `GET /market/candles`
+### Deprecated Legacy `GET /market/candles`
+
+The canonical active client contract is the iOS chart contract documented near the top of this file: `GET /market/candles?exchange=upbit&symbol=BTC&quoteCurrency=KRW&timeframe=1H&limit=200` returning `data.candles[]`.
+
+This legacy array shape is retained only for older clients that omit `quoteCurrency`, `quote`, and `timeframe`.
 
 Query:
 

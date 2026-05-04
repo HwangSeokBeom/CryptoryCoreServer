@@ -25,6 +25,9 @@ model User {
   orderRequests       OrderRequest[]
   authSessions        AuthSession[]
   authIdentities      AuthIdentity[]
+  priceAlerts         PriceAlert[]
+  fcmTokens           FcmToken[]
+  alertDeliveryLogs   AlertDeliveryLog[]
 
   @@unique([authProvider, providerAccountId])
 }
@@ -184,4 +187,195 @@ model OrderRequest {
 
   @@index([userId, exchange, createdAt])
   @@index([exchangeConnectionId, createdAt])
+}
+
+model TranslationCache {
+  id             String   @id @default(uuid())
+  sourceLanguage String   @map("source_language")
+  targetLanguage String   @map("target_language")
+  originalHash   String   @map("original_hash")
+  originalText   String   @map("original_text") @db.Text
+  translatedText String?  @map("translated_text") @db.Text
+  provider       String
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@unique([sourceLanguage, targetLanguage, originalHash])
+  @@index([createdAt])
+  @@map("translation_cache")
+}
+
+model CommunityReport {
+  id             String   @id @default(uuid())
+  reporterUserId String   @map("reporter_user_id")
+  targetType     String   @map("target_type")
+  targetId       String   @map("target_id")
+  reason         String
+  description    String?  @db.Text
+  status         String   @default("received")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@unique([reporterUserId, targetType, targetId])
+  @@index([createdAt])
+  @@index([targetType, targetId])
+  @@index([reporterUserId])
+  @@map("community_reports")
+}
+
+model UserBlock {
+  id            String   @id @default(uuid())
+  blockerUserId String   @map("blocker_user_id")
+  blockedUserId String   @map("blocked_user_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@unique([blockerUserId, blockedUserId])
+  @@index([blockerUserId])
+  @@index([blockedUserId])
+  @@index([createdAt])
+  @@map("user_blocks")
+}
+
+model UserFollow {
+  id              String   @id @default(uuid())
+  followerUserId  String   @map("follower_user_id")
+  followingUserId String   @map("following_user_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@unique([followerUserId, followingUserId])
+  @@index([followerUserId])
+  @@index([followingUserId])
+  @@index([createdAt])
+  @@map("user_follows")
+}
+
+model MarketDataCache {
+  id        String   @id @default(uuid())
+  cacheKey  String   @unique @map("cache_key")
+  source    String
+  payload   Json
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([expiresAt])
+  @@index([createdAt])
+  @@map("market_data_cache")
+}
+
+model PriceAlert {
+  id                   String             @id @default(uuid())
+  userId               String             @map("user_id")
+  user                 User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  exchange             String
+  symbol               String
+  quoteCurrency        String             @map("quote_currency")
+  market               String
+  condition            String
+  targetPrice          Float              @map("target_price")
+  currentPriceAtCreate Float?             @map("current_price_at_create")
+  isActive             Boolean            @default(true) @map("is_active")
+  repeatMode           String             @default("ONCE") @map("repeat_mode")
+  lastTriggeredAt      DateTime?          @map("last_triggered_at")
+  triggerCount         Int                @default(0) @map("trigger_count")
+  createdAt            DateTime           @default(now()) @map("created_at")
+  updatedAt            DateTime           @updatedAt @map("updated_at")
+  deliveryLogs         AlertDeliveryLog[]
+
+  @@unique([userId, exchange, symbol, quoteCurrency, condition, targetPrice])
+  @@index([isActive, exchange, symbol, quoteCurrency])
+  @@index([userId, createdAt])
+  @@map("price_alerts")
+}
+
+model FcmToken {
+  id           String             @id @default(uuid())
+  userId       String             @map("user_id")
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token        String
+  platform     String
+  deviceId     String?            @map("device_id")
+  appVersion   String?            @map("app_version")
+  environment  String             @default("prod")
+  isActive     Boolean            @default(true) @map("is_active")
+  lastSeenAt   DateTime           @default(now()) @map("last_seen_at")
+  createdAt    DateTime           @default(now()) @map("created_at")
+  updatedAt    DateTime           @updatedAt @map("updated_at")
+  deliveryLogs AlertDeliveryLog[]
+
+  @@unique([userId, token])
+  @@index([userId, isActive])
+  @@index([lastSeenAt])
+  @@map("fcm_tokens")
+}
+
+model AlertDeliveryLog {
+  id                String      @id @default(uuid())
+  alertId           String      @map("alert_id")
+  alert             PriceAlert  @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  userId            String      @map("user_id")
+  user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fcmTokenId        String?     @map("fcm_token_id")
+  fcmToken          FcmToken?   @relation(fields: [fcmTokenId], references: [id], onDelete: SetNull)
+  status            String
+  providerMessageId String?     @map("provider_message_id")
+  errorCode         String?     @map("error_code")
+  errorMessage      String?     @map("error_message")
+  createdAt         DateTime    @default(now()) @map("created_at")
+
+  @@index([alertId, createdAt])
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@map("alert_delivery_logs")
+}
+
+model NewsCache {
+  id              String   @id @default(uuid())
+  cacheKey        String   @unique @map("cache_key")
+  provider        String
+  providerNewsId  String?  @map("provider_news_id")
+  symbol          String?
+  title           String?
+  summary         String?  @db.Text
+  content         String?  @db.Text
+  sourceName      String?  @map("source_name")
+  originalUrl     String?  @map("original_url")
+  imageUrl        String?  @map("image_url")
+  language        String?
+  publishedAt     DateTime? @map("published_at")
+  symbols         Json?
+  tags            Json?
+  relevanceScore  Float?   @map("relevance_score")
+  scope           String?
+  rawPayload      Json?    @map("raw_payload")
+  payload         Json
+  expiresAt       DateTime @map("expires_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([symbol, publishedAt])
+  @@index([publishedAt])
+  @@index([provider])
+  @@index([relevanceScore])
+  @@index([expiresAt])
+  @@index([createdAt])
+  @@map("news_cache")
+}
+
+model GlobalMarketHistory {
+  id            String   @id @default(uuid())
+  date          DateTime @db.Date
+  currency      String
+  marketCap     Float?   @map("market_cap")
+  volume24h     Float?   @map("volume_24h")
+  btcDominance  Float?   @map("btc_dominance")
+  ethDominance  Float?   @map("eth_dominance")
+  source        String
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@unique([date, currency, source])
+  @@index([date, currency])
+  @@index([currency, date])
+  @@map("global_market_history")
 }

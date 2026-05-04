@@ -1,0 +1,5 @@
+-- RenameIndex
+ALTER INDEX "price_alerts_user_id_exchange_symbol_quote_currency_condition_t" RENAME TO "price_alerts_user_id_exchange_symbol_quote_currency_conditi_key";
+
+-- RenameIndex
+ALTER INDEX "translation_cache_source_language_target_language_original_hash" RENAME TO "translation_cache_source_language_target_language_original__key";

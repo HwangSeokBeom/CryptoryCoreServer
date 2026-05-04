@@ -3,6 +3,25 @@ import 'dotenv/config';
 import { z } from 'zod';
 
 const optionalUrl = z.preprocess((value) => value === '' ? undefined : value, z.string().url().optional());
+const envBoolean = (defaultValue: boolean) => z.preprocess((value) => {
+  if (value === undefined || value === null || value === '') {
+    return defaultValue;
+  }
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    return value !== 0;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) {
+    return true;
+  }
+  if (['false', '0', 'no', 'n', 'off'].includes(normalized)) {
+    return false;
+  }
+  return value;
+}, z.boolean().default(defaultValue));
 
 const envSchema = z.object({
   DATABASE_URL: z.string().url(),
@@ -26,7 +45,9 @@ const envSchema = z.object({
   SUPPORT_URL: optionalUrl,
   ACCOUNT_DELETION_URL: optionalUrl,
   INVESTMENT_DISCLAIMER_URL: optionalUrl,
+  COMMUNITY_POLICY_URL: optionalUrl,
   PORT: z.coerce.number().default(3000),
+  PUBLIC_MARKET_API_PORT: z.coerce.number().optional(),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   USE_LIVE_DATA: z.coerce.boolean().default(false),
   PUBLIC_STREAMING_ENABLED: z.coerce.boolean().default(true),
@@ -40,6 +61,51 @@ const envSchema = z.object({
   FX_TIMESTAMP_SKEW_THRESHOLD_MS: z.coerce.number().default(30000),
   COINGECKO_API_BASE_URL: z.string().url().default('https://api.coingecko.com/api/v3'),
   COINGECKO_API_KEY: z.string().optional(),
+  COINMARKETCAP_API_BASE_URL: z.string().url().default('https://pro-api.coinmarketcap.com'),
+  NEWS_PROVIDER: z.enum(['cryptopanic', 'cryptocurrency_cv', 'newsapi']).default('cryptopanic'),
+  CRYPTOPANIC_API_KEY: z.string().optional(),
+  CRYPTOPANIC_API_BASE_URL: z.string().url().default('https://cryptopanic.com/api/v1'),
+  CRYPTOCURRENCY_CV_API_BASE_URL: z.string().url().default('https://cryptocurrency.cv/api'),
+  CRYPTOCURRENCY_CV_API_KEY: z.string().optional(),
+  NEWSAPI_API_KEY: z.string().optional(),
+  NEWSAPI_API_BASE_URL: z.string().url().default('https://newsapi.org/v2'),
+  NEWS_RSS_FEEDS: z.string().optional(),
+  NEWS_CACHE_TTL_SECONDS: z.coerce.number().default(900),
+  MARKET_DATA_CACHE_TTL_SECONDS: z.coerce.number().default(1800),
+  MARKET_DATA_PROVIDER: z.enum(['upbit', 'bithumb', 'mixed']).default('mixed'),
+  CANDLE_CACHE_TTL_SECONDS: z.coerce.number().default(30),
+  TICKER_CACHE_TTL_SECONDS: z.coerce.number().default(5),
+  MARKET_COLLECTOR_ENABLED: envBoolean(false),
+  MARKET_TRADE_COLLECTOR_ENABLED: envBoolean(false),
+  MARKET_TREND_SNAPSHOT_ENABLED: envBoolean(false),
+  MARKET_STARTUP_WARMUP_ENABLED: envBoolean(false),
+  FIREBASE_PROJECT_ID: z.string().optional(),
+  FIREBASE_CLIENT_EMAIL: z.string().optional(),
+  FIREBASE_PRIVATE_KEY: z.string().optional(),
+  FCM_ENABLED: z.coerce.boolean().default(false),
+  FCM_DRY_RUN: z.coerce.boolean().default(false),
+  PRICE_ALERT_WORKER_ENABLED: envBoolean(false),
+  PRICE_ALERT_POLL_INTERVAL_MS: z.coerce.number().default(10000),
+  PRICE_ALERT_REPEAT_COOLDOWN_SECONDS: z.coerce.number().default(600),
+  SERVICE_TIMEZONE: z.string().default('Asia/Seoul'),
+  DEFAULT_MARKET_CURRENCY: z.string().default('KRW'),
+  TRANSLATION_PROVIDER: z.enum(['openai', 'papago', 'google']).optional(),
+  TRANSLATION_API_BASE_URL: z.string().url().optional(),
+  TRANSLATION_MODEL: z.string().default('gpt-4o-mini'),
+  TRANSLATION_MAX_TEXT_LENGTH: z.coerce.number().default(4000),
+  TRANSLATION_CACHE_TTL_SECONDS: z.coerce.number().default(2592000),
+  LLM_API_KEY: z.string().optional(),
+  LLM_MODEL: z.string().optional(),
+  LLM_TIMEOUT_MS: z.coerce.number().default(8000),
+  OPENAI_API_KEY: z.string().optional(),
+  PAPAGO_CLIENT_ID: z.string().optional(),
+  PAPAGO_CLIENT_SECRET: z.string().optional(),
+  GOOGLE_TRANSLATE_API_KEY: z.string().optional(),
+  COINMARKETCAP_API_KEY: z.string().optional(),
+  COINMARKETCAP_TIMEOUT_MS: z.coerce.number().default(5000),
+  USDT_RATE_CACHE_TTL_SECONDS: z.coerce.number().default(300),
+  USDT_COINMARKETCAP_ID: z.coerce.number().default(825),
+  CRYPTOCOMPARE_API_KEY: z.string().optional(),
   EXCHANGE_RATE_API_KEY: z.string().optional(),
   EXCHANGE_CREDENTIAL_ENCRYPTION_KEY: z.string().optional(),
   EXCHANGE_CONNECTION_ENCRYPTION_KEY: z.string().optional(),
@@ -115,6 +181,14 @@ const envSchema = z.object({
     });
   }
 
+  if (value.NEWS_PROVIDER === 'newsapi' && value.FEATURE_NEWS_ENABLED === true && !value.NEWSAPI_API_KEY?.trim()) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['NEWSAPI_API_KEY'],
+      message: 'NEWSAPI_API_KEY is required in production when NEWS_PROVIDER=newsapi and FEATURE_NEWS_ENABLED=true',
+    });
+  }
+
   for (const key of [
     'APP_HOMEPAGE_URL',
     'TERMS_URL',
@@ -122,6 +196,7 @@ const envSchema = z.object({
     'SUPPORT_URL',
     'ACCOUNT_DELETION_URL',
     'INVESTMENT_DISCLAIMER_URL',
+    'COMMUNITY_POLICY_URL',
   ] as const) {
     if (!value[key]) {
       ctx.addIssue({
@@ -154,7 +229,9 @@ export interface Env {
   SUPPORT_URL?: string;
   ACCOUNT_DELETION_URL?: string;
   INVESTMENT_DISCLAIMER_URL?: string;
+  COMMUNITY_POLICY_URL?: string;
   PORT: number;
+  PUBLIC_MARKET_API_PORT?: number;
   NODE_ENV: 'development' | 'production' | 'test';
   USE_LIVE_DATA: boolean;
   PUBLIC_STREAMING_ENABLED: boolean;
@@ -168,6 +245,51 @@ export interface Env {
   FX_TIMESTAMP_SKEW_THRESHOLD_MS: number;
   COINGECKO_API_BASE_URL: string;
   COINGECKO_API_KEY?: string;
+  COINMARKETCAP_API_BASE_URL: string;
+  NEWS_PROVIDER: 'cryptopanic' | 'cryptocurrency_cv' | 'newsapi';
+  CRYPTOPANIC_API_KEY?: string;
+  CRYPTOPANIC_API_BASE_URL: string;
+  CRYPTOCURRENCY_CV_API_BASE_URL: string;
+  CRYPTOCURRENCY_CV_API_KEY?: string;
+  NEWSAPI_API_KEY?: string;
+  NEWSAPI_API_BASE_URL: string;
+  NEWS_RSS_FEEDS?: string;
+  NEWS_CACHE_TTL_SECONDS: number;
+  MARKET_DATA_CACHE_TTL_SECONDS: number;
+  MARKET_DATA_PROVIDER: 'upbit' | 'bithumb' | 'mixed';
+  CANDLE_CACHE_TTL_SECONDS: number;
+  TICKER_CACHE_TTL_SECONDS: number;
+  MARKET_COLLECTOR_ENABLED: boolean;
+  MARKET_TRADE_COLLECTOR_ENABLED: boolean;
+  MARKET_TREND_SNAPSHOT_ENABLED: boolean;
+  MARKET_STARTUP_WARMUP_ENABLED: boolean;
+  FIREBASE_PROJECT_ID?: string;
+  FIREBASE_CLIENT_EMAIL?: string;
+  FIREBASE_PRIVATE_KEY?: string;
+  FCM_ENABLED: boolean;
+  FCM_DRY_RUN: boolean;
+  PRICE_ALERT_WORKER_ENABLED: boolean;
+  PRICE_ALERT_POLL_INTERVAL_MS: number;
+  PRICE_ALERT_REPEAT_COOLDOWN_SECONDS: number;
+  SERVICE_TIMEZONE: string;
+  DEFAULT_MARKET_CURRENCY: string;
+  TRANSLATION_PROVIDER?: 'openai' | 'papago' | 'google';
+  TRANSLATION_API_BASE_URL?: string;
+  TRANSLATION_MODEL: string;
+  TRANSLATION_MAX_TEXT_LENGTH: number;
+  TRANSLATION_CACHE_TTL_SECONDS: number;
+  LLM_API_KEY?: string;
+  LLM_MODEL?: string;
+  LLM_TIMEOUT_MS: number;
+  OPENAI_API_KEY?: string;
+  PAPAGO_CLIENT_ID?: string;
+  PAPAGO_CLIENT_SECRET?: string;
+  GOOGLE_TRANSLATE_API_KEY?: string;
+  COINMARKETCAP_API_KEY?: string;
+  COINMARKETCAP_TIMEOUT_MS: number;
+  USDT_RATE_CACHE_TTL_SECONDS: number;
+  USDT_COINMARKETCAP_ID: number;
+  CRYPTOCOMPARE_API_KEY?: string;
   EXCHANGE_RATE_API_KEY?: string;
   EXCHANGE_CREDENTIAL_ENCRYPTION_KEY?: string;
   EXCHANGE_CONNECTION_ENCRYPTION_KEY?: string;
@@ -279,7 +401,9 @@ function loadEnv(): Env {
     SUPPORT_URL: parsed.data.SUPPORT_URL,
     ACCOUNT_DELETION_URL: parsed.data.ACCOUNT_DELETION_URL,
     INVESTMENT_DISCLAIMER_URL: parsed.data.INVESTMENT_DISCLAIMER_URL,
-    PORT: parsed.data.PORT,
+    COMMUNITY_POLICY_URL: parsed.data.COMMUNITY_POLICY_URL,
+    PORT: parsed.data.PUBLIC_MARKET_API_PORT ?? parsed.data.PORT,
+    PUBLIC_MARKET_API_PORT: parsed.data.PUBLIC_MARKET_API_PORT,
     NODE_ENV: parsed.data.NODE_ENV,
     USE_LIVE_DATA: parsed.data.USE_LIVE_DATA,
     PUBLIC_STREAMING_ENABLED: parsed.data.PUBLIC_STREAMING_ENABLED,
@@ -293,6 +417,51 @@ function loadEnv(): Env {
     FX_TIMESTAMP_SKEW_THRESHOLD_MS: parsed.data.FX_TIMESTAMP_SKEW_THRESHOLD_MS,
     COINGECKO_API_BASE_URL: parsed.data.COINGECKO_API_BASE_URL,
     COINGECKO_API_KEY: parsed.data.COINGECKO_API_KEY,
+    COINMARKETCAP_API_BASE_URL: parsed.data.COINMARKETCAP_API_BASE_URL,
+    NEWS_PROVIDER: parsed.data.NEWS_PROVIDER,
+    CRYPTOPANIC_API_KEY: parsed.data.CRYPTOPANIC_API_KEY,
+    CRYPTOPANIC_API_BASE_URL: parsed.data.CRYPTOPANIC_API_BASE_URL,
+    CRYPTOCURRENCY_CV_API_BASE_URL: parsed.data.CRYPTOCURRENCY_CV_API_BASE_URL,
+    CRYPTOCURRENCY_CV_API_KEY: parsed.data.CRYPTOCURRENCY_CV_API_KEY,
+    NEWSAPI_API_KEY: parsed.data.NEWSAPI_API_KEY,
+    NEWSAPI_API_BASE_URL: parsed.data.NEWSAPI_API_BASE_URL,
+    NEWS_RSS_FEEDS: parsed.data.NEWS_RSS_FEEDS,
+    NEWS_CACHE_TTL_SECONDS: parsed.data.NEWS_CACHE_TTL_SECONDS,
+    MARKET_DATA_CACHE_TTL_SECONDS: parsed.data.MARKET_DATA_CACHE_TTL_SECONDS,
+    MARKET_DATA_PROVIDER: parsed.data.MARKET_DATA_PROVIDER,
+    CANDLE_CACHE_TTL_SECONDS: parsed.data.CANDLE_CACHE_TTL_SECONDS,
+    TICKER_CACHE_TTL_SECONDS: parsed.data.TICKER_CACHE_TTL_SECONDS,
+    MARKET_COLLECTOR_ENABLED: parsed.data.MARKET_COLLECTOR_ENABLED,
+    MARKET_TRADE_COLLECTOR_ENABLED: parsed.data.MARKET_TRADE_COLLECTOR_ENABLED,
+    MARKET_TREND_SNAPSHOT_ENABLED: parsed.data.MARKET_TREND_SNAPSHOT_ENABLED,
+    MARKET_STARTUP_WARMUP_ENABLED: parsed.data.MARKET_STARTUP_WARMUP_ENABLED,
+    FIREBASE_PROJECT_ID: parsed.data.FIREBASE_PROJECT_ID,
+    FIREBASE_CLIENT_EMAIL: parsed.data.FIREBASE_CLIENT_EMAIL,
+    FIREBASE_PRIVATE_KEY: parsed.data.FIREBASE_PRIVATE_KEY,
+    FCM_ENABLED: parsed.data.FCM_ENABLED,
+    FCM_DRY_RUN: parsed.data.FCM_DRY_RUN,
+    PRICE_ALERT_WORKER_ENABLED: parsed.data.PRICE_ALERT_WORKER_ENABLED,
+    PRICE_ALERT_POLL_INTERVAL_MS: parsed.data.PRICE_ALERT_POLL_INTERVAL_MS,
+    PRICE_ALERT_REPEAT_COOLDOWN_SECONDS: parsed.data.PRICE_ALERT_REPEAT_COOLDOWN_SECONDS,
+    SERVICE_TIMEZONE: parsed.data.SERVICE_TIMEZONE,
+    DEFAULT_MARKET_CURRENCY: parsed.data.DEFAULT_MARKET_CURRENCY,
+    TRANSLATION_PROVIDER: parsed.data.TRANSLATION_PROVIDER,
+    TRANSLATION_API_BASE_URL: parsed.data.TRANSLATION_API_BASE_URL,
+    TRANSLATION_MODEL: parsed.data.LLM_MODEL ?? parsed.data.TRANSLATION_MODEL,
+    TRANSLATION_MAX_TEXT_LENGTH: parsed.data.TRANSLATION_MAX_TEXT_LENGTH,
+    TRANSLATION_CACHE_TTL_SECONDS: parsed.data.TRANSLATION_CACHE_TTL_SECONDS,
+    LLM_API_KEY: parsed.data.LLM_API_KEY,
+    LLM_MODEL: parsed.data.LLM_MODEL,
+    LLM_TIMEOUT_MS: parsed.data.LLM_TIMEOUT_MS,
+    OPENAI_API_KEY: parsed.data.OPENAI_API_KEY ?? parsed.data.LLM_API_KEY,
+    PAPAGO_CLIENT_ID: parsed.data.PAPAGO_CLIENT_ID,
+    PAPAGO_CLIENT_SECRET: parsed.data.PAPAGO_CLIENT_SECRET,
+    GOOGLE_TRANSLATE_API_KEY: parsed.data.GOOGLE_TRANSLATE_API_KEY,
+    COINMARKETCAP_API_KEY: parsed.data.COINMARKETCAP_API_KEY,
+    COINMARKETCAP_TIMEOUT_MS: parsed.data.COINMARKETCAP_TIMEOUT_MS,
+    USDT_RATE_CACHE_TTL_SECONDS: parsed.data.USDT_RATE_CACHE_TTL_SECONDS,
+    USDT_COINMARKETCAP_ID: parsed.data.USDT_COINMARKETCAP_ID,
+    CRYPTOCOMPARE_API_KEY: parsed.data.CRYPTOCOMPARE_API_KEY,
     EXCHANGE_RATE_API_KEY: parsed.data.EXCHANGE_RATE_API_KEY,
     EXCHANGE_CREDENTIAL_ENCRYPTION_KEY:
       parsed.data.EXCHANGE_CREDENTIAL_ENCRYPTION_KEY ?? parsed.data.EXCHANGE_CONNECTION_ENCRYPTION_KEY,

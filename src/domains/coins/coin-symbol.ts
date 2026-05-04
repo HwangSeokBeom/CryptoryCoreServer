@@ -1,7 +1,13 @@
 const QUOTE_PREFIXES = ['KRW', 'USD', 'USDT', 'USDC', 'BTC', 'ETH'];
 
 export function normalizeCoinSymbol(value: string) {
-  const normalized = value.trim().toUpperCase();
+  let decoded = value;
+  try {
+    decoded = decodeURIComponent(value);
+  } catch {
+    decoded = value;
+  }
+  const normalized = decoded.trim().toUpperCase();
   if (!normalized) {
     return '';
   }

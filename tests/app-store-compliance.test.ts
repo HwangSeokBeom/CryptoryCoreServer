@@ -188,6 +188,18 @@ describe('App Store compliance middleware', () => {
     expect(analysis.statusCode).toBe(200);
     expect(JSON.parse(analysis.body).data.symbol).toBe('ORCA');
 
+    const coinInfo = await app.inject({ method: 'GET', url: '/coins/ORCA/info' });
+    expect(coinInfo.statusCode).toBe(200);
+    expect(JSON.parse(coinInfo.body).data.symbol).toBe('ORCA');
+
+    const aliasCoinInfo = await app.inject({ method: 'GET', url: '/api/v1/coins/ORCA/info' });
+    expect(aliasCoinInfo.statusCode).toBe(200);
+    expect(JSON.parse(aliasCoinInfo.body).data.symbol).toBe('ORCA');
+
+    const aliasAnalysis = await app.inject({ method: 'GET', url: '/api/v1/coins/ORCA/analysis?timeframe=1h' });
+    expect(aliasAnalysis.statusCode).toBe(200);
+    expect(JSON.parse(aliasAnalysis.body).data.symbol).toBe('ORCA');
+
     const community = await app.inject({ method: 'GET', url: '/api/v1/coins/KRW-ORCA/community' });
     expect(community.statusCode).toBe(200);
     expect(JSON.parse(community.body).data).toMatchObject({
@@ -202,9 +214,36 @@ describe('App Store compliance middleware', () => {
       payload: { direction: 'bullish' },
     });
     expect(unauthenticatedVote.statusCode).toBe(401);
+    expect(JSON.parse(unauthenticatedVote.body).code).toBe('ACCESS_TOKEN_REQUIRED');
+
+    const aliasUnauthenticatedVote = await app.inject({
+      method: 'POST',
+      url: '/api/v1/coins/ORCA/votes',
+      payload: { direction: 'bullish' },
+    });
+    expect(aliasUnauthenticatedVote.statusCode).toBe(401);
+    expect(JSON.parse(aliasUnauthenticatedVote.body).code).toBe('ACCESS_TOKEN_REQUIRED');
 
     const trends = await app.inject({ method: 'GET', url: '/api/v1/market/trends' });
     expect(trends.statusCode).toBe(200);
+    expect(JSON.parse(trends.body).data).toMatchObject({
+      range: '7d',
+      currency: 'KRW',
+      availability: {
+        totalMarketCap: expect.any(Boolean),
+        totalVolume: expect.any(Boolean),
+        btcDominance: expect.any(Boolean),
+        ethDominance: expect.any(Boolean),
+        fearGreedIndex: false,
+      },
+      unavailableReasons: {
+        fearGreedIndex: 'HISTORICAL_FEAR_GREED_NOT_AVAILABLE',
+      },
+      points: expect.any(Array),
+    });
+
+    const themes = await app.inject({ method: 'GET', url: '/api/v1/market/themes' });
+    expect(themes.statusCode).toBe(200);
     await app.close();
   }, 30000);
 });

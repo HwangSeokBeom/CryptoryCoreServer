@@ -6,7 +6,7 @@ const ENCRYPTION_ENVELOPE_VERSION = 'v1';
 const MIN_KEY_MATERIAL_LENGTH = 32;
 
 const SENSITIVE_KEY_PATTERN =
-  /(api[-_ ]?key|access[-_ ]?key|secret|token|passphrase|authorization|signature|query[-_ ]?hash|nonce)/i;
+  /(api[-_ ]?key|access[-_ ]?key|secret|token|passphrase|authorization|signature|query[-_ ]?hash|nonce|private[-_ ]?key|client[-_ ]?email)/i;
 
 function getEncryptionKeyMaterial() {
   const keyMaterial = env.EXCHANGE_CREDENTIAL_ENCRYPTION_KEY ?? env.EXCHANGE_CONNECTION_ENCRYPTION_KEY;
@@ -85,7 +85,7 @@ export function sanitizeSensitiveText(value: string | null | undefined) {
 
   return value
     .replace(/(Bearer\s+)[A-Za-z0-9\-_.=+/]+/gi, '$1[REDACTED]')
-    .replace(/((?:api[-_ ]?key|access[-_ ]?key|secret[-_ ]?key|token|authorization|signature|nonce)["'\s:=]+)[^"',\s}]+/gi, '$1[REDACTED]')
+    .replace(/((?:api[-_ ]?key|access[-_ ]?key|secret[-_ ]?key|private[-_ ]?key|client[-_ ]?email|token|authorization|signature|nonce)["'\s:=]+)[^"',\s}]+/gi, '$1[REDACTED]')
     .replace(/([A-Za-z0-9]{3})[A-Za-z0-9_\-]{14,}([A-Za-z0-9]{3})/g, '$1***$2');
 }
 
