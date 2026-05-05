@@ -2,8 +2,15 @@ import { prisma } from '../../config/database';
 import { AppError } from '../../utils/errors';
 import { getCurrentPrice } from '../tickers/tickers.service';
 import type { CreateOrderInputType } from './orders.schema';
+import { assertTransactionalFeatureEnabled } from '../../middleware/compliance.middleware';
 
 export async function createOrder(userId: string, input: CreateOrderInputType) {
+  assertTransactionalFeatureEnabled('order', {
+    userId,
+    path: '/api/v1/private/orders',
+    reason: 'legacy_order_disabled',
+  });
+
   if (input.quantity <= 0) {
     throw new AppError(400, '수량을 입력해주세요');
   }
@@ -160,6 +167,12 @@ export async function createOrder(userId: string, input: CreateOrderInputType) {
 }
 
 export async function getOrderHistory(userId: string, limit: number) {
+  assertTransactionalFeatureEnabled('trading', {
+    userId,
+    path: '/api/v1/orders/history',
+    reason: 'legacy_order_history_disabled',
+  });
+
   const orders = await prisma.order.findMany({
     where: { userId },
     orderBy: { createdAt: 'desc' },

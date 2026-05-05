@@ -13,10 +13,12 @@ export class AppError extends Error {
 }
 
 export function createErrorResponse(error: string, details?: Record<string, unknown>, code?: string) {
+  const message = sanitizeSensitiveText(error) ?? error;
   return {
     success: false as const,
-    error: sanitizeSensitiveText(error) ?? error,
-    ...(code ? { code } : {}),
+    message,
+    error: message,
+    code: code ?? 'REQUEST_FAILED',
     ...(details ? { details: sanitizeSensitiveDetails(details) } : {}),
   };
 }

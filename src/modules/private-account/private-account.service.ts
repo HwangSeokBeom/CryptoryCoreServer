@@ -1,4 +1,5 @@
 import { logger } from '../../utils/logger';
+import { assertTransactionalFeatureEnabled } from '../../middleware/compliance.middleware';
 import type { PrivateAccountDataProviderInfo } from './private-adapters/private-adapter.types';
 import {
   getPlaceholderBalances,
@@ -54,16 +55,31 @@ export async function getPrivatePortfolioSummary(userId: string, exchange = 'upb
 }
 
 export async function getPrivateOrders(userId: string, exchange?: string, limit = 50) {
+  assertTransactionalFeatureEnabled('trading', {
+    userId,
+    path: '/api/v1/private/orders',
+    reason: 'private_orders_disabled',
+  });
   logPrivateProviderCall(userId, 'orders', exchange);
   return getPlaceholderOrders(userId, exchange, limit);
 }
 
 export async function getPrivateOpenOrders(userId: string, exchange?: string) {
+  assertTransactionalFeatureEnabled('trading', {
+    userId,
+    path: '/api/v1/private/open-orders',
+    reason: 'private_open_orders_disabled',
+  });
   logPrivateProviderCall(userId, 'open-orders', exchange);
   return getPlaceholderOpenOrders(userId, exchange);
 }
 
 export async function getPrivateFills(userId: string, exchange?: string, limit = 50) {
+  assertTransactionalFeatureEnabled('trading', {
+    userId,
+    path: '/api/v1/private/fills',
+    reason: 'private_fills_disabled',
+  });
   logPrivateProviderCall(userId, 'fills', exchange);
   return getPlaceholderFills(userId, exchange, limit);
 }

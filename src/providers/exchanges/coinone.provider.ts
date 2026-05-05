@@ -33,6 +33,7 @@ import { CoinoneAdapter } from '../../exchanges/CoinoneAdapter';
 import { parseCoinoneMarketsResponse } from './coinone.mapper';
 import { BaseExchangeProvider } from './base-exchange.provider';
 import { logger } from '../../utils/logger';
+import { assertTransactionalFeatureEnabled } from '../../middleware/compliance.middleware';
 import {
   buildPortfolioSnapshot,
   normalizeExchangeTimestampFromCandidates,
@@ -385,6 +386,10 @@ export class CoinoneProvider
   }
 
   async createOrder(request: CreateOrderRequest, context: ProviderContext): Promise<CanonicalOrder> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'coinone.createOrder',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const market = this.toMarketPayload(request.symbol);
     const type = request.type.toUpperCase();
     const payload: Record<string, unknown> = {
@@ -414,6 +419,10 @@ export class CoinoneProvider
   }
 
   async cancelOrder(request: CancelOrderRequest, context: ProviderContext): Promise<CanonicalOrder> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'coinone.cancelOrder',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const market = this.toMarketPayload(request.symbol);
     const response = await this.requestPrivate<any>('/v2.1/order/cancel', context, {
       ...market,
@@ -423,6 +432,10 @@ export class CoinoneProvider
   }
 
   async getOrder(orderId: string, symbol: string | undefined, context: ProviderContext): Promise<CanonicalOrder> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'coinone.getOrder',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const market = this.toMarketPayload(symbol);
     const response = await this.requestPrivate<any>('/v2.1/order/detail', context, {
       ...market,
@@ -432,6 +445,10 @@ export class CoinoneProvider
   }
 
   async listOpenOrders(symbol: string | undefined, context: ProviderContext): Promise<CanonicalOrder[]> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'coinone.listOpenOrders',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const response = await this.requestPrivate<{ active_orders?: any[]; activeOrders?: any[] }>('/v2.1/order/active_orders', context, {
       ...(symbol ? this.toMarketPayload(symbol) : {}),
     });
@@ -440,6 +457,10 @@ export class CoinoneProvider
   }
 
   async listFills(symbol: string | undefined, limit: number | undefined, context: ProviderContext): Promise<CanonicalFill[]> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'coinone.listFills',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const now = Date.now();
     const path = symbol ? '/v2.1/order/completed_orders' : '/v2.1/order/completed_orders/all';
     const response = await this.requestPrivate<{ completed_orders?: any[]; completedOrders?: any[] }>(path, context, {

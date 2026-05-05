@@ -1,4 +1,5 @@
 import cron from 'node-cron';
+import { env } from '../config/env';
 import { exchangeProviderRegistry } from '../core/exchange/registry.bootstrap';
 import { assetMetadataService } from '../domains/assets/asset-metadata.service';
 import { startChartLiveService, stopChartLiveService } from '../domains/charts/chart.service';
@@ -7,6 +8,7 @@ import { marketStreamingOrchestrator } from '../domains/market-data/market-strea
 import { logger } from '../utils/logger';
 
 let rateTask: cron.ScheduledTask | null = null;
+let collectorStartTimer: NodeJS.Timeout | null = null;
 let collectorStarted = false;
 
 export function startTickerCollector() {
@@ -15,11 +17,51 @@ export function startTickerCollector() {
     return;
   }
 
+  if (!env.MARKET_COLLECTOR_ENABLED) {
+    logger.info(
+      { domain: 'startup-jobs', job: 'marketCollector', reason: 'disabled_by_env' },
+      '[StartupJobs] skipped job=marketCollector reason=disabled_by_env',
+    );
+    return;
+  }
+
   collectorStarted = true;
-  void marketStreamingOrchestrator.start();
-  void startMarketSnapshotCache();
-  startChartLiveService();
-  assetMetadataService.start();
+  const startupDelayMs = 15_000;
+  logger.info(
+    {
+      domain: 'market-collector',
+      job: 'marketCollector',
+      startupDelayMs,
+      tradeCollectorEnabled: env.MARKET_TRADE_COLLECTOR_ENABLED,
+      startupWarmupEnabled: env.MARKET_STARTUP_WARMUP_ENABLED,
+    },
+    `[MarketCollector] scheduled startupDelayMs=${startupDelayMs} tradeCollectorEnabled=${env.MARKET_TRADE_COLLECTOR_ENABLED}`,
+  );
+  if (!env.MARKET_TRADE_COLLECTOR_ENABLED) {
+    logger.info(
+      { domain: 'startup-jobs', job: 'marketTradeCollector', reason: 'disabled_by_env' },
+      '[StartupJobs] skipped job=marketTradeCollector reason=disabled_by_env',
+    );
+  }
+  if (!env.MARKET_STARTUP_WARMUP_ENABLED) {
+    logger.info(
+      { domain: 'startup-jobs', job: 'marketStartupWarmup', reason: 'disabled_by_env' },
+      '[StartupJobs] skipped job=marketStartupWarmup reason=disabled_by_env',
+    );
+  }
+
+  collectorStartTimer = setTimeout(() => {
+    collectorStartTimer = null;
+    void marketStreamingOrchestrator.start({ includeTrades: env.MARKET_TRADE_COLLECTOR_ENABLED });
+    void startMarketSnapshotCache();
+    startChartLiveService();
+    assetMetadataService.start();
+    logger.info(
+      { domain: 'market-collector', tradeCollectorEnabled: env.MARKET_TRADE_COLLECTOR_ENABLED },
+      '[MarketCollector] started',
+    );
+  }, startupDelayMs);
+  collectorStartTimer.unref?.();
 
   rateTask = cron.schedule('0 * * * *', async () => {
     try {
@@ -29,10 +71,8 @@ export function startTickerCollector() {
     }
   });
 
-  // Initial rate fetch
+  // Lightweight FX refresh is independent from exchange trade/candle hydration.
   exchangeProviderRegistry.getFxRateProvider().getUsdKrwRate().catch(() => {});
-
-  logger.info({ domain: 'market-streaming' }, 'Public market orchestrator started');
 }
 
 export async function stopTickerCollector() {
@@ -41,6 +81,10 @@ export async function stopTickerCollector() {
   }
 
   collectorStarted = false;
+  if (collectorStartTimer) {
+    clearTimeout(collectorStartTimer);
+    collectorStartTimer = null;
+  }
   await Promise.allSettled([
     marketStreamingOrchestrator.stop(),
     stopMarketSnapshotCache(),

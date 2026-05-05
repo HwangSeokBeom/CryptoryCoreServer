@@ -11,6 +11,7 @@ import type {
   FxRateProvider,
   GlobalReferencePriceSource,
 } from './provider.interfaces';
+import { assertTransactionalFeatureEnabled } from '../../middleware/compliance.middleware';
 
 export class ExchangeProviderRegistry {
   private readonly marketDataProviders = new Map<ExchangeId, ExchangeMarketDataProvider>();
@@ -59,6 +60,10 @@ export class ExchangeProviderRegistry {
   }
 
   getTradingProvider(exchange: ExchangeId) {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: `exchange-provider:${exchange}`,
+      reason: 'private_exchange_trading_provider_disabled',
+    });
     return this.requireProvider(this.tradingProviders, exchange, 'trading:create-order');
   }
 

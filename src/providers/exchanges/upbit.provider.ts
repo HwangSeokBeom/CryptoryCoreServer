@@ -30,6 +30,7 @@ import { toCanonicalMarket, toCanonicalSymbol, toExchangeSymbol } from '../../co
 import { WebSocketClientManager, type WebSocketReconnectMetadata } from '../../core/exchange/websocket.client-manager';
 import { UpbitAdapter } from '../../exchanges/UpbitAdapter';
 import { logger } from '../../utils/logger';
+import { assertTransactionalFeatureEnabled } from '../../middleware/compliance.middleware';
 import { BaseExchangeProvider } from './base-exchange.provider';
 import {
   normalizeExchangeTimestampFromCandidates,
@@ -379,6 +380,10 @@ export class UpbitProvider
   }
 
   async getOrderChance(symbol: string, context: ProviderContext): Promise<OrderChance> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'upbit.getOrderChance',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const credentials = requireCredentials(this.exchange, context);
     const rawSymbol = toExchangeSymbol(this.exchange, symbol);
     const canonicalSymbol = toCanonicalSymbol(symbol);
@@ -448,6 +453,10 @@ export class UpbitProvider
   }
 
   async createOrder(request: CreateOrderRequest, context: ProviderContext): Promise<CanonicalOrder> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'upbit.createOrder',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const credentials = requireCredentials(this.exchange, context);
     const rawSymbol = toExchangeSymbol(this.exchange, request.symbol);
     const body: Record<string, unknown> = {
@@ -483,6 +492,10 @@ export class UpbitProvider
   }
 
   async cancelOrder(request: CancelOrderRequest, context: ProviderContext): Promise<CanonicalOrder> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'upbit.cancelOrder',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const credentials = requireCredentials(this.exchange, context);
     const query = { uuid: request.orderId };
     const headers = this.signer.createAuthorizationHeader({
@@ -499,6 +512,10 @@ export class UpbitProvider
   }
 
   async getOrder(orderId: string, symbol: string | undefined, context: ProviderContext): Promise<CanonicalOrder> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'upbit.getOrder',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const credentials = requireCredentials(this.exchange, context);
     const query = { uuid: orderId };
     const headers = this.signer.createAuthorizationHeader({
@@ -514,6 +531,10 @@ export class UpbitProvider
   }
 
   async listOpenOrders(symbol: string | undefined, context: ProviderContext): Promise<CanonicalOrder[]> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'upbit.listOpenOrders',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const credentials = requireCredentials(this.exchange, context);
     const query = symbol ? { market: toExchangeSymbol(this.exchange, symbol) } : {};
     const headers = this.signer.createAuthorizationHeader({
@@ -529,6 +550,10 @@ export class UpbitProvider
   }
 
   async listFills(symbol: string | undefined, limit: number | undefined, context: ProviderContext): Promise<CanonicalFill[]> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'upbit.listFills',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const credentials = requireCredentials(this.exchange, context);
     const query = {
       ...(symbol ? { market: toExchangeSymbol(this.exchange, symbol) } : {}),

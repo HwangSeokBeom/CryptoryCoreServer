@@ -47,7 +47,7 @@ export async function portfolioRoutes(app: FastifyInstance) {
       };
     } catch (error) {
       if (error instanceof AppError) {
-        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
+        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details, error.code));
       }
       throw error;
     }
@@ -59,7 +59,7 @@ export async function portfolioRoutes(app: FastifyInstance) {
       return createSuccessResponse(await getAggregatedPortfolioSummary(request.user.id, exchange));
     } catch (error) {
       if (error instanceof AppError) {
-        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
+        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details, error.code));
       }
       throw error;
     }
@@ -88,7 +88,7 @@ export async function portfolioRoutes(app: FastifyInstance) {
       };
     } catch (error) {
       if (error instanceof AppError) {
-        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details));
+        return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details, error.code));
       }
       throw error;
     }

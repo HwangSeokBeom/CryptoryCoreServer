@@ -1,5 +1,7 @@
 import type { ExchangeId, ExchangeCapability } from './exchange.types';
 
+export type UpstreamOwner = ExchangeId | 'fx' | 'coingecko' | 'coinmarketcap' | 'translation' | 'news';
+
 export class ExchangeCapabilityError extends Error {
   constructor(
     public readonly exchange: ExchangeId,
@@ -23,7 +25,7 @@ export class ExchangeAuthError extends Error {
 
 export class ExchangeRequestError extends Error {
   constructor(
-    public readonly exchange: ExchangeId | 'fx' | 'coingecko',
+    public readonly exchange: UpstreamOwner,
     public readonly statusCode: number,
     public readonly requestUrl: string,
     message: string,
@@ -42,7 +44,7 @@ type ExchangeMarketDataErrorKind =
 
 class ExchangeMarketDataError extends Error {
   constructor(
-    public readonly exchange: ExchangeId | 'fx' | 'coingecko',
+    public readonly exchange: UpstreamOwner,
     public readonly kind: ExchangeMarketDataErrorKind,
     message: string,
     public readonly statusCode?: number,
@@ -55,7 +57,7 @@ class ExchangeMarketDataError extends Error {
 
 export class ExchangeMalformedPayloadError extends ExchangeMarketDataError {
   constructor(
-    exchange: ExchangeId | 'fx' | 'coingecko',
+    exchange: UpstreamOwner,
     message: string,
     statusCode?: number,
     symbol?: string,
@@ -68,7 +70,7 @@ export class ExchangeMalformedPayloadError extends ExchangeMarketDataError {
 
 export class ExchangeUnsupportedSymbolError extends ExchangeMarketDataError {
   constructor(
-    exchange: ExchangeId | 'fx' | 'coingecko',
+    exchange: UpstreamOwner,
     message: string,
     statusCode?: number,
     symbol?: string,
@@ -81,7 +83,7 @@ export class ExchangeUnsupportedSymbolError extends ExchangeMarketDataError {
 
 export class ExchangeTemporaryUnavailableError extends ExchangeMarketDataError {
   constructor(
-    exchange: ExchangeId | 'fx' | 'coingecko',
+    exchange: UpstreamOwner,
     message: string,
     statusCode?: number,
     symbol?: string,
@@ -94,7 +96,7 @@ export class ExchangeTemporaryUnavailableError extends ExchangeMarketDataError {
 
 export class ExchangeRateLimitError extends ExchangeMarketDataError {
   constructor(
-    exchange: ExchangeId | 'fx' | 'coingecko',
+    exchange: UpstreamOwner,
     message: string,
     statusCode?: number,
     symbol?: string,

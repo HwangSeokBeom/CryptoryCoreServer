@@ -381,10 +381,12 @@ class MarketStreamingOrchestrator {
   private readonly runtimeStatuses = new Map<ExchangeId, ExchangeRuntimeStatus>();
   private publicSubscriptions: StreamSubscription[] = [];
   private healthMonitorTimer: NodeJS.Timeout | null = null;
+  private includeTrades = false;
 
-  async start() {
+  async start(options: { includeTrades?: boolean } = {}) {
     if (this.started) return;
     this.started = true;
+    this.includeTrades = options.includeTrades === true;
 
     const subscriptionResults = await Promise.all(
       STREAM_EXCHANGES.map(async (exchange) => {
@@ -409,20 +411,35 @@ class MarketStreamingOrchestrator {
       }),
     );
     this.publicSubscriptions = subscriptionResults.flatMap(({ exchange, symbols }) => {
-      const representativeSymbols = getRepresentativeSymbolsForExchange(symbols);
-      return [
+      const representativeSymbols = getRepresentativeSymbolsForExchange(symbols, exchange).slice(0, 4);
+      const subscriptions: StreamSubscription[] = [
         {
           exchange,
           channel: 'tickers' as const,
-          symbols,
+          symbols: representativeSymbols,
         },
-        {
+      ];
+      if (this.includeTrades) {
+        subscriptions.push({
           exchange,
           channel: 'trades' as const,
           symbols: representativeSymbols,
-        },
-      ].filter((subscription) => subscription.symbols.length > 0);
+        });
+      }
+      return subscriptions.filter((subscription) => subscription.symbols.length > 0);
     });
+    logger.info(
+      {
+        domain: 'market-collector',
+        tradeCollectorEnabled: this.includeTrades,
+        subscriptions: this.publicSubscriptions.map((subscription) => ({
+          exchange: subscription.exchange,
+          channel: subscription.channel,
+          count: subscription.symbols.length,
+        })),
+      },
+      `[MarketCollector] batch request subscriptions=${this.publicSubscriptions.length} tradeCollectorEnabled=${this.includeTrades}`,
+    );
 
     await Promise.all(
       STREAM_EXCHANGES.map(async (exchange) => {
@@ -514,7 +531,7 @@ class MarketStreamingOrchestrator {
         const provider = exchangeProviderRegistry.getMarketDataProvider(exchange);
         const tickerSymbols = this.getSubscribedSymbols(exchange, 'tickers');
         const orderbookSymbols = this.getSubscribedSymbols(exchange, 'orderbook');
-        const tradeSymbols = this.getSubscribedSymbols(exchange, 'trades');
+        const tradeSymbols = this.includeTrades ? this.getSubscribedSymbols(exchange, 'trades').slice(0, 4) : [];
         this.setMode(exchange, 'polling', false, null);
 
         if (tickerSymbols.length > 0 && !this.isCapabilitySuppressed(exchange, 'ticker')) {

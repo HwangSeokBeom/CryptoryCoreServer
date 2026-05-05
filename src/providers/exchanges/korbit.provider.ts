@@ -32,6 +32,7 @@ import { toCanonicalMarket, toCanonicalSymbol } from '../../core/exchange/symbol
 import { WebSocketClientManager, type WebSocketReconnectMetadata } from '../../core/exchange/websocket.client-manager';
 import { KorbitAdapter } from '../../exchanges/KorbitAdapter';
 import { logger } from '../../utils/logger';
+import { assertTransactionalFeatureEnabled } from '../../middleware/compliance.middleware';
 import { BaseExchangeProvider } from './base-exchange.provider';
 import {
   buildPortfolioSnapshot,
@@ -432,6 +433,10 @@ export class KorbitProvider
   }
 
   async createOrder(request: CreateOrderRequest, context: ProviderContext): Promise<CanonicalOrder> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'korbit.createOrder',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const symbol = this.requireSymbol(request.symbol, 'create order');
     const payload: Record<string, unknown> = {
       symbol,
@@ -458,6 +463,10 @@ export class KorbitProvider
   }
 
   async cancelOrder(request: CancelOrderRequest, context: ProviderContext): Promise<CanonicalOrder> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'korbit.cancelOrder',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const symbol = this.requireSymbol(request.symbol, 'cancel order');
     await this.requestPrivate('/v2/orders', 'DELETE', context, {
       symbol,
@@ -467,6 +476,10 @@ export class KorbitProvider
   }
 
   async getOrder(orderId: string, symbol: string | undefined, context: ProviderContext): Promise<CanonicalOrder> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'korbit.getOrder',
+      reason: 'provider_private_trading_api_disabled',
+    });
     const resolvedSymbol = this.requireSymbol(symbol, 'get order');
     const response = await this.requestPrivate<any>('/v2/orders', 'GET', context, {
       symbol: resolvedSymbol,
@@ -476,6 +489,10 @@ export class KorbitProvider
   }
 
   async listOpenOrders(symbol: string | undefined, context: ProviderContext): Promise<CanonicalOrder[]> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'korbit.listOpenOrders',
+      reason: 'provider_private_trading_api_disabled',
+    });
     if (symbol) {
       const response = await this.requestPrivate<any[]>('/v2/openOrders', 'GET', context, {
         symbol: this.requireSymbol(symbol, 'list open orders'),
@@ -497,6 +514,10 @@ export class KorbitProvider
   }
 
   async listFills(symbol: string | undefined, limit: number | undefined, context: ProviderContext): Promise<CanonicalFill[]> {
+    assertTransactionalFeatureEnabled('private_exchange_trading_api', {
+      path: 'korbit.listFills',
+      reason: 'provider_private_trading_api_disabled',
+    });
     if (symbol) {
       const response = await this.requestPrivate<any[]>('/v2/myTrades', 'GET', context, {
         symbol: this.requireSymbol(symbol, 'list fills'),

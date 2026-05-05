@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { env } from '../../config/env';
+import { featureFlags } from '../../config/feature-flags';
 import { createSuccessResponse } from '../../utils/errors';
 
 function buildAppConfig() {
@@ -8,7 +9,9 @@ function buildAppConfig() {
     privacyPolicyUrl: env.PRIVACY_POLICY_URL ?? null,
     supportUrl: env.SUPPORT_URL ?? null,
     accountDeletionGuideUrl: env.ACCOUNT_DELETION_URL ?? null,
+    accountDeletionUrl: env.ACCOUNT_DELETION_URL ?? null,
     investmentDisclaimerUrl: env.INVESTMENT_DISCLAIMER_URL ?? null,
+    communityPolicyUrl: env.COMMUNITY_POLICY_URL ?? null,
     homepageUrl: env.APP_HOMEPAGE_URL ?? null,
   };
 
@@ -22,7 +25,9 @@ function buildAppConfig() {
     appReview: {
       ready: missingRequiredLinks.length === 0,
       missingRequiredLinks,
+      mode: featureFlags.appStoreReviewMode ? 'app_store_review' : 'standard',
     },
+    features: featureFlags,
     account: {
       registerUrl: '/api/v1/auth/register',
       loginUrl: '/api/v1/auth/login',

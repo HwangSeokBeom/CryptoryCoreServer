@@ -1,5 +1,16 @@
 # Market API Contract
 
+## News tab calculator migration
+
+The News tab no longer depends on market cap, volume, dominance history, or dashboard endpoints for
+its calculator segment. Do not extend unstable global market history/dashboard providers for that
+screen. Use `GET /calculators/usdt-rate` for the USDT/KRW calculator rate; profit/loss and
+averaging-down calculator math stays local on the client.
+
+The existing `/market/data`, `/market/trends`, and `/market-data/global/history` endpoints remain for
+legacy clients, but they are not required for the new calculator flow and should be treated as
+deprecated for the News tab.
+
 ## Symbol identity
 
 - `unique identity`: `exchange + marketId`

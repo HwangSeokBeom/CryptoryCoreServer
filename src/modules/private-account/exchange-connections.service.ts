@@ -38,6 +38,10 @@ import {
   getExchangeCredentialFields,
   getExchangePermissionGuides,
 } from '../../domains/exchange-metadata/exchange-metadata.service';
+import { featureFlags } from '../../config/feature-flags';
+
+const READ_ONLY_API_KEY_MESSAGE =
+  'Only read-only API keys are allowed. API keys with trading or withdrawal permissions cannot be registered.';
 
 type ExchangeConnectionRecord = Awaited<ReturnType<typeof prisma.exchangeConnection.findFirst>>;
 const inFlightExchangeConnectionReads = new Map<string, Promise<unknown>>();
@@ -111,6 +115,25 @@ function readRequestedPermission(
 
 function toPermissionScope(permission: ExchangeConnectionPermission) {
   return permission === 'trade_enabled' ? ['read', 'trade'] : ['read'];
+}
+
+function ensureReadOnlyPermissionAllowed(permission: ExchangeConnectionPermission) {
+  if (featureFlags.isPrivateExchangeTradingAPIEnabled && featureFlags.isTradingEnabled) {
+    return;
+  }
+
+  if (permission === 'trade_enabled') {
+    throw new AppError(
+      403,
+      READ_ONLY_API_KEY_MESSAGE,
+      {
+        code: 'EXCHANGE_API_KEY_PERMISSION_NOT_ALLOWED',
+        requestedPermission: permission,
+        requiredPermission: 'read_only',
+      },
+      'EXCHANGE_API_KEY_PERMISSION_NOT_ALLOWED',
+    );
+  }
 }
 
 function readPermissionScope(value: Prisma.JsonValue | null | undefined, permission: ExchangeConnectionPermission) {
@@ -344,12 +367,15 @@ function ensureConnectionRecord(connection: ExchangeConnectionRecord) {
 function mapConnection(connection: NonNullable<ExchangeConnectionRecord>) {
   const exchange = assertSupportedExchange(connection.exchange);
   const exchangeInfo = EXCHANGE_MAP.get(exchange);
-  const permission = readRequestedPermission(
+  const storedPermission = readRequestedPermission(
     connection.validationDetails && typeof connection.validationDetails === 'object'
       ? (connection.validationDetails as Record<string, unknown>)
       : undefined,
     connection.connectionPurpose,
   );
+  const permission = featureFlags.isPrivateExchangeTradingAPIEnabled && featureFlags.isTradingEnabled
+    ? storedPermission
+    : 'read_only';
   const connectionPurpose = toConnectionPurpose(permission);
   const permissionScope = readPermissionScope(connection.permissionScope, permission);
   const apiKeyMasked = connection.apiKeyMasked || '********';
@@ -484,6 +510,7 @@ export async function testExchangeConnection(
   input: TestExchangeConnectionRequest,
 ) {
   const exchange = assertSupportedExchange(input.exchange);
+  ensureReadOnlyPermissionAllowed(input.permission);
   const validation = await validateConnection({
     exchange,
     apiKey: input.apiKey,
@@ -504,6 +531,7 @@ export async function testExchangeConnection(
 
 export async function createExchangeConnection(userId: string, input: CreateExchangeConnectionRequest) {
   const exchange = assertSupportedExchange(input.exchange);
+  ensureReadOnlyPermissionAllowed(input.permission);
   const existing = await prisma.exchangeConnection.findUnique({
     where: {
       userId_exchange: {
@@ -574,6 +602,7 @@ export async function updateExchangeConnection(
     existing.connectionPurpose,
   );
   const permission = input.permission ?? existingPermission;
+  ensureReadOnlyPermissionAllowed(permission);
   const credentialsChanged = input.apiKey !== undefined || input.secretKey !== undefined || input.passphrase !== undefined;
   const permissionChanged = input.permission !== undefined && input.permission !== existingPermission;
 
@@ -661,6 +690,7 @@ export async function validateStoredExchangeConnection(userId: string, identifie
       : undefined,
     existing.connectionPurpose,
   );
+  ensureReadOnlyPermissionAllowed(permission);
   const apiKey = decryptSecret(existing.apiKeyEncrypted);
   const secretKey = decryptSecret(existing.secretKeyEncrypted);
   const validation = await validateConnection({

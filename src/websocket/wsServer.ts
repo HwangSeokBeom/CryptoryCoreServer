@@ -5,6 +5,21 @@ import { EXCHANGE_IDS, type ExchangeId } from '../core/exchange/exchange.types';
 import { ensureChartLiveCandle } from '../domains/charts/chart.service';
 import { getPortfolioSnapshot } from '../domains/portfolio/portfolio.service';
 import { getOpenOrders, getRecentFills } from '../domains/trading/trading.service';
+import { floorTimestampToBucket } from '../domains/market-data/contracts/candle-aggregation';
+import {
+  getCurrentPriceSnapshots,
+  normalizeContractMarket,
+  normalizeContractSymbolInput,
+  parseContractExchange,
+  parseContractQuoteCurrency,
+  parseContractTimeframe,
+} from '../domains/market-data/contracts/market-data-contract.service';
+import type {
+  ContractExchange,
+  ContractQuoteCurrency,
+  ContractTimeframe,
+  MarketCandle,
+} from '../domains/market-data/contracts/market-data.types';
 import { marketEventBus } from '../modules/public-market/market.event-bus';
 import { publicMarketDataStore } from '../modules/public-market/market.data.store';
 import { toUnifiedSymbol } from '../modules/public-market/market.normalization';
@@ -38,6 +53,7 @@ interface ClientSubscriptionState {
   orderbook: Set<string>;
   trades: Set<string>;
   candles: Set<string>;
+  contractCandles: Set<string>;
 }
 
 interface ClientSocket extends WebSocket {
@@ -92,6 +108,9 @@ let privateUpgradeListener:
 const clientSubscriptions = new Map<ClientSocket, ClientSubscriptionState>();
 const privateClientSubscriptions = new Map<PrivateClientSocket, PrivateSubscriptionState>();
 let heartbeatInterval: NodeJS.Timeout | null = null;
+let marketCandlePollInterval: NodeJS.Timeout | null = null;
+const contractLiveCandles = new Map<string, MarketCandle>();
+const MAX_CONTRACT_CANDLE_SUBSCRIPTIONS_PER_CLIENT = 8;
 
 function sendJson(ws: WebSocket, payload: unknown) {
   if (ws.readyState !== WebSocket.OPEN) return;
@@ -106,6 +125,56 @@ function buildCandleKey(exchange: string, symbol: string, interval: string) {
   return `${exchange}:${toUnifiedSymbol(symbol)}:${interval}`;
 }
 
+function normalizeTickerSubscriptionSymbol(symbol: string, quote?: string) {
+  const normalized = symbol.trim().toUpperCase();
+  const normalizedQuote = quote?.trim().toUpperCase() || null;
+
+  if (normalized.includes('/')) {
+    const [base, parsedQuote] = normalized.split('/');
+    if (!normalizedQuote || parsedQuote === normalizedQuote) {
+      return toUnifiedSymbol(base);
+    }
+  }
+
+  if (normalized.includes('-')) {
+    const [parsedQuote, base] = normalized.split('-');
+    if (base && (!normalizedQuote || parsedQuote === normalizedQuote)) {
+      return toUnifiedSymbol(base);
+    }
+  }
+
+  if (normalized.includes('_')) {
+    const [base, parsedQuote] = normalized.split('_');
+    if (base && (!normalizedQuote || parsedQuote === normalizedQuote)) {
+      return toUnifiedSymbol(base);
+    }
+  }
+
+  return toUnifiedSymbol(normalized);
+}
+
+function buildContractCandleKey(
+  exchange: ContractExchange,
+  symbol: string,
+  quoteCurrency: ContractQuoteCurrency,
+  timeframe: ContractTimeframe,
+) {
+  return `${exchange}:${symbol.trim().toUpperCase()}:${quoteCurrency}:${timeframe}`;
+}
+
+function parseContractCandleKey(key: string) {
+  const [exchange, symbol, quoteCurrency, timeframe] = key.split(':');
+  if (!exchange || !symbol || !quoteCurrency || !timeframe) {
+    return null;
+  }
+  return {
+    exchange: exchange as ContractExchange,
+    symbol,
+    quoteCurrency: quoteCurrency as ContractQuoteCurrency,
+    timeframe: timeframe as ContractTimeframe,
+  };
+}
+
 function createSubscriptionState(): ClientSubscriptionState {
   return {
     tickers: {
@@ -116,6 +185,7 @@ function createSubscriptionState(): ClientSubscriptionState {
     orderbook: new Set<string>(),
     trades: new Set<string>(),
     candles: new Set<string>(),
+    contractCandles: new Set<string>(),
   };
 }
 
@@ -181,25 +251,222 @@ function publishCandle(candle: NormalizedMarketCandle) {
   }
 }
 
+function sendContractCandle(ws: WebSocket, key: string, candle: MarketCandle, isFinal: boolean) {
+  const parsed = parseContractCandleKey(key);
+  if (!parsed) {
+    return;
+  }
+  sendJson(ws, {
+    type: 'candle',
+    exchange: parsed.exchange,
+    symbol: parsed.symbol,
+    quoteCurrency: parsed.quoteCurrency,
+    market: normalizeContractMarket(parsed.exchange, parsed.symbol, parsed.quoteCurrency),
+    timeframe: parsed.timeframe,
+    candle,
+    isFinal,
+  });
+}
+
+function ensureMarketCandlePolling() {
+  const activeCount = Array.from(clientSubscriptions.values())
+    .reduce((total, state) => total + state.contractCandles.size, 0);
+  if (activeCount === 0) {
+    if (marketCandlePollInterval) {
+      clearInterval(marketCandlePollInterval);
+      marketCandlePollInterval = null;
+    }
+    return;
+  }
+  if (marketCandlePollInterval) {
+    return;
+  }
+
+  logger.info({ domain: 'market-ws', event: 'external_connected', exchange: 'polling' }, '[MarketWS] external_connected exchange=polling');
+  marketCandlePollInterval = setInterval(() => {
+    void pollContractCandles();
+  }, 5_000);
+  marketCandlePollInterval.unref();
+}
+
+async function pollContractCandles() {
+  const keys = Array.from(new Set(
+    Array.from(clientSubscriptions.values()).flatMap((state) => Array.from(state.contractCandles)),
+  ));
+  if (keys.length === 0) {
+    ensureMarketCandlePolling();
+    return;
+  }
+
+  const requests = keys
+    .map(parseContractCandleKey)
+    .filter((value): value is {
+      exchange: ContractExchange;
+      symbol: string;
+      quoteCurrency: ContractQuoteCurrency;
+      timeframe: ContractTimeframe;
+    } => Boolean(value));
+  try {
+    const prices = await getCurrentPriceSnapshots(requests);
+    const priceByMarket = new Map(prices.map((price) => [
+      `${price.exchange}:${price.symbol}:${price.quoteCurrency}`,
+      price.currentPrice,
+    ]));
+
+    for (const key of keys) {
+      const parsed = parseContractCandleKey(key);
+      if (!parsed) {
+        continue;
+      }
+      const currentPrice = priceByMarket.get(`${parsed.exchange}:${parsed.symbol}:${parsed.quoteCurrency}`);
+      if (currentPrice === undefined) {
+        continue;
+      }
+      const bucketStart = floorTimestampToBucket(Date.now(), parsed.timeframe);
+      const existing = contractLiveCandles.get(key);
+      const isNewBucket = !existing || Date.parse(existing.timestamp) !== bucketStart;
+      const candle: MarketCandle = isNewBucket
+        ? {
+            timestamp: new Date(bucketStart).toISOString(),
+            open: currentPrice,
+            high: currentPrice,
+            low: currentPrice,
+            close: currentPrice,
+            volume: 0,
+            quoteVolume: 0,
+          }
+        : {
+            ...existing,
+            high: Math.max(existing.high, currentPrice),
+            low: Math.min(existing.low, currentPrice),
+            close: currentPrice,
+          };
+      contractLiveCandles.set(key, candle);
+      for (const [ws, subscriptions] of clientSubscriptions.entries()) {
+        if (subscriptions.contractCandles.has(key)) {
+          sendContractCandle(ws, key, candle, false);
+        }
+      }
+      logger.debug({ domain: 'market-ws', key }, '[MarketWS] candle_emit key=' + key);
+    }
+  } catch (error) {
+    logger.warn({ domain: 'market-ws', err: error }, 'Contract market candle polling failed');
+  }
+}
+
+function handleContractCandleSubscription(ws: ClientSocket, payload: Record<string, unknown>) {
+  const type = typeof payload.type === 'string' ? payload.type : '';
+  const parsedExchange = parseContractExchange(typeof payload.exchange === 'string' ? payload.exchange : undefined);
+  const parsedQuote = parseContractQuoteCurrency(typeof payload.quoteCurrency === 'string' ? payload.quoteCurrency : undefined);
+  const parsedTimeframe = parseContractTimeframe(typeof payload.timeframe === 'string' ? payload.timeframe : undefined);
+  const requestedSymbol = typeof payload.symbol === 'string' ? payload.symbol.trim() : '';
+  const subscriptions = clientSubscriptions.get(ws);
+
+  if (!subscriptions || !parsedExchange || !parsedQuote || !parsedTimeframe || !requestedSymbol) {
+    sendJson(ws, { type: 'error', code: 'INVALID_MARKET_CANDLE_SUBSCRIPTION', message: 'exchange, symbol, quoteCurrency, and timeframe are required.' });
+    return true;
+  }
+
+  let symbol: string;
+  try {
+    symbol = normalizeContractSymbolInput(parsedExchange, requestedSymbol, parsedQuote);
+  } catch (error) {
+    sendJson(ws, {
+      type: 'error',
+      code: 'INVALID_MARKET_CANDLE_SUBSCRIPTION',
+      message: error instanceof Error ? error.message : 'Invalid market candle subscription.',
+    });
+    return true;
+  }
+  const key = buildContractCandleKey(parsedExchange, symbol, parsedQuote, parsedTimeframe);
+  if (type === 'unsubscribe') {
+    subscriptions.contractCandles.delete(key);
+    logger.info(
+      { domain: 'market-ws', exchange: parsedExchange, symbol, quote: parsedQuote, timeframe: parsedTimeframe },
+      `[MarketWS] unsubscribe exchange=${parsedExchange} symbol=${symbol} quote=${parsedQuote} timeframe=${parsedTimeframe}`,
+    );
+    ensureMarketCandlePolling();
+    return true;
+  }
+
+  if (!subscriptions.contractCandles.has(key) && subscriptions.contractCandles.size >= MAX_CONTRACT_CANDLE_SUBSCRIPTIONS_PER_CLIENT) {
+    logger.warn(
+      {
+        domain: 'market-ws',
+        event: 'subscribe_limited',
+        channel: 'market.candle',
+        exchange: parsedExchange,
+        symbol,
+        quoteCurrency: parsedQuote,
+        timeframe: parsedTimeframe,
+        activeCount: subscriptions.contractCandles.size,
+        max: MAX_CONTRACT_CANDLE_SUBSCRIPTIONS_PER_CLIENT,
+      },
+      '[MarketWS] subscribe_limited channel=market.candle reason=too_many_selected_symbols',
+    );
+    sendJson(ws, {
+      type: 'error',
+      code: 'MARKET_CANDLE_SUBSCRIPTION_LIMIT',
+      message: 'Too many market.candle subscriptions for this client.',
+      maxSubscriptions: MAX_CONTRACT_CANDLE_SUBSCRIPTIONS_PER_CLIENT,
+    });
+    return true;
+  }
+
+  subscriptions.contractCandles.add(key);
+  logger.info(
+    { domain: 'market-ws', exchange: parsedExchange, symbol, quote: parsedQuote, timeframe: parsedTimeframe },
+    `[MarketWS] subscribe exchange=${parsedExchange} symbol=${symbol} quote=${parsedQuote} timeframe=${parsedTimeframe}`,
+  );
+  sendJson(ws, {
+    type: 'ack',
+    channel: 'market.candle',
+    action: 'subscribe',
+    exchange: parsedExchange,
+    symbol,
+    quoteCurrency: parsedQuote,
+    timeframe: parsedTimeframe,
+  });
+  const live = contractLiveCandles.get(key);
+  if (live) {
+    sendContractCandle(ws, key, live, false);
+  }
+  ensureMarketCandlePolling();
+  void pollContractCandles();
+  return true;
+}
+
 function handleTickerSubscription(
   ws: ClientSocket,
   subscriptions: ClientSubscriptionState,
   message: Extract<WsMarketRequest, { channel: 'tickers' }>,
 ) {
   const exchanges = (message.exchanges ?? []).map((exchange) => exchange.toLowerCase());
-  const symbols = (message.symbols ?? []).map((symbol) => toUnifiedSymbol(symbol));
+  const symbols = (message.symbols ?? []).map((symbol) => normalizeTickerSubscriptionSymbol(symbol));
 
   if (message.action === 'subscribe') {
     subscriptions.tickers.active = true;
     exchanges.forEach((exchange) => subscriptions.tickers.exchanges.add(exchange));
     symbols.forEach((symbol) => subscriptions.tickers.symbols.add(symbol));
+    logger.info(
+      { domain: 'market-ws', event: 'subscribe', channel: 'ticker', exchanges, symbols },
+      `[MarketWS] subscribe channel=ticker exchanges=${exchanges.join(',')} symbols=${symbols.join(',')}`,
+    );
   } else if (exchanges.length === 0 && symbols.length === 0) {
     subscriptions.tickers.active = false;
     subscriptions.tickers.exchanges.clear();
     subscriptions.tickers.symbols.clear();
+    logger.info(
+      { domain: 'market-ws', event: 'unsubscribe', channel: 'ticker', scope: 'all' },
+      '[MarketWS] unsubscribe channel=ticker scope=all',
+    );
   } else {
     exchanges.forEach((exchange) => subscriptions.tickers.exchanges.delete(exchange));
     symbols.forEach((symbol) => subscriptions.tickers.symbols.delete(symbol));
+    logger.info(
+      { domain: 'market-ws', event: 'unsubscribe', channel: 'ticker', exchanges, symbols },
+      `[MarketWS] unsubscribe channel=ticker exchanges=${exchanges.join(',')} symbols=${symbols.join(',')}`,
+    );
     if (
       subscriptions.tickers.exchanges.size === 0 &&
       subscriptions.tickers.symbols.size === 0
@@ -244,8 +511,16 @@ function handleKeyedSubscription(
 
   if (message.action === 'subscribe') {
     keys.forEach((key) => subscriptions.add(key));
+    logger.info(
+      { domain: 'market-ws', event: 'subscribe', channel, exchange, symbols },
+      `[MarketWS] subscribe channel=${channel} exchange=${exchange} symbols=${symbols.join(',')}`,
+    );
   } else {
     keys.forEach((key) => subscriptions.delete(key));
+    logger.info(
+      { domain: 'market-ws', event: 'unsubscribe', channel, exchange, symbols },
+      `[MarketWS] unsubscribe channel=${channel} exchange=${exchange} symbols=${symbols.join(',')}`,
+    );
   }
 
   sendJson(
@@ -290,8 +565,16 @@ async function handleCandleSubscription(
 
   if (message.action === 'subscribe') {
     keys.forEach((key) => subscriptions.add(key));
+    logger.info(
+      { domain: 'market-ws', event: 'subscribe', channel: 'candles', exchange, symbols, interval },
+      `[MarketWS] subscribe channel=candles exchange=${exchange} symbols=${symbols.join(',')} interval=${interval}`,
+    );
   } else {
     keys.forEach((key) => subscriptions.delete(key));
+    logger.info(
+      { domain: 'market-ws', event: 'unsubscribe', channel: 'candles', exchange, symbols, interval },
+      `[MarketWS] unsubscribe channel=candles exchange=${exchange} symbols=${symbols.join(',')} interval=${interval}`,
+    );
   }
 
   sendJson(
@@ -350,17 +633,39 @@ function handleClientMessage(ws: ClientSocket, raw: RawData) {
     return;
   }
 
-  const parsed = wsMarketRequestSchema.safeParse(payload);
+  if (
+    payload &&
+    typeof payload === 'object' &&
+    'channel' in payload &&
+    (payload as { channel?: unknown }).channel === 'market.candle' &&
+    'type' in payload &&
+    ['subscribe', 'unsubscribe'].includes(String((payload as { type?: unknown }).type))
+  ) {
+    handleContractCandleSubscription(ws, payload as Record<string, unknown>);
+    return;
+  }
+
+  const normalizedPayload = normalizeWsMarketPayload(payload);
+  const parsed = wsMarketRequestSchema.safeParse(normalizedPayload);
   if (!parsed.success) {
+    logger.warn(
+      {
+        domain: 'market-ws',
+        event: 'subscribe_failed',
+        reason: 'invalid_request',
+        error: parsed.error.errors[0]?.message,
+      },
+      '[MarketWS] subscribe_failed reason=invalid_request',
+    );
     sendJson(
       ws,
       serializeWsErrorPayload({
         requestId:
-          typeof payload === 'object' &&
-          payload !== null &&
-          'requestId' in payload &&
-          typeof (payload as { requestId?: unknown }).requestId === 'string'
-            ? (payload as { requestId: string }).requestId
+          typeof normalizedPayload === 'object' &&
+          normalizedPayload !== null &&
+          'requestId' in normalizedPayload &&
+          typeof (normalizedPayload as { requestId?: unknown }).requestId === 'string'
+            ? (normalizedPayload as { requestId: string }).requestId
             : undefined,
         code: 'invalid_request',
         message: parsed.error.errors[0]?.message ?? 'Invalid websocket request.',
@@ -371,6 +676,7 @@ function handleClientMessage(ws: ClientSocket, raw: RawData) {
 
   const message = parsed.data;
   if (message.action === 'ping') {
+    logger.debug({ domain: 'market-ws', event: 'ping' }, '[MarketWS] ping');
     sendJson(ws, serializeWsPongPayload(message.requestId));
     return;
   }
@@ -396,8 +702,37 @@ function handleClientMessage(ws: ClientSocket, raw: RawData) {
   handleKeyedSubscription(ws, subscriptions.trades, 'trades', message);
 }
 
+function normalizeWsMarketPayload(payload: unknown) {
+  if (!payload || typeof payload !== 'object') {
+    return payload;
+  }
+
+  const candidate = payload as Record<string, unknown>;
+  const channel = typeof candidate.channel === 'string' ? candidate.channel.trim().toLowerCase() : undefined;
+  if (channel !== 'ticker') {
+    return payload;
+  }
+
+  const symbols = Array.isArray(candidate.symbols)
+    ? candidate.symbols
+    : [candidate.symbol, candidate.marketId].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  const exchanges = Array.isArray(candidate.exchanges)
+    ? candidate.exchanges
+    : typeof candidate.exchange === 'string'
+      ? [candidate.exchange]
+      : undefined;
+
+  return {
+    ...candidate,
+    channel: 'tickers',
+    exchanges,
+    symbols,
+  };
+}
+
 function cleanupClient(ws: ClientSocket) {
   clientSubscriptions.delete(ws);
+  ensureMarketCandlePolling();
 }
 
 function cleanupPrivateClient(ws: PrivateClientSocket) {
@@ -906,12 +1241,14 @@ function startHeartbeat() {
         if (ws.isAlive === false) {
           cleanupClient(ws);
           cleanupPrivateClient(ws as PrivateClientSocket);
+          logger.warn({ domain: 'websocket', event: 'heartbeat_timeout' }, 'Websocket heartbeat timeout');
           ws.close(1001, 'heartbeat_timeout');
           setTimeout(() => ws.terminate(), 500).unref();
           return;
         }
 
         ws.isAlive = false;
+        logger.debug({ domain: 'websocket', event: 'ping' }, 'Websocket heartbeat ping');
         ws.ping();
       });
     }
@@ -939,6 +1276,7 @@ export function setupWebSocket(server: HttpServer, options: SetupWebSocketOption
     clientSubscriptions.set(ws, createSubscriptionState());
 
     logger.info({ domain: 'public-market', transport: 'ws' }, 'Public market websocket client connected');
+    logger.info({ domain: 'market-ws', event: 'client_connected' }, '[MarketWS] client_connected');
 
     sendJson(ws, serializeWsWelcomePayload());
 
@@ -1001,6 +1339,10 @@ export function setupWebSocket(server: HttpServer, options: SetupWebSocketOption
     void (async () => {
       const route = getUpgradeRoute(request);
       if (route === '/ws/market') {
+        logger.info(
+          { domain: 'market-ws', event: 'websocket_upgrade', route, path: request.url },
+          '[MarketWS] websocket_upgrade route=/ws/market',
+        );
         wss?.handleUpgrade(request, socket, head, (ws) => {
           wss?.emit('connection', ws, request);
         });
@@ -1104,6 +1446,10 @@ export async function closeWebSocketServer(reason = 'server_shutdown') {
   }
 
   clientSubscriptions.clear();
+  if (marketCandlePollInterval) {
+    clearInterval(marketCandlePollInterval);
+    marketCandlePollInterval = null;
+  }
   for (const [ws] of privateClientSubscriptions.entries()) {
     cleanupPrivateClient(ws);
   }

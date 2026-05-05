@@ -10,6 +10,8 @@ import { prisma } from './config/database';
 import { redis } from './config/redis';
 import { closeWebSocketServer, setupWebSocket } from './websocket/wsServer';
 import { startTickerCollector, stopTickerCollector } from './jobs/tickerCollector';
+import { initializeFcm } from './domains/push/fcm.service';
+import { startPriceAlertWorker, stopPriceAlertWorker } from './domains/alerts/price-alert.worker';
 
 function lookupPortOccupant(port: number) {
   if (env.NODE_ENV !== 'development') {
@@ -37,7 +39,21 @@ function lookupPortOccupant(port: number) {
   }
 }
 
+function getEnabledStartupJobs() {
+  return [
+    env.MARKET_COLLECTOR_ENABLED ? 'marketCollector' : null,
+    env.MARKET_COLLECTOR_ENABLED && env.MARKET_TRADE_COLLECTOR_ENABLED ? 'marketTradeCollector' : null,
+    env.MARKET_TREND_SNAPSHOT_ENABLED ? 'marketTrendSnapshot' : null,
+    env.MARKET_STARTUP_WARMUP_ENABLED ? 'marketStartupWarmup' : null,
+    env.PRICE_ALERT_WORKER_ENABLED ? 'priceAlertWorker' : null,
+  ].filter((job): job is string => Boolean(job));
+}
+
 async function main() {
+  logger.info(
+    { domain: 'startup-jobs', enabledJobs: getEnabledStartupJobs() },
+    `[StartupJobs] enabled jobs=${JSON.stringify(getEnabledStartupJobs())}`,
+  );
   const app = await buildApp();
   let shuttingDown = false;
 
@@ -52,6 +68,8 @@ async function main() {
     'Process starting',
   );
 
+  initializeFcm();
+
   logger.info(
     {
       domain: 'config',
@@ -59,6 +77,15 @@ async function main() {
       exchangeCredentialEnv: getServerExchangeCredentialAvailability(),
     },
     'Loaded exchange credential availability',
+  );
+
+  logger.info(
+    {
+      domain: 'config',
+      newsProvider: env.NEWS_PROVIDER,
+      hasNewsApiKey: Boolean(env.NEWSAPI_API_KEY?.trim()),
+    },
+    `[Config] NEWS_PROVIDER=${env.NEWS_PROVIDER} hasNewsApiKey=${Boolean(env.NEWSAPI_API_KEY?.trim())}`,
   );
 
   const binanceConfig = getExchangeConfig('binance');
@@ -74,15 +101,39 @@ async function main() {
   );
 
   await app.listen({ port: env.PORT, host: '0.0.0.0' });
-  logger.info({ domain: 'process', event: 'process_start_complete', port: env.PORT }, 'Server listening');
+  logger.info(
+    {
+      domain: 'process',
+      event: 'process_start_complete',
+      port: env.PORT,
+      restBaseURL: `http://127.0.0.1:${env.PORT}`,
+      marketBaseURL: `http://127.0.0.1:${env.PORT}/market`,
+      marketWebSocketURL: `ws://127.0.0.1:${env.PORT}/ws/market`,
+    },
+    `Server listening on http://127.0.0.1:${env.PORT} (market REST http://127.0.0.1:${env.PORT}/market, WS ws://127.0.0.1:${env.PORT}/ws/market)`,
+  );
 
   const httpServer = app.server;
   setupWebSocket(httpServer, {
     privateStreamingEnabled: env.ENABLE_PRIVATE_WS,
     verifyJwt: async (token) => app.jwt.verify(token),
   });
+  logger.info(
+    {
+      domain: 'process',
+      event: 'public_market_api_ready',
+      port: env.PORT,
+      healthURL: `http://127.0.0.1:${env.PORT}/health`,
+      marketHealthURL: `http://127.0.0.1:${env.PORT}/market/health`,
+      tickerURL: `http://127.0.0.1:${env.PORT}/market/tickers?exchange=upbit&quoteCurrency=KRW`,
+      candleURL: `http://127.0.0.1:${env.PORT}/market/candles?exchange=upbit&symbol=KRW-BTC&quote=KRW&timeframe=1H&limit=200`,
+      webSocketURL: `ws://127.0.0.1:${env.PORT}/ws/market`,
+    },
+    'Public market REST and websocket endpoints ready',
+  );
 
   startTickerCollector();
+  startPriceAlertWorker();
 
   const shutdown = async (reason: string, exitCode = 0) => {
     if (shuttingDown) {
@@ -101,6 +152,7 @@ async function main() {
 
     try {
       await stopTickerCollector();
+      stopPriceAlertWorker();
       await closeWebSocketServer('server_shutdown');
 
       const closeAppPromise = app.close();
