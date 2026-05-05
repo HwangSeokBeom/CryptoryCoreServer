@@ -14,6 +14,13 @@ async function createApp(extraEnv: Record<string, string> = {}) {
   process.env = { ...ORIGINAL_ENV, ...BASE_ENV, ...extraEnv };
   vi.resetModules();
   const restCalls: Array<{ path: string; options?: { query?: Record<string, unknown>; headers?: Record<string, unknown> } }> = [];
+  vi.doMock('../src/config/database', () => ({
+    prisma: {
+      coin: {
+        findUnique: vi.fn(async () => null),
+      },
+    },
+  }));
   vi.doMock('../src/domains/market-data/market-data.service', () => ({
     getReferenceTicker: vi.fn(async () => ({
       price: 2400,
@@ -143,6 +150,7 @@ afterEach(() => {
   vi.clearAllMocks();
   vi.doUnmock('../src/core/exchange/rest.client');
   vi.doUnmock('../src/domains/market-data/market-data.service');
+  vi.doUnmock('../src/config/database');
 });
 
 describe('iOS API contracts', () => {

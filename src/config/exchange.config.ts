@@ -125,7 +125,7 @@ function normalizeBinanceCombinedStreamBaseUrl(baseUrl: string) {
   return url.toString().replace(/\/$/g, '');
 }
 
-export function buildBinancePublicWebSocketUrl(streams: string[]) {
-  const baseUrl = normalizeBinanceCombinedStreamBaseUrl(getExchangeConfig('binance').publicWebSocketUrl);
+export function buildBinancePublicWebSocketUrl(streams: string[], publicWebSocketUrl = getExchangeConfig('binance').publicWebSocketUrl) {
+  const baseUrl = normalizeBinanceCombinedStreamBaseUrl(publicWebSocketUrl);
   return `${baseUrl}?streams=${streams.join('/')}`;
 }

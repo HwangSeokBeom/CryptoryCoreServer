@@ -141,16 +141,22 @@ export async function buildApp() {
   // Global error handler
   app.setErrorHandler((error, _request, reply) => {
     const mappedError = mapInfrastructureError(error);
+    const responseError = mappedError ?? (error instanceof AppError ? error : null);
     if (mappedError?.code === 'DATABASE_SCHEMA_MISMATCH') {
       logger.error(
         { err: error, code: mappedError.code, details: mappedError.details },
         'Database schema mismatch detected',
       );
+    } else if (responseError instanceof AppError) {
+      const logLevel = responseError.statusCode >= 500 && process.env.NODE_ENV !== 'test' ? 'error' : 'warn';
+      logger[logLevel](
+        { err: error, code: responseError.code, statusCode: responseError.statusCode },
+        responseError.statusCode < 500 ? 'Handled client error' : 'Handled application error',
+      );
     } else {
       logger.error({ err: error }, 'Unhandled error');
     }
 
-    const responseError = mappedError ?? (error instanceof AppError ? error : null);
     const statusCode = responseError?.statusCode || error.statusCode || 500;
     const message = responseError?.message || 'Internal Server Error';
     reply

@@ -36,6 +36,7 @@ const MARKET_STALE_TTL_MS = 5 * 60_000;
 const TICKER_CACHE_TTL_MS = 2_000;
 const TICKER_STALE_TTL_MS = 30_000;
 const BINANCE_TICKER_BATCH_SIZE = 100;
+const BINANCE_RESTRICTED_LOCATION_FALLBACK_WS_BASE_URL = 'wss://data-stream.binance.vision:9443';
 
 function normalizeRequestedSymbols(symbols?: string[]) {
   return Array.from(new Set((symbols ?? [])
@@ -82,6 +83,8 @@ export class BinanceProvider
   private streamManager: WebSocketClientManager | null = null;
   private activeSubscriptions: StreamSubscription[] = [];
   private supportedStreamSymbols = new Set<string>();
+  private useRestrictedLocationWebSocketFallback = false;
+  private restrictedLocationFallbackLogged = false;
 
   constructor() {
     super('binance');
@@ -453,9 +456,37 @@ export class BinanceProvider
     }
 
     const streams = this.buildStreamNames(initialPlan);
+    const buildWebSocketUrl = () => buildBinancePublicWebSocketUrl(
+      streams,
+      this.useRestrictedLocationWebSocketFallback
+        ? BINANCE_RESTRICTED_LOCATION_FALLBACK_WS_BASE_URL
+        : undefined,
+    );
     this.streamManager = new WebSocketClientManager({
       name: 'binance-public',
-      url: buildBinancePublicWebSocketUrl(streams),
+      url: buildWebSocketUrl(),
+      buildConnectionRequest: () => ({ url: buildWebSocketUrl() }),
+      onUnexpectedResponse: (response) => {
+        if (response.statusCode !== 451 || this.useRestrictedLocationWebSocketFallback) {
+          return undefined;
+        }
+
+        this.useRestrictedLocationWebSocketFallback = true;
+        if (!this.restrictedLocationFallbackLogged) {
+          this.restrictedLocationFallbackLogged = true;
+          logger.warn(
+            {
+              domain: 'market-streaming',
+              exchange: this.exchange,
+              statusCode: response.statusCode,
+              reason: 'restricted_location',
+              fallbackWebSocketBaseUrl: BINANCE_RESTRICTED_LOCATION_FALLBACK_WS_BASE_URL,
+            },
+            'Binance websocket endpoint restricted, switching public stream host',
+          );
+        }
+        return { handled: true };
+      },
       onOpen: async () => {},
       onMessage: async (raw) => {
         const payload = JSON.parse(raw.toString());
