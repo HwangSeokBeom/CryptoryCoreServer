@@ -14,3 +14,7 @@ service-account*.json
 !.env.example
 !server.env.example
 !.env.production.example
+
+# Deployment archives
+dist.tar.gz
+*.tar.gz
