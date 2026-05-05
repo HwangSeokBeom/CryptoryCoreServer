@@ -3,25 +3,41 @@ import 'dotenv/config';
 import { z } from 'zod';
 
 const optionalUrl = z.preprocess((value) => value === '' ? undefined : value, z.string().url().optional());
-const envBoolean = (defaultValue: boolean) => z.preprocess((value) => {
-  if (value === undefined || value === null || value === '') {
+const BOOLEAN_TRUE_VALUES = new Set(['true', '1', 'yes', 'y', 'on']);
+const BOOLEAN_FALSE_VALUES = new Set(['false', '0', 'no', 'n', 'off', '']);
+const booleanParseError = 'must be a boolean value: true/false, 1/0, yes/no, y/n, on/off';
+
+function parseEnvBooleanValue(value: unknown, defaultValue?: boolean) {
+  if (value === undefined || value === null) {
     return defaultValue;
   }
   if (typeof value === 'boolean') {
     return value;
   }
   if (typeof value === 'number') {
-    return value !== 0;
+    if (value === 1) return true;
+    if (value === 0) return false;
+    return value;
   }
   const normalized = String(value).trim().toLowerCase();
-  if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) {
+  if (BOOLEAN_TRUE_VALUES.has(normalized)) {
     return true;
   }
-  if (['false', '0', 'no', 'n', 'off'].includes(normalized)) {
+  if (BOOLEAN_FALSE_VALUES.has(normalized)) {
     return false;
   }
   return value;
-}, z.boolean().default(defaultValue));
+}
+
+const envBoolean = (defaultValue: boolean) => z.preprocess(
+  (value) => parseEnvBooleanValue(value, defaultValue),
+  z.boolean({ invalid_type_error: booleanParseError }).default(defaultValue),
+);
+
+const optionalEnvBoolean = () => z.preprocess(
+  (value) => parseEnvBooleanValue(value),
+  z.boolean({ invalid_type_error: booleanParseError }).optional(),
+);
 
 const envSchema = z.object({
   DATABASE_URL: z.string().url(),
@@ -49,11 +65,11 @@ const envSchema = z.object({
   PORT: z.coerce.number().default(3000),
   PUBLIC_MARKET_API_PORT: z.coerce.number().optional(),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
-  USE_LIVE_DATA: z.coerce.boolean().default(false),
-  PUBLIC_STREAMING_ENABLED: z.coerce.boolean().default(true),
-  PRIVATE_STREAMING_ENABLED: z.coerce.boolean().default(true),
-  ENABLE_PRIVATE_WS: z.coerce.boolean().optional(),
-  ENABLE_POLLING_FALLBACK: z.coerce.boolean().default(true),
+  USE_LIVE_DATA: envBoolean(false),
+  PUBLIC_STREAMING_ENABLED: envBoolean(true),
+  PRIVATE_STREAMING_ENABLED: envBoolean(true),
+  ENABLE_PRIVATE_WS: optionalEnvBoolean(),
+  ENABLE_POLLING_FALLBACK: envBoolean(true),
   USD_KRW_FALLBACK: z.coerce.number().default(1350),
   FX_BASE_URL: z.string().url().default('https://api.exchangerate.host'),
   FX_STALE_THRESHOLD_MS: z.coerce.number().default(300000),
@@ -82,8 +98,8 @@ const envSchema = z.object({
   FIREBASE_PROJECT_ID: z.string().optional(),
   FIREBASE_CLIENT_EMAIL: z.string().optional(),
   FIREBASE_PRIVATE_KEY: z.string().optional(),
-  FCM_ENABLED: z.coerce.boolean().default(false),
-  FCM_DRY_RUN: z.coerce.boolean().default(false),
+  FCM_ENABLED: envBoolean(false),
+  FCM_DRY_RUN: envBoolean(false),
   PRICE_ALERT_WORKER_ENABLED: envBoolean(false),
   PRICE_ALERT_POLL_INTERVAL_MS: z.coerce.number().default(10000),
   PRICE_ALERT_REPEAT_COOLDOWN_SECONDS: z.coerce.number().default(600),
@@ -147,19 +163,19 @@ const envSchema = z.object({
   BINANCE_WS_URL: z.string().url().optional(),
   BINANCE_PUBLIC_WS_URL: z.string().url().optional(),
   BINANCE_PRIVATE_WS_URL: z.string().url().optional(),
-  APP_STORE_REVIEW_MODE: z.coerce.boolean().default(false),
-  FEATURE_ORDER_ENABLED: z.coerce.boolean().optional(),
-  FEATURE_TRADING_ENABLED: z.coerce.boolean().optional(),
-  FEATURE_TRANSFER_ENABLED: z.coerce.boolean().optional(),
-  FEATURE_DEPOSIT_WITHDRAW_ENABLED: z.coerce.boolean().optional(),
-  FEATURE_WALLET_ENABLED: z.coerce.boolean().optional(),
-  FEATURE_PRIVATE_EXCHANGE_TRADING_API_ENABLED: z.coerce.boolean().optional(),
-  FEATURE_MARKET_ENABLED: z.coerce.boolean().optional(),
-  FEATURE_CHART_ENABLED: z.coerce.boolean().optional(),
-  FEATURE_NEWS_ENABLED: z.coerce.boolean().optional(),
-  FEATURE_READ_ONLY_PORTFOLIO_ENABLED: z.coerce.boolean().optional(),
-  FEATURE_KIMCHI_PREMIUM_ENABLED: z.coerce.boolean().optional(),
-  FEATURE_COMMUNITY_CONTENT_ENABLED: z.coerce.boolean().optional(),
+  APP_STORE_REVIEW_MODE: envBoolean(false),
+  FEATURE_ORDER_ENABLED: optionalEnvBoolean(),
+  FEATURE_TRADING_ENABLED: optionalEnvBoolean(),
+  FEATURE_TRANSFER_ENABLED: optionalEnvBoolean(),
+  FEATURE_DEPOSIT_WITHDRAW_ENABLED: optionalEnvBoolean(),
+  FEATURE_WALLET_ENABLED: optionalEnvBoolean(),
+  FEATURE_PRIVATE_EXCHANGE_TRADING_API_ENABLED: optionalEnvBoolean(),
+  FEATURE_MARKET_ENABLED: optionalEnvBoolean(),
+  FEATURE_CHART_ENABLED: optionalEnvBoolean(),
+  FEATURE_NEWS_ENABLED: optionalEnvBoolean(),
+  FEATURE_READ_ONLY_PORTFOLIO_ENABLED: optionalEnvBoolean(),
+  FEATURE_KIMCHI_PREMIUM_ENABLED: optionalEnvBoolean(),
+  FEATURE_COMMUNITY_CONTENT_ENABLED: optionalEnvBoolean(),
 }).superRefine((value, ctx) => {
   if (value.NODE_ENV !== 'production') {
     return;

@@ -130,6 +130,46 @@ function normalizeIntervalToContractTimeframe(value: string | undefined) {
   return mapped[normalized] ?? value;
 }
 
+function normalizeSparklineRequestProfile(params: {
+  timeframe?: string;
+  interval?: string;
+  limit: number;
+  requestedCount: number;
+}) {
+  const originalTimeframe = params.timeframe?.trim();
+  const originalInterval = params.interval?.trim();
+  const candidate = normalizeIntervalToContractTimeframe(originalTimeframe ?? originalInterval) ?? '1H';
+  const parsed = parseContractTimeframe(candidate);
+  if (!parsed) {
+    return { interval: null, limit: params.limit, normalizedRequest: null };
+  }
+
+  const isListSparkline24 = params.limit === 24 && params.requestedCount > 1;
+  const isBadListMinuteRequest = isListSparkline24 && parsed === '1M';
+  if (!isBadListMinuteRequest) {
+    return { interval: parsed, limit: params.limit, normalizedRequest: null };
+  }
+
+  return {
+    interval: '1H' as const,
+    limit: 24,
+    normalizedRequest: {
+      original: {
+        timeframe: originalTimeframe ?? null,
+        interval: originalInterval ?? null,
+        limit: params.limit,
+      },
+      canonical: {
+        timeframe: '1H' as const,
+        interval: '1H' as const,
+        limit: 24,
+        profile: 'listSparkline24' as const,
+      },
+      reason: 'list_sparkline24_canonical_profile',
+    },
+  };
+}
+
 function routePath(request: FastifyRequest) {
   return request.routeOptions?.url ?? request.url.split('?')[0];
 }
@@ -456,10 +496,11 @@ export async function marketRoutes(app: FastifyInstance) {
   });
 
   app.get('/sparkline', async (request, reply) => {
-    const { exchange, quoteCurrency, quote, symbols, marketIds, interval, limit, priority, debug, batchIndex, allowStale } = request.query as {
+    const { exchange, quoteCurrency, quote, symbols, marketIds, timeframe, interval, limit, priority, debug, batchIndex, allowStale } = request.query as {
       exchange?: string;
       quoteCurrency?: string;
       quote?: string;
+      timeframe?: string;
       symbols?: string;
       marketIds?: string;
       interval?: string;
@@ -504,24 +545,8 @@ export async function marketRoutes(app: FastifyInstance) {
           acceptedValues: ['KRW', 'BTC', 'USDT', 'ETH'],
         }, 'INVALID_QUOTE_CURRENCY'));
       }
-      const parsedInterval = parseContractTimeframe(normalizeIntervalToContractTimeframe(interval) ?? '1H');
-      if (!parsedInterval) {
-        return reply.status(400).send(createErrorResponse('interval must be 1M, 5M, 15M, 1H, 4H, 1D, or 1W', {
-          field: 'interval',
-          acceptedValues: ['1M', '5M', '15M', '1H', '4H', '1D', '1W'],
-        }, 'INVALID_TIMEFRAME'));
-      }
-      const parsedPriority = priority?.trim().toLowerCase();
-      if (parsedPriority && !['top', 'interactive'].includes(parsedPriority)) {
-        return reply.status(400).send(createErrorResponse('priority must be top or interactive', {
-          field: 'priority',
-          acceptedValues: ['top', 'interactive'],
-        }, 'INVALID_PRIORITY'));
-      }
-
       const requestedSymbols = (symbols ?? '').split(',').map((value) => value.trim()).filter(Boolean);
       const requestedMarketIds = (marketIds ?? '').split(',').map((value) => value.trim()).filter(Boolean);
-      const startedAt = Date.now();
       let parsedLimit = 24;
       try {
         parsedLimit = parseContractLimit(limit, 24, 60);
@@ -531,6 +556,29 @@ export async function marketRoutes(app: FastifyInstance) {
         }
         throw error;
       }
+      const profile = normalizeSparklineRequestProfile({
+        timeframe,
+        interval,
+        limit: parsedLimit,
+        requestedCount: (requestedMarketIds.length > 0 ? requestedMarketIds : requestedSymbols).length,
+      });
+      const parsedInterval = profile.interval;
+      if (!parsedInterval) {
+        return reply.status(400).send(createErrorResponse('interval must be 1M, 5M, 15M, 1H, 4H, 1D, or 1W', {
+          field: timeframe ? 'timeframe' : 'interval',
+          acceptedValues: ['1M', '5M', '15M', '1H', '4H', '1D', '1W'],
+        }, 'INVALID_TIMEFRAME'));
+      }
+      parsedLimit = profile.limit;
+      const parsedPriority = priority?.trim().toLowerCase();
+      if (parsedPriority && !['top', 'interactive'].includes(parsedPriority)) {
+        return reply.status(400).send(createErrorResponse('priority must be top or interactive', {
+          field: 'priority',
+          acceptedValues: ['top', 'interactive'],
+        }, 'INVALID_PRIORITY'));
+      }
+
+      const startedAt = Date.now();
       logger.info(
         {
           domain: 'market-contract',
@@ -540,10 +588,12 @@ export async function marketRoutes(app: FastifyInstance) {
           quoteCurrency: parsedQuoteCurrency,
           symbolsCount: requestedSymbols.length,
           marketIdsCount: requestedMarketIds.length,
+          requestedCount: (requestedMarketIds.length > 0 ? requestedMarketIds : requestedSymbols).length,
           interval: parsedInterval,
           limit: parsedLimit,
+          normalizedRequest: profile.normalizedRequest,
         },
-        `[MarketSparkline] request source=http exchange=${parsedExchange} quoteCurrency=${parsedQuoteCurrency} symbolsCount=${requestedSymbols.length} interval=${parsedInterval} limit=${parsedLimit}`,
+        `[MarketSparkline] request source=http exchange=${parsedExchange} quoteCurrency=${parsedQuoteCurrency} symbolsCount=${requestedSymbols.length} marketIdsCount=${requestedMarketIds.length} interval=${parsedInterval} limit=${parsedLimit}`,
       );
 
       try {
@@ -555,6 +605,7 @@ export async function marketRoutes(app: FastifyInstance) {
           interval: parsedInterval,
           limit: parsedLimit,
           priority: parsedPriority === 'top' || parsedPriority === 'interactive' ? parsedPriority : undefined,
+          normalizedRequest: profile.normalizedRequest,
         });
         const renderable = response.items.filter((item) => item.isRenderable).length;
         const refined = response.items.filter((item) => item.sparklineQuality === 'refined_mini' || item.sparklineQuality === 'prepared_cache').length;

@@ -3,6 +3,8 @@ import type { NormalizedTicker } from '../src/exchanges/ExchangeAdapter';
 import { logger } from '../src/utils/logger';
 import { BithumbProvider } from '../src/providers/exchanges/bithumb.provider';
 
+const ORIGINAL_ENV = { ...process.env };
+
 function createTicker(symbol: string, price: number): NormalizedTicker {
   return {
     symbol,
@@ -17,6 +19,7 @@ function createTicker(symbol: string, price: number): NormalizedTicker {
 
 describe('Ticker universe observability', () => {
   afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
     vi.restoreAllMocks();
   });
 
@@ -44,9 +47,21 @@ describe('Ticker universe observability', () => {
     expect(universeLog?.[0]).toMatchObject({
       exchange: 'bithumb',
       operation: 'tickers',
-      requestedSymbols: ['BTC', 'ETH', 'XRP'],
-      returnedSymbols: ['BTC', 'ETH'],
-      droppedSymbols: [{ symbol: 'XRP', reason: 'missing_upstream_ticker' }],
+      requestedSymbols: {
+        count: 3,
+        sample: ['BTC', 'ETH', 'XRP'],
+        omittedCount: 0,
+      },
+      returnedSymbols: {
+        count: 2,
+        sample: ['BTC', 'ETH'],
+        omittedCount: 0,
+      },
+      droppedSymbols: {
+        count: 1,
+        sample: [{ symbol: 'XRP', reason: 'missing_upstream_ticker' }],
+        omittedCount: 0,
+      },
       registrySymbolCount: expect.any(Number),
       marketSymbolCount: 3,
       websocketTickerSymbolCount: 3,
@@ -80,6 +95,32 @@ describe('Ticker universe observability', () => {
         capabilityExcludedSymbols: {
           orderbook: [{ symbol: 'XRP', reason: 'capability not supported' }],
         },
+      },
+    });
+  });
+
+  it('logs full market universe arrays only when verbose symbol logs are enabled', async () => {
+    process.env.MARKET_PROVIDER_VERBOSE_SYMBOL_LOGS = 'true';
+    const provider = new BithumbProvider();
+    vi.spyOn(provider, 'listMarkets').mockResolvedValue([
+      { symbol: 'BTC', market: 'BTC/KRW', rawSymbol: 'KRW-BTC' },
+      { symbol: 'ETH', market: 'ETH/KRW', rawSymbol: 'KRW-ETH' },
+    ]);
+    vi.spyOn((provider as any).adapter, 'fetchTickers').mockResolvedValue([
+      createTicker('BTC', 100),
+    ]);
+
+    const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => logger);
+
+    await provider.getTickerSnapshot(['BTC', 'ETH']);
+
+    const universeLog = infoSpy.mock.calls.find(([, message]) => message === 'Resolved exchange market universe');
+    expect(universeLog?.[0]).toMatchObject({
+      requestedSymbols: ['BTC', 'ETH'],
+      returnedSymbols: ['BTC'],
+      droppedSymbols: [{ symbol: 'ETH', reason: 'missing_upstream_ticker' }],
+      universe: {
+        marketSymbols: ['BTC', 'ETH'],
       },
     });
   });

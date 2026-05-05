@@ -74,7 +74,7 @@ export function initializeFcm() {
 
   logger.info(
     { domain: 'fcm', enabled: true, dryRun: env.FCM_DRY_RUN, clientEmailMasked: maskedClientEmail() },
-    '[FCM] initialized enabled=true',
+    `[FCM] initialized enabled=true dryRun=${env.FCM_DRY_RUN}`,
   );
 }
 

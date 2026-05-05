@@ -4,7 +4,7 @@ import { ExchangeCapabilityError } from '../../core/exchange/errors';
 import { EXCHANGE_METADATA } from '../../core/exchange/exchange.metadata';
 import { RestClient } from '../../core/exchange/rest.client';
 import type { ExchangeCapability, ExchangeId, ExchangeMetadata, MarketCapabilitySnapshot } from '../../core/exchange/exchange.types';
-import { logger, summarizeListForLog, truncateForLog } from '../../utils/logger';
+import { logger, summarizeListForLog } from '../../utils/logger';
 
 type CachedProviderResponse<T> = {
   value: T;
@@ -41,6 +41,10 @@ function summarizeDroppedReasons(droppedSymbols: Array<{ symbol: string; reason:
 
 function verboseMarketUniverseLogsEnabled() {
   return process.env.MARKET_PROVIDER_VERBOSE_SYMBOL_LOGS === 'true';
+}
+
+function listForProviderLog<T>(items: readonly T[] | undefined, verbose: boolean) {
+  return verbose ? [...(items ?? [])] : summarizeListForLog(items, 10);
 }
 
 function summarizeCapabilitySymbols(capabilitySymbols: MarketUniverseSnapshot['capabilitySymbols'] | undefined) {
@@ -246,9 +250,9 @@ export abstract class BaseExchangeProvider {
         upstreamStatus: extractUpstreamStatus(error),
         rateLimited: isRateLimitError(error),
         responseUnavailable: value === undefined,
-        requestedSymbols: truncateForLog(params.symbolDiff?.requestedSymbols),
-        resolvedSymbols: truncateForLog(resolvedSymbols),
-        droppedSymbols: truncateForLog(droppedSymbols),
+        requestedSymbols: listForProviderLog(params.symbolDiff?.requestedSymbols, verboseMarketUniverseLogsEnabled()),
+        resolvedSymbols: listForProviderLog(resolvedSymbols, verboseMarketUniverseLogsEnabled()),
+        droppedSymbols: listForProviderLog(droppedSymbols, verboseMarketUniverseLogsEnabled()),
         droppedReasonsSummary: summarizeDroppedReasons(droppedSymbols),
         sourceOfTruth: 'provider_market_universe',
         totalAvailableCount,
@@ -301,10 +305,10 @@ export abstract class BaseExchangeProvider {
         marketSymbolCount: params.universe.marketSymbols.length,
         websocketTickerSymbolCount: websocketTickerSymbols.length,
         capabilitySymbolCounts: summarizeCapabilitySymbols(params.universe.capabilitySymbols),
-        requestedSymbols: truncateForLog(requestedSymbols),
-        resolvedSymbols: truncateForLog(resolvedSymbols),
-        returnedSymbols: truncateForLog(params.returnedSymbols),
-        droppedSymbols: truncateForLog(droppedSymbols),
+        requestedSymbols: listForProviderLog(requestedSymbols, verboseUniverseLogs),
+        resolvedSymbols: listForProviderLog(resolvedSymbols, verboseUniverseLogs),
+        returnedSymbols: listForProviderLog(params.returnedSymbols, verboseUniverseLogs),
+        droppedSymbols: listForProviderLog(droppedSymbols, verboseUniverseLogs),
         droppedReasonsSummary: summarizeDroppedReasons(droppedSymbols),
         sourceOfTruth: 'provider_market_universe',
         appliedLimit: params.appliedLimit ?? null,
