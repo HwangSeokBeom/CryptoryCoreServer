@@ -279,21 +279,22 @@ Response:
         "timestamp": 1777809600000,
         "sourceTimestamp": 1777809600000,
         "stale": false,
-        "sparkline": [0.0296, 0.0297, 0.0298],
-        "sparklinePoints": [0.0296, 0.0297, 0.0298],
-        "sparklineSource": "ticker_ring_buffer",
-        "sparklineQuality": "lowInformation",
-        "sparklinePointCount": 3,
+        "sparkline": [],
+        "sparklinePoints": [],
+        "sparklineSource": "unavailable",
+        "sparklineQuality": "insufficient_points",
+        "sparklinePointCount": 0,
         "sparklineIsDerived": false,
         "sparklineUpdatedAt": "2026-05-04T12:00:00.000Z",
-        "sparklineUnavailableReason": null,
-        "sparklineLowInformationReason": "insufficient_history_points",
+        "sparklineUnavailableReason": "insufficient_sparkline_points",
+        "sparklineLowInformationReason": null,
         "graphDisplayAllowed": false,
-        "previewSparkline": [0.0296, 0.0297, 0.0298],
-        "previewGraphQuality": "provider_preview",
+        "lowConfidence": false,
+        "previewSparkline": [],
+        "previewGraphQuality": "unavailable",
         "previewGraphIsDerived": false,
-        "previewGraphPointCount": 3,
-        "previewGraphRealSeries": true,
+        "previewGraphPointCount": 0,
+        "previewGraphRealSeries": false,
         "previewGraphDisplayAllowed": false
       }
     ],
@@ -345,7 +346,7 @@ Response:
 `quoteCurrency=BTC` returns only BTC quote markets. Upbit `KRW-BTC` is the Bitcoin/KRW market and must not appear in an Upbit BTC quote response. The server applies `TICKER_CACHE_TTL_SECONDS`.
 `/market/tickers` is ticker-first: it never calls all-symbol trades/candles/history APIs to build first-paint rows.
 Ticker rows include both canonical fields (`currentPrice`, `changeRate24h`, `accTradePrice24h`) and compatibility aliases (`exchangeSymbol`, `displayName`, `price`, `current`, `percent`, `volume24h`, `timestamp`, `sourceTimestamp`, `stale`) so old and new iOS mappers can render rows without dropping them.
-Ticker list sparklines target 24 points and are attached before pagination responses are returned. Source priority is provider candle points embedded by the adapter, cached candle/sparkline rows, ticker ring buffer (`exchange|quoteCurrency|canonicalMarketId`, retained up to 240 observations), stale previous snapshot, then explicit `unavailable`. The list path does not fabricate linear 24-point trends from current price or 24h change; if observed history has only 2-11 points or repeated low-variation samples, it returns `sparklineQuality=lowInformation` with `sparklineLowInformationReason`. If there are 0-1 usable points it returns `sparklineQuality=unavailable`, `sparklinePoints=[]`, and `sparklineUnavailableReason`.
+Ticker list sparklines target 24 points and are attached before pagination responses are returned. Source priority is provider candle points embedded by the adapter, cached candle/sparkline rows, ticker ring buffer (`exchange|quoteCurrency|canonicalMarketId`, retained up to 240 observations), stale previous snapshot, then explicit `unavailable`. The list path does not fabricate linear 24-point trends from current price or 24h change. If a ticker ring buffer has fewer than 12 points, the response is normalized to `sparkline=[]`, `sparklinePoints=[]`, `sparklineSource=unavailable`, `sparklineQuality=insufficient_points`, and `sparklineUnavailableReason=insufficient_sparkline_points`. For real series, fewer than 12 points are not displayable, 12-23 points are allowed with `lowConfidence=true`, and 24 or more points are normal quality.
 
 Unsupported quote example:
 

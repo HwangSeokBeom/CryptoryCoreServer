@@ -515,7 +515,7 @@ describe('market REST contract routes', () => {
     await app.close();
   }, 15000);
 
-  it('GET /market/tickers uses observed ring buffer points as lowInformation while warming', async () => {
+  it('GET /market/tickers hides short ring buffer points while warming', async () => {
     let price = 100;
     mockContractFetchWithTicker({
       get trade_price() {
@@ -536,17 +536,19 @@ describe('market REST contract routes', () => {
     const ticker = JSON.parse(response.body).data.items[0];
 
     expect(response.statusCode).toBe(200);
-    expect(ticker.sparklineSource).toBe('ticker_ring_buffer');
-    expect(ticker.sparklineQuality).toBe('lowInformation');
-    expect(ticker.sparklinePointCount).toBe(2);
-    expect(ticker.sparklineLowInformationReason).toBe('insufficient_history');
-    expect(ticker.sparklineUnavailableReason).toBeNull();
-    expect(ticker.sparkline).toHaveLength(2);
-    expect(new Set(ticker.sparkline).size).toBe(2);
+    expect(ticker.sparklineSource).toBe('unavailable');
+    expect(ticker.sparklineQuality).toBe('insufficient_points');
+    expect(ticker.sparklinePointCount).toBe(0);
+    expect(ticker.sparklineLowInformationReason).toBeNull();
+    expect(ticker.sparklineUnavailableReason).toBe('insufficient_sparkline_points');
+    expect(ticker.graphDisplayAllowed).toBe(false);
+    expect(ticker.sparkline).toHaveLength(0);
+    expect(ticker.sparklinePoints).toHaveLength(0);
     expect(JSON.parse(response.body).data.meta.sparklineSummary).toMatchObject({
       targetPointCount: 24,
-      lowInformation: 1,
+      lowInformation: 0,
       fallbackListSparkline: 0,
+      unavailable: 1,
       missing: 0,
       warmup: true,
     });
@@ -583,7 +585,11 @@ describe('market REST contract routes', () => {
     }));
     expect(second.items[0].canonicalMarketId).not.toBe(first.items[0].canonicalMarketId);
     expect(Array.isArray(second.items[0].sparklinePoints)).toBe(true);
-    expect(second.items[0].sparklinePointCount >= 2 || second.items[0].sparklineUnavailableReason).toBeTruthy();
+    expect(
+      second.items[0].sparklinePointCount >= 2
+        || second.items[0].sparklineUnavailableReason
+        || second.items[0].sparklineQuality === 'insufficient_points',
+    ).toBeTruthy();
 
     await app.close();
   }, 15000);

@@ -161,16 +161,16 @@ describe('market identity and sparkline contract', () => {
       marketId: 'KRW-USDE',
       canonicalMarketId: 'KRW-USDE',
       symbol: 'USDE',
-      quality: 'lowInformation',
-      pointCount: 2,
-      unavailableReason: null,
+      quality: 'unavailable',
+      pointCount: 0,
+      unavailableReason: 'insufficient_provider_points',
     });
     expect(sparkline.missing).toEqual(expect.arrayContaining([
       expect.objectContaining({ marketId: 'KRW-XXX', reason: 'market_not_found' }),
     ]));
   });
 
-  it('classifies repeated Korbit 9 point ticker ring buffers as lowInformation, not fallbackListSparkline', async () => {
+  it('normalizes repeated Korbit 9 point ticker ring buffers to insufficient_points', async () => {
     process.env = { ...ORIGINAL_ENV, ...BASE_ENV };
     vi.resetModules();
     let price = 100;
@@ -203,18 +203,20 @@ describe('market identity and sparkline contract', () => {
     expect(ticker).toMatchObject({
       exchange: 'korbit',
       canonicalMarketId: 'KRW-AAVE',
-      sparklineSource: 'ticker_ring_buffer',
-      sparklineQuality: 'lowInformation',
-      sparklinePointCount: 9,
-      sparklineLowInformationReason: 'insufficient_history',
-      sparklineUnavailableReason: null,
+      sparklineSource: 'unavailable',
+      sparklineQuality: 'insufficient_points',
+      sparklinePointCount: 0,
+      sparklineLowInformationReason: null,
+      sparklineUnavailableReason: 'insufficient_sparkline_points',
       graphDisplayAllowed: false,
     });
+    expect(ticker.sparkline).toHaveLength(0);
+    expect(ticker.sparklinePoints).toHaveLength(0);
     expect(response.meta.sparklineSummary).toMatchObject({
       targetPointCount: 24,
       fallbackListSparkline: 0,
-      lowInformation: 1,
-      unavailable: 0,
+      lowInformation: 0,
+      unavailable: 1,
       missing: 0,
       warmup: true,
     });
@@ -314,16 +316,18 @@ describe('market identity and sparkline contract', () => {
     const third: any = await getMarketTickerList({ exchange: 'korbit', quoteCurrency: 'KRW', limit: 1 });
 
     expect(second.items[0]).toMatchObject({
-      sparklineQuality: 'lowInformation',
-      sparklinePointCount: 2,
-      sparklineLowInformationReason: 'insufficient_history',
+      sparklineQuality: 'insufficient_points',
+      sparklinePointCount: 0,
+      sparklineLowInformationReason: null,
+      sparklineUnavailableReason: 'insufficient_sparkline_points',
       sparklinePointsHash: expect.any(String),
-      sparklineSourceVersion: expect.any(String),
+      sparklineSourceVersion: null,
       sparklineTimeframe: '1H',
     });
-    expect(third.items[0].sparklinePointCount).toBe(3);
-    expect(third.items[0].sparklinePointsHash).not.toBe(second.items[0].sparklinePointsHash);
-    expect(third.items[0].sparklineSourceVersion).not.toBe(second.items[0].sparklineSourceVersion);
+    expect(third.items[0].sparklinePointCount).toBe(0);
+    expect(third.items[0].sparklineQuality).toBe('insufficient_points');
+    expect(third.items[0].sparklinePointsHash).toBe(second.items[0].sparklinePointsHash);
+    expect(third.items[0].sparklineSourceVersion).toBeNull();
   });
 
   it('marks embedded 24 provider points as fresh providerCandle24 with graph version fields', async () => {
