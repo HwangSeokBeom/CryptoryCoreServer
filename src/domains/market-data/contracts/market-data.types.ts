@@ -9,14 +9,44 @@ export type TickerSort = 'volume' | 'changeRate' | 'price' | 'name';
 export type SortOrder = 'asc' | 'desc';
 export type ExchangeContractStatus = 'active' | 'unsupported' | 'degraded' | 'error';
 export type SparklineQuality =
+  | 'providerCandle24'
+  | 'listSparkline24'
+  | 'staleListSparkline24'
+  | 'fallbackListSparkline'
+  | 'lowInformation'
+  | 'liveDetailed'
+  | 'staleRealSeries'
+  | 'derivedPreview'
   | 'placeholder'
+  | 'unavailable'
   | 'flat_current'
+  | 'insufficient_variation'
   | 'derived_preview'
+  | 'derived_interpolated'
+  | 'live_buffer_partial'
+  | 'cache_partial_real'
+  | 'cache_stale_real'
+  | 'provider_partial_real'
   | 'provider_mini'
+  | 'provider_mini_real'
+  | 'provider_candle_1m'
   | 'prepared_cache'
+  | 'prepared_cache_real'
   | 'refined_mini'
+  | 'refined_mini_real'
   | 'selected_chart';
-export type TickerSparklineSource = 'provider' | 'cache' | 'derived_change24h' | 'flat_current' | 'unavailable';
+export type TickerSparklineSource =
+  | 'provider_candle'
+  | 'candle_cache'
+  | 'sparkline_cache'
+  | 'ticker_ring_buffer'
+  | 'previous_snapshot'
+  | 'fallback_backfill'
+  | 'provider'
+  | 'cache'
+  | 'derived_change24h'
+  | 'flat_current'
+  | 'unavailable';
 
 export type ExchangeQuoteContract = {
   exchange: ContractExchange;
@@ -54,6 +84,8 @@ export type MarketTickerItem = {
   exchangeName: string;
   market: string;
   marketId: string;
+  canonicalMarketId: string;
+  originalMarketId: string;
   exchangeSymbol: string;
   rawSymbol: string;
   symbol: string;
@@ -94,6 +126,25 @@ export type MarketTickerItem = {
   sparklineQuality: SparklineQuality;
   sparklinePointCount: number;
   sparklineIsDerived: boolean;
+  sparklineUpdatedAt: string | null;
+  sparklineSourceVersion: string | null;
+  sparklinePointsHash: string;
+  sparklineTimeframe: ContractTimeframe;
+  sparklineSourceUpdatedAt: string | null;
+  sparklineUniquePriceCount: number;
+  sparklineUnavailableReason?: string | null;
+  sparklineLowInformationReason?: string | null;
+  graphDisplayAllowed: boolean;
+  previewSparkline?: number[];
+  previewSparklinePoints?: Array<{ price: number; value: number; timestamp: number }>;
+  previewSparklineQuality?: SparklineQuality;
+  previewSparklinePointCount?: number;
+  previewSparklineIsDerived?: boolean;
+  previewGraphQuality?: 'derived_preview' | 'linear_preview' | 'provider_preview' | 'unavailable';
+  previewGraphIsDerived?: boolean;
+  previewGraphPointCount?: number;
+  previewGraphRealSeries?: boolean;
+  previewGraphDisplayAllowed?: boolean;
 };
 
 export type CurrentPriceSnapshot = {
@@ -122,11 +173,15 @@ export type TickerListParams = {
   sort?: TickerSort;
   order?: SortOrder;
   limit?: number;
+  cursor?: string;
+  requestId?: string;
 };
 
 export type MarketTickerDiagnostics = {
   requestedExchange: ContractExchange;
   requestedQuoteCurrency: ContractQuoteCurrency;
+  supportedQuotes: ContractQuoteCurrency[];
+  defaultQuoteCurrency: ContractQuoteCurrency;
   supported: boolean;
   unsupported: boolean;
   providerStatus: ExchangeContractStatus;
@@ -139,6 +194,53 @@ export type MarketTickerDiagnostics = {
   zeroVolumeCount: number;
   staleCount: number;
   reason: string | null;
+  previewGraphIsDerived?: boolean;
+  previewGraphDerivedCount?: number;
+  previewGraphRealSeries?: boolean;
+  previewGraphDisplayAllowed?: boolean;
+};
+
+export type MarketTickerResponseMeta = {
+  exchange: ContractExchange;
+  quoteCurrency: ContractQuoteCurrency;
+  requestId: string;
+  generationHint: string;
+  requestedLimit: number;
+  returnedCount: number;
+  nextCursor: string | null;
+  hasNext: boolean;
+  serverReceivedAt: string;
+  serverRespondedAt: string;
+  sparklineTargetPointCount: number;
+  sparklineAttachedCount: number;
+  sparklineMissingCount: number;
+  sparklineUnavailableCount: number;
+  sparklineLowInformationCount: number;
+  sparklineSummary: {
+    targetPointCount: 24;
+    providerCandle24: number;
+    listSparkline24: number;
+    staleListSparkline24: number;
+    fallbackListSparkline: number;
+    lowInformation: number;
+    unavailable: number;
+    missing: number;
+    avgPointCount: number;
+    updatedWithin30s: number;
+    updatedWithin60s: number;
+    staleOver120s: number;
+    p50PointCount: number;
+    p95PointCount: number;
+    attachMs: number;
+    warmup: boolean;
+  };
+  supportedQuotes: ContractQuoteCurrency[];
+  defaultQuoteCurrency: ContractQuoteCurrency;
+  timing: {
+    totalMs: number;
+    tickerFetchMs: number;
+    sparklineAttachMs: number;
+  };
 };
 
 export interface ExchangeMarketDataAdapter {

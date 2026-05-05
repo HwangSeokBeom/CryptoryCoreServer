@@ -41,15 +41,21 @@ function mockContractFetch() {
       return new Response(JSON.stringify([
         { market: 'KRW-BTC', korean_name: '비트코인', english_name: 'Bitcoin' },
         { market: 'KRW-ETH', korean_name: '이더리움', english_name: 'Ethereum' },
+        { market: 'KRW-BIO', korean_name: '바이오', english_name: 'Bio Protocol' },
         { market: 'BTC-ETH', korean_name: '이더리움', english_name: 'Ethereum' },
       ]), { status: 200 });
     }
     if (url.includes('/v1/ticker')) {
       const request = new URL(url);
       const markets = request.searchParams.get('markets')?.split(',') ?? [];
+      const timeStep = Math.max(0, Math.floor((Date.now() - 1777809600000) / 60_000));
       return new Response(JSON.stringify(markets.map((market, index) => ({
         market,
-        trade_price: market.startsWith('BTC-') ? 0.03 + index * 0.001 : 100000000 + index * 100000,
+        trade_price: market.startsWith('BTC-')
+          ? 0.03 + index * 0.001 + (timeStep % 7) * 0.00001
+          : market === 'KRW-BIO'
+            ? 100000000 + index * 100000 + ((timeStep % 6) - 2) * 75000 + (timeStep % 3 === 0 ? 180000 : 0)
+            : 100000000 + index * 100000 + ((timeStep % 5) - 2) * 50000,
         signed_change_rate: 0.0123,
         signed_change_price: market.startsWith('BTC-') ? 0.0001 : 1230000,
         acc_trade_price_24h: 987654321000 - index,
@@ -110,6 +116,7 @@ function mockExpandedMarketContractFetch() {
       return new Response(JSON.stringify([
         { market: 'KRW-BTC', korean_name: '비트코인', english_name: 'Bitcoin' },
         { market: 'KRW-ETH', korean_name: '이더리움', english_name: 'Ethereum' },
+        { market: 'KRW-BIO', korean_name: '바이오', english_name: 'Bio Protocol' },
         { market: 'BTC-ETH', korean_name: '이더리움', english_name: 'Ethereum' },
         { market: 'BTC-XRP', korean_name: '리플', english_name: 'XRP' },
       ]), { status: 200 });
@@ -117,9 +124,14 @@ function mockExpandedMarketContractFetch() {
     if (url.includes('/v1/ticker')) {
       const request = new URL(url);
       const markets = request.searchParams.get('markets')?.split(',') ?? [];
+      const timeStep = Math.max(0, Math.floor((Date.now() - 1777809600000) / 60_000));
       return new Response(JSON.stringify(markets.map((market, index) => ({
         market,
-        trade_price: market.startsWith('BTC-') ? 0.03 + index * 0.001 : 100000000 + index * 100000,
+        trade_price: market.startsWith('BTC-')
+          ? 0.03 + index * 0.001 + (timeStep % 7) * 0.00001
+          : market === 'KRW-BIO'
+            ? 100000000 + index * 100000 + ((timeStep % 6) - 2) * 75000 + (timeStep % 3 === 0 ? 180000 : 0)
+            : 100000000 + index * 100000 + ((timeStep % 5) - 2) * 50000,
         signed_change_rate: 0.01,
         signed_change_price: market.startsWith('BTC-') ? 0.0001 : 1000000,
         acc_trade_price_24h: 1000 - index,
@@ -138,10 +150,11 @@ function mockExpandedMarketContractFetch() {
       }), { status: 200 });
     }
     if (url.includes('/public/v2/ticker_new/KRW')) {
+      const timeStep = Math.max(0, Math.floor((Date.now() - 1777809600000) / 60_000));
       return new Response(JSON.stringify({
         tickers: [
-          { quote_currency: 'krw', target_currency: 'btc', timestamp: Date.now(), high: '101', low: '90', first: '95', last: '100', quote_volume: '1000', target_volume: '10', yesterday_last: '95' },
-          { quote_currency: 'krw', target_currency: 'eth', timestamp: Date.now(), high: '51', low: '40', first: '45', last: '50', quote_volume: '900', target_volume: '20', yesterday_last: '45' },
+          { quote_currency: 'krw', target_currency: 'btc', timestamp: Date.now(), high: '101', low: '90', first: '95', last: String(100 + ((timeStep % 5) - 2) * 0.7), quote_volume: '1000', target_volume: '10', yesterday_last: '95' },
+          { quote_currency: 'krw', target_currency: 'eth', timestamp: Date.now(), high: '51', low: '40', first: '45', last: String(50 + ((timeStep % 4) - 1) * 0.4), quote_volume: '900', target_volume: '20', yesterday_last: '45' },
         ],
       }), { status: 200 });
     }
@@ -399,18 +412,33 @@ describe('market REST contract routes', () => {
       sparklineQuality: expect.any(String),
       sparklinePointCount: expect.any(Number),
       sparklineIsDerived: expect.any(Boolean),
+      graphDisplayAllowed: expect.any(Boolean),
+      previewGraphQuality: expect.any(String),
+      previewGraphIsDerived: expect.any(Boolean),
+      previewGraphPointCount: expect.any(Number),
+      previewGraphRealSeries: false,
+      previewGraphDisplayAllowed: expect.any(Boolean),
       previousPrice24h: expect.any(Number),
     });
-    expect(body.data.items[0].sparkline).toHaveLength(6);
-    expect(body.data.items[0].sparklinePoints).toHaveLength(6);
-    expect(body.data.items[0].sparklineSource).toBe('derived_change24h');
-    expect(body.data.items[0].sparklineQuality).toBe('derived_preview');
-    expect(body.data.items[0].sparklineIsDerived).toBe(true);
+    expect(body.data.meta).toMatchObject({
+      sparklineTargetPointCount: 24,
+      sparklineMissingCount: 0,
+      sparklineUnavailableCount: expect.any(Number),
+      nextCursor: null,
+      hasNext: false,
+    });
+    expect(body.data.meta.sparklineAttachedCount + body.data.meta.sparklineUnavailableCount).toBe(body.data.items.length);
+    expect(body.data.items[0].sparklinePoints.every((point: unknown) => typeof point === 'number')).toBe(true);
+    if (body.data.items[0].sparklinePointCount < 2) {
+      expect(body.data.items[0].sparklineSource).toBe('unavailable');
+      expect(body.data.items[0].sparklineUnavailableReason).toEqual(expect.any(String));
+      expect(body.data.items[0].graphDisplayAllowed).toBe(false);
+    }
 
     await app.close();
   }, 15000);
 
-  it('GET /market/tickers derives a 6 point sparkline from currentPrice and changeRate24h', async () => {
+  it('GET /market/tickers does not fake a 24 point sparkline from currentPrice and changeRate24h', async () => {
     mockContractFetchWithTicker({
       trade_price: 110,
       signed_change_rate: 0.1,
@@ -427,20 +455,23 @@ describe('market REST contract routes', () => {
     const ticker = body.data.items[0];
 
     expect(response.statusCode).toBe(200);
-    expect(ticker.sparklineSource).toBe('derived_change24h');
-    expect(ticker.sparklineQuality).toBe('derived_preview');
-    expect(ticker.sparklineIsDerived).toBe(true);
-    expect(ticker.sparkline).toHaveLength(6);
-    expect(ticker.sparklinePoints).toHaveLength(6);
-    expect(ticker.sparklinePointCount).toBe(6);
+    expect(ticker.sparklineSource).toBe('unavailable');
+    expect(ticker.sparklineQuality).toBe('unavailable');
+    expect(ticker.sparklineIsDerived).toBe(false);
+    expect(ticker.previewGraphIsDerived).toBe(false);
+    expect(ticker.previewGraphRealSeries).toBe(false);
+    expect(ticker.graphDisplayAllowed).toBe(false);
+    expect(ticker.sparkline).toHaveLength(0);
+    expect(ticker.sparklinePoints).toHaveLength(0);
+    expect(ticker.sparklinePoints).toEqual(ticker.sparkline);
+    expect(ticker.sparklinePointCount).toBe(0);
+    expect(ticker.sparklineUnavailableReason).toBe('provider_candle_unavailable');
     expect(ticker.previousPrice24h).toBeCloseTo(100);
-    expect(ticker.sparkline[0]).toBeCloseTo(100);
-    expect(ticker.sparkline[5]).toBe(110);
 
     await app.close();
   }, 15000);
 
-  it('GET /market/tickers returns flat_current sparkline when only currentPrice exists', async () => {
+  it('GET /market/tickers returns unavailable instead of flat current-price backfill when only currentPrice exists', async () => {
     mockContractFetchWithTicker({
       trade_price: 100,
       acc_trade_price_24h: 1000,
@@ -456,12 +487,89 @@ describe('market REST contract routes', () => {
     const ticker = body.data.items[0];
 
     expect(response.statusCode).toBe(200);
-    expect(ticker.sparklineSource).toBe('flat_current');
-    expect(ticker.sparklineQuality).toBe('flat_current');
+    expect(ticker.sparklineSource).toBe('unavailable');
+    expect(ticker.sparklineQuality).toBe('unavailable');
     expect(ticker.sparklineIsDerived).toBe(false);
-    expect(ticker.sparkline).toEqual([100, 100, 100, 100, 100, 100]);
-    expect(ticker.sparklinePointCount).toBe(6);
+    expect(ticker.previewGraphIsDerived).toBe(false);
+    expect(ticker.previewGraphRealSeries).toBe(false);
+    expect(ticker.graphDisplayAllowed).toBe(false);
+    expect(ticker.sparkline).toHaveLength(0);
+    expect(ticker.sparklinePointCount).toBe(0);
+    expect(ticker.sparklineUnavailableReason).toBe('provider_candle_unavailable');
     expect(ticker.previousPrice24h).toBeNull();
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/tickers uses observed ring buffer points as lowInformation while warming', async () => {
+    let price = 100;
+    mockContractFetchWithTicker({
+      get trade_price() {
+        price += 1;
+        return price;
+      },
+      signed_change_rate: 0.01,
+      acc_trade_price_24h: 1000,
+      acc_trade_volume_24h: 10,
+      high_price: 110,
+      low_price: 90,
+      trade_timestamp: 1777809600000,
+    });
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1' });
+    const response = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1' });
+    const ticker = JSON.parse(response.body).data.items[0];
+
+    expect(response.statusCode).toBe(200);
+    expect(ticker.sparklineSource).toBe('ticker_ring_buffer');
+    expect(ticker.sparklineQuality).toBe('lowInformation');
+    expect(ticker.sparklinePointCount).toBe(2);
+    expect(ticker.sparklineLowInformationReason).toBe('insufficient_history');
+    expect(ticker.sparklineUnavailableReason).toBeNull();
+    expect(ticker.sparkline).toHaveLength(2);
+    expect(new Set(ticker.sparkline).size).toBe(2);
+    expect(JSON.parse(response.body).data.meta.sparklineSummary).toMatchObject({
+      targetPointCount: 24,
+      lowInformation: 1,
+      fallbackListSparkline: 0,
+      missing: 0,
+      warmup: true,
+    });
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/tickers returns cursor pagination metadata and next page sparklines', async () => {
+    mockContractFetch();
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    const firstResponse = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1&sortKey=volume24h&sortDirection=desc' });
+    const first = JSON.parse(firstResponse.body).data;
+    const nextCursor = first.meta.nextCursor;
+    const secondResponse = await app.inject({ method: 'GET', url: `/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1&sortKey=volume24h&sortDirection=desc&cursor=${encodeURIComponent(nextCursor)}` });
+    const second = JSON.parse(secondResponse.body).data;
+
+    expect(firstResponse.statusCode).toBe(200);
+    expect(secondResponse.statusCode).toBe(200);
+    expect(first.meta).toMatchObject({
+      returnedCount: 1,
+      hasNext: true,
+      nextCursor: expect.any(String),
+      sparklineTargetPointCount: 24,
+      sparklineSummary: expect.objectContaining({
+        targetPointCount: 24,
+        missing: 0,
+      }),
+    });
+    expect(second.meta.returnedCount).toBe(1);
+    expect(second.meta.sparklineSummary).toEqual(expect.objectContaining({
+      targetPointCount: 24,
+      missing: 0,
+    }));
+    expect(second.items[0].canonicalMarketId).not.toBe(first.items[0].canonicalMarketId);
+    expect(Array.isArray(second.items[0].sparklinePoints)).toBe(true);
+    expect(second.items[0].sparklinePointCount >= 2 || second.items[0].sparklineUnavailableReason).toBeTruthy();
 
     await app.close();
   }, 15000);
@@ -483,11 +591,15 @@ describe('market REST contract routes', () => {
     expect(response.statusCode).toBe(200);
     expect(ticker.currentPrice).toBeNull();
     expect(ticker.sparklineSource).toBe('unavailable');
-    expect(ticker.sparklineQuality).toBe('placeholder');
+    expect(ticker.sparklineQuality).toBe('unavailable');
     expect(ticker.sparklineIsDerived).toBe(false);
     expect(ticker.sparkline).toEqual([]);
     expect(ticker.sparklinePoints).toEqual([]);
     expect(ticker.sparklinePointCount).toBe(0);
+    expect(ticker.sparklineUnavailableReason).toBeTruthy();
+    expect(ticker.previewGraphQuality).toBe('unavailable');
+    expect(ticker.previewGraphRealSeries).toBe(false);
+    expect(ticker.graphDisplayAllowed).toBe(false);
 
     await app.close();
   }, 15000);
@@ -541,7 +653,7 @@ describe('market REST contract routes', () => {
       quoteCurrency: 'KRW',
       interval: '1H',
       unsupportedSymbols: [],
-      unavailableSymbols: [],
+      unavailableSymbols: ['BTC', 'ETH'],
     });
     expect(body.data.items).toHaveLength(2);
     expect(body.data.items[0]).toMatchObject({
@@ -549,14 +661,16 @@ describe('market REST contract routes', () => {
       marketId: 'KRW-BTC',
       sparkline: expect.any(Array),
       sparklinePoints: expect.any(Array),
-      sparklineSource: 'derived_change24h',
-      sparklineQuality: 'derived_preview',
-      isRenderable: true,
-      isDerived: true,
-      pointCount: 6,
-      sparklinePointCount: 6,
+      sparklineSource: 'unavailable',
+      sparklineQuality: 'unavailable',
+      isRenderable: false,
+      isDerived: false,
+      realSeries: false,
+      graphDisplayAllowed: false,
+      pointCount: 0,
+      sparklinePointCount: 0,
       stale: false,
-      updatedAt: expect.any(Number),
+      updatedAt: null,
     });
 
     await app.close();
@@ -576,7 +690,7 @@ describe('market REST contract routes', () => {
     await app.close();
   }, 15000);
 
-  it('GET /market/sparkline returns refined_mini from prepared ticker ring buffer', async () => {
+  it('GET /market/sparkline returns prepared_cache from prepared ticker ring buffer', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1777809600000);
     let tickerCall = 0;
@@ -591,7 +705,7 @@ describe('market REST contract routes', () => {
         tickerCall += 1;
         return new Response(JSON.stringify([{
           market: 'KRW-BTC',
-          trade_price: 100 + tickerCall,
+          trade_price: 100 + (tickerCall % 5) * 1.5 + (tickerCall % 3 === 0 ? 2.25 : 0),
           signed_change_rate: 0.01,
           signed_change_price: 1,
           acc_trade_price_24h: 1000,
@@ -622,15 +736,722 @@ describe('market REST contract routes', () => {
     expect(item.symbol).toBe('BTC');
     expect(item.marketId).toBe('KRW-BTC');
     expect(item.sparklineSource).toBe('prepared_cache');
-    expect(item.sparklineQuality).toBe('refined_mini');
+    expect(item.sparklineQuality).toBe('liveDetailed');
     expect(item.isDerived).toBe(false);
+    expect(item.realSeries).toBe(true);
+    expect(item.graphDisplayAllowed).toBe(true);
     expect(item.sparklinePointCount).toBeGreaterThanOrEqual(20);
     expect(item.sparkline).toHaveLength(item.sparklinePointCount);
+    expect(body.data.diagnostics.heavyPathUsed).toBe(false);
 
     await app.close();
   }, 15000);
 
-  it('GET /market/sparkline falls back to derived_preview when prepared points are insufficient', async () => {
+  it('GET /market/sparkline returns 60 BIO/KRW prepared_cache points after buffer warm-up', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1777809600000);
+    mockExpandedMarketContractFetch();
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    for (let index = 0; index < 60; index += 1) {
+      vi.setSystemTime(1777809600000 + index * 60_000);
+      const tickerResponse = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=10' });
+      expect(tickerResponse.statusCode).toBe(200);
+    }
+
+    vi.setSystemTime(1777809600000 + 60 * 60_000);
+    const response = await app.inject({ method: 'GET', url: '/market/sparkline?exchange=upbit&quoteCurrency=KRW&marketIds=KRW-BIO&limit=60&interval=1m' });
+    const body = JSON.parse(response.body);
+    const item = body.data.items[0];
+
+    expect(response.statusCode).toBe(200);
+    expect(body.success).toBe(true);
+    expect(item).toMatchObject({
+      exchange: 'upbit',
+      symbol: 'BIO',
+      baseCurrency: 'BIO',
+      quoteCurrency: 'KRW',
+      marketId: 'KRW-BIO',
+      displayPair: 'BIO/KRW',
+      pointCount: 60,
+      sparklinePointCount: 60,
+      source: 'prepared_cache',
+      quality: 'liveDetailed',
+      isDerived: false,
+      realSeries: true,
+      graphDisplayAllowed: true,
+      recommendedDisplayScale: expect.any(Number),
+      interval: '1M',
+      requestedLimit: 60,
+    });
+    expect(item.points).toHaveLength(60);
+    expect(item.diagnostics).toMatchObject({
+      pointCount: 60,
+      realSeries: true,
+      graphDisplayAllowed: true,
+      isFlat: false,
+      isLinearDerived: false,
+      resolvedBy: 'ring_buffer',
+    });
+    expect(item.diagnostics.uniqueValueCount).toBeGreaterThan(3);
+    expect(item.diagnostics.valueRange).toBeGreaterThan(0);
+    expect(item.diagnostics.rangeRatio).toBeGreaterThan(0);
+    expect(item.diagnostics.recommendedDisplayScale).toBe(item.recommendedDisplayScale);
+    expect(typeof item.diagnostics.directionChanges).toBe('number');
+    expect(body.data.diagnostics).toMatchObject({
+      requestedExchange: 'upbit',
+      requestedQuoteCurrency: 'KRW',
+      requestedCount: 1,
+      returnedCount: 1,
+      fallbackCount: 0,
+      realSeriesCount: 1,
+      displayAllowedCount: 1,
+      unsupported: false,
+      minPointCount: 60,
+      maxPointCount: 60,
+      heavyPathUsed: false,
+    });
+    expect(body.data.diagnostics.derivedCount).toBe(0);
+    expect(body.data.diagnostics.qualities.liveDetailed).toBe(1);
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/sparkline downgrades 60 flat provider points instead of reporting prepared quality', async () => {
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/v1/market/all')) {
+        return new Response(JSON.stringify([
+          { market: 'KRW-BTC', korean_name: '비트코인', english_name: 'Bitcoin' },
+        ]), { status: 200 });
+      }
+      if (url.includes('/v1/ticker')) {
+        return new Response(JSON.stringify([{
+          market: 'KRW-BTC',
+          trade_price: 100,
+          signed_change_rate: 0.01,
+          signed_change_price: 1,
+          acc_trade_price_24h: 1000,
+          acc_trade_volume_24h: 10,
+          high_price: 120,
+          low_price: 90,
+          trade_timestamp: 1777809600000,
+        }]), { status: 200 });
+      }
+      if (url.includes('/v1/candles/minutes/1')) {
+        return new Response(JSON.stringify(Array.from({ length: 60 }, (_, index) => ({
+          candle_date_time_utc: new Date(1777809600000 - index * 60_000).toISOString().replace('.000Z', ''),
+          opening_price: 100,
+          high_price: 100,
+          low_price: 100,
+          trade_price: 100,
+          candle_acc_trade_volume: 1,
+          candle_acc_trade_price: 100,
+        }))), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: 'unexpected path', url }), { status: 500 });
+    });
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    const response = await app.inject({ method: 'GET', url: '/market/sparkline?exchange=upbit&quoteCurrency=KRW&marketIds=KRW-BTC&limit=60&interval=1m' });
+    const item = JSON.parse(response.body).data.items[0];
+
+    expect(response.statusCode).toBe(200);
+    expect(item.pointCount).toBe(60);
+    expect(item.quality).toBe('insufficient_variation');
+    expect(item.realSeries).toBe(false);
+    expect(item.isDerived).toBe(false);
+    expect(item.graphDisplayAllowed).toBe(false);
+    expect(['prepared_cache', 'refined_mini', 'provider_mini']).not.toContain(item.quality);
+    expect(item.diagnostics).toMatchObject({
+      uniqueValueCount: 1,
+      valueRange: 0,
+      isFlat: true,
+      realSeries: false,
+      graphDisplayAllowed: false,
+    });
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/sparkline returns provider candle real series when the ring buffer is cold', async () => {
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/v1/market/all')) {
+        return new Response(JSON.stringify([
+          { market: 'KRW-BTC', korean_name: '비트코인', english_name: 'Bitcoin' },
+        ]), { status: 200 });
+      }
+      if (url.includes('/v1/ticker')) {
+        return new Response(JSON.stringify([{
+          market: 'KRW-BTC',
+          trade_price: 130,
+          signed_change_rate: 0.01,
+          signed_change_price: 1,
+          acc_trade_price_24h: 1000,
+          acc_trade_volume_24h: 10,
+          high_price: 140,
+          low_price: 90,
+          trade_timestamp: 1777809600000,
+        }]), { status: 200 });
+      }
+      if (url.includes('/v1/candles/minutes/1')) {
+        return new Response(JSON.stringify(Array.from({ length: 60 }, (_, index) => {
+          const forward = 59 - index;
+          const close = 100 + (forward % 7) * 2 + (forward % 4 === 0 ? 5 : 0);
+          return {
+            candle_date_time_utc: new Date(1777809600000 - index * 60_000).toISOString().replace('.000Z', ''),
+            opening_price: close - 1,
+            high_price: close + 2,
+            low_price: close - 2,
+            trade_price: close,
+            candle_acc_trade_volume: 1,
+            candle_acc_trade_price: close,
+          };
+        })), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: 'unexpected path', url }), { status: 500 });
+    });
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    const response = await app.inject({ method: 'GET', url: '/market/sparkline?exchange=upbit&quoteCurrency=KRW&marketIds=KRW-BTC&limit=60&interval=1m' });
+    const body = JSON.parse(response.body);
+    const item = body.data.items[0];
+
+    expect(response.statusCode).toBe(200);
+    expect(item.pointCount).toBe(60);
+    expect(item.quality).toBe('liveDetailed');
+    expect(item.source).toBe('provider_candle_1m');
+    expect(item.isDerived).toBe(false);
+    expect(item.realSeries).toBe(true);
+    expect(item.graphDisplayAllowed).toBe(true);
+    expect(item.recommendedDisplayScale).toBe(item.diagnostics.recommendedDisplayScale);
+    expect(item.diagnostics.uniqueValueCount).toBeGreaterThan(3);
+    expect(item.diagnostics.valueRange).toBeGreaterThan(0);
+    expect(item.diagnostics.resolvedBy).toBe('provider_candle');
+    expect(body.data.diagnostics.qualities.liveDetailed).toBe(1);
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/sparkline reuses cached full real 60pt without a second provider fetch', async () => {
+    let candleCalls = 0;
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/v1/market/all')) {
+        return new Response(JSON.stringify([
+          { market: 'KRW-BTC', korean_name: '비트코인', english_name: 'Bitcoin' },
+        ]), { status: 200 });
+      }
+      if (url.includes('/v1/ticker')) {
+        return new Response(JSON.stringify([{
+          market: 'KRW-BTC',
+          trade_price: 130,
+          signed_change_rate: 0.01,
+          signed_change_price: 1,
+          acc_trade_price_24h: 1000,
+          acc_trade_volume_24h: 10,
+          high_price: 140,
+          low_price: 90,
+          trade_timestamp: 1777809600000,
+        }]), { status: 200 });
+      }
+      if (url.includes('/v1/candles/minutes/1')) {
+        candleCalls += 1;
+        return new Response(JSON.stringify(Array.from({ length: 60 }, (_, index) => {
+          const close = 100 + (index % 9) * 1.5 + (index % 4 === 0 ? 3 : 0);
+          return {
+            candle_date_time_utc: new Date(1777809600000 + index * 60_000).toISOString().replace('.000Z', ''),
+            opening_price: close - 1,
+            high_price: close + 2,
+            low_price: close - 2,
+            trade_price: close,
+            candle_acc_trade_volume: 1,
+            candle_acc_trade_price: close,
+          };
+        })), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: 'unexpected path', url }), { status: 500 });
+    });
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    const first = await app.inject({ method: 'GET', url: '/market/sparkline?exchange=upbit&quoteCurrency=KRW&marketIds=KRW-BTC&limit=60&interval=1m' });
+    const second = await app.inject({ method: 'GET', url: '/market/sparkline?exchange=upbit&quoteCurrency=KRW&marketIds=KRW-BTC&limit=60&interval=1m' });
+    const secondItem = JSON.parse(second.body).data.items[0];
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(candleCalls).toBe(1);
+    expect(secondItem.pointCount).toBe(60);
+    expect(secondItem.realSeries).toBe(true);
+    expect(secondItem.graphDisplayAllowed).toBe(true);
+    expect(secondItem.diagnostics.cacheHit).toBe(true);
+    expect(secondItem.diagnostics.cacheKey).toBe('upbit:KRW:KRW-BTC');
+    expect(secondItem.diagnostics.decision).toBe('cache_full');
+    expect(secondItem.diagnostics.cacheWriteDecision).toBe('write');
+    expect(JSON.parse(second.body).data.diagnostics.cacheHitCount).toBe(1);
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/sparkline priority=top returns stale full real cache as displayable', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1777809600000);
+    let candleCalls = 0;
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/v1/market/all')) {
+        return new Response(JSON.stringify([
+          { market: 'KRW-BTC', korean_name: '비트코인', english_name: 'Bitcoin' },
+        ]), { status: 200 });
+      }
+      if (url.includes('/v1/ticker')) {
+        return new Response(JSON.stringify([{
+          market: 'KRW-BTC',
+          trade_price: 130,
+          signed_change_rate: 0.01,
+          signed_change_price: 1,
+          acc_trade_price_24h: 1000,
+          acc_trade_volume_24h: 10,
+          high_price: 140,
+          low_price: 90,
+          trade_timestamp: Date.now(),
+        }]), { status: 200 });
+      }
+      if (url.includes('/v1/candles/minutes/1')) {
+        candleCalls += 1;
+        return new Response(JSON.stringify(Array.from({ length: 60 }, (_, index) => {
+          const close = 100 + (index % 8) * 1.25 + (index % 5 === 0 ? 2 : 0);
+          return {
+            candle_date_time_utc: new Date(1777809600000 + index * 60_000).toISOString().replace('.000Z', ''),
+            opening_price: close - 1,
+            high_price: close + 2,
+            low_price: close - 2,
+            trade_price: close,
+            candle_acc_trade_volume: 1,
+            candle_acc_trade_price: close,
+          };
+        })), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: 'unexpected path', url }), { status: 500 });
+    });
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    const first = await app.inject({ method: 'GET', url: '/market/sparkline?exchange=upbit&quoteCurrency=KRW&marketIds=KRW-BTC&limit=60&interval=1m&priority=top' });
+    vi.setSystemTime(1777809600000 + 61_000);
+    const second = await app.inject({ method: 'GET', url: '/market/sparkline?exchange=upbit&quoteCurrency=KRW&marketIds=KRW-BTC&limit=60&interval=1m&priority=top' });
+    const secondBody = JSON.parse(second.body);
+    const item = secondBody.data.items[0];
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(candleCalls).toBe(1);
+    expect(item.pointCount).toBe(60);
+    expect(item.realSeries).toBe(true);
+    expect(item.graphDisplayAllowed).toBe(true);
+    expect(item.diagnostics.cacheHit).toBe(true);
+    expect(item.diagnostics.stale).toBe(true);
+    expect(item.diagnostics.decision).toBe('cache_stale_full');
+    expect(item.diagnostics.cacheKey).toBe('upbit:KRW:KRW-BTC');
+    expect(item.quality).toBe('staleRealSeries');
+    expect(secondBody.data.diagnostics.staleCacheHitCount).toBe(1);
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/sparkline returns unavailable on provider timeout when no partial exists', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1777809600000);
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/v1/market/all')) {
+        return new Response(JSON.stringify([
+          { market: 'KRW-BTC', korean_name: '비트코인', english_name: 'Bitcoin' },
+        ]), { status: 200 });
+      }
+      if (url.includes('/v1/ticker')) {
+        return new Response(JSON.stringify([{
+          market: 'KRW-BTC',
+          trade_price: 100,
+          signed_change_rate: 0.01,
+          signed_change_price: 1,
+          acc_trade_price_24h: 1000,
+          acc_trade_volume_24h: 10,
+          high_price: 120,
+          low_price: 90,
+          trade_timestamp: 1777809600000,
+        }]), { status: 200 });
+      }
+      if (url.includes('/v1/candles/minutes/1')) {
+        return new Promise<Response>(() => undefined);
+      }
+      return new Response(JSON.stringify({ error: 'unexpected path', url }), { status: 500 });
+    });
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    const pending = app.inject({ method: 'GET', url: '/market/sparkline?exchange=upbit&quoteCurrency=KRW&marketIds=KRW-BTC&limit=60&interval=1m&priority=top' });
+    await vi.advanceTimersByTimeAsync(900);
+    const response = await pending;
+    const body = JSON.parse(response.body);
+    const item = body.data.items[0];
+
+    expect(response.statusCode).toBe(200);
+    expect(body.data.diagnostics.priority).toBe('top');
+    expect(body.data.diagnostics.timeoutMs).toBe(1200);
+    expect(body.data.diagnostics.elapsedMs).toBeLessThanOrEqual(1200);
+    expect(item.quality).toBe('unavailable');
+    expect(item.graphDisplayAllowed).toBe(false);
+    expect(item.diagnostics.decision).toBe('timeout_unavailable');
+    expect(item.diagnostics.cacheKey).toBe('upbit:KRW:KRW-BTC');
+    expect(item.diagnostics.cacheWriteDecision).toBeNull();
+    expect(item.diagnostics.providerTimeout).toBe(true);
+    expect(item.diagnostics.fallbackReason).toBe('provider_timeout');
+    expect(body.data.diagnostics.providerTimeoutCount).toBe(1);
+    expect(body.data.diagnostics.displayAllowedCount).toBe(0);
+    expect(body.data.diagnostics.quoteMismatchCount).toBe(0);
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/sparkline priority=top returns ring partial when provider times out', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1777809600000);
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/v1/market/all')) {
+        return new Response(JSON.stringify([
+          { market: 'KRW-BTC', korean_name: '비트코인', english_name: 'Bitcoin' },
+        ]), { status: 200 });
+      }
+      if (url.includes('/v1/ticker')) {
+        const step = Math.max(0, Math.floor((Date.now() - 1777809600000) / 60_000));
+        return new Response(JSON.stringify([{
+          market: 'KRW-BTC',
+          trade_price: 100 + (step % 5) * 1.7 + (step % 3 === 0 ? 2.3 : 0),
+          signed_change_rate: 0.01,
+          signed_change_price: 1,
+          acc_trade_price_24h: 1000,
+          acc_trade_volume_24h: 10,
+          high_price: 120,
+          low_price: 90,
+          trade_timestamp: Date.now(),
+        }]), { status: 200 });
+      }
+      if (url.includes('/v1/candles/minutes/1')) {
+        return new Promise<Response>(() => undefined);
+      }
+      return new Response(JSON.stringify({ error: 'unexpected path', url }), { status: 500 });
+    });
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    for (let index = 0; index < 8; index += 1) {
+      vi.setSystemTime(1777809600000 + index * 60_000);
+      expect((await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1' })).statusCode).toBe(200);
+    }
+    vi.setSystemTime(1777809600000 + 8 * 60_000);
+    const pending = app.inject({ method: 'GET', url: '/market/sparkline?exchange=upbit&quoteCurrency=KRW&marketIds=KRW-BTC&limit=60&interval=1m&priority=top' });
+    await vi.advanceTimersByTimeAsync(900);
+    const response = await pending;
+    const body = JSON.parse(response.body);
+    const item = body.data.items[0];
+
+    expect(response.statusCode).toBe(200);
+    expect(item.pointCount).toBe(9);
+    expect(item.quality).toBe('liveDetailed');
+    expect(item.realSeries).toBe(true);
+    expect(item.graphDisplayAllowed).toBe(true);
+    expect(item.diagnostics.decision).toBe('timeout_with_partial');
+    expect(item.diagnostics.cacheKey).toBe('upbit:KRW:KRW-BTC');
+    expect(item.diagnostics.cacheWriteDecision).toBe('write');
+    expect(item.diagnostics.graphDisplayAllowedReason).toBe('partial_real_series');
+    expect(item.diagnostics.coverageRatio).toBeCloseTo(9 / 60);
+    expect(body.data.diagnostics.partialCount).toBe(1);
+    expect(body.data.diagnostics.providerTimeoutCount).toBe(1);
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/sparkline priority=top does not let one timed-out item block provider full items', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1777809600000);
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/v1/market/all')) {
+        return new Response(JSON.stringify([
+          { market: 'KRW-BTC', korean_name: '비트코인', english_name: 'Bitcoin' },
+          { market: 'KRW-ETH', korean_name: '이더리움', english_name: 'Ethereum' },
+          { market: 'KRW-XRP', korean_name: '리플', english_name: 'XRP' },
+        ]), { status: 200 });
+      }
+      if (url.includes('/v1/ticker')) {
+        const request = new URL(url);
+        const markets = request.searchParams.get('markets')?.split(',') ?? [];
+        return new Response(JSON.stringify(markets.map((market, index) => ({
+          market,
+          trade_price: 100 + index,
+          signed_change_rate: 0.01,
+          signed_change_price: 1,
+          acc_trade_price_24h: 1000 - index,
+          acc_trade_volume_24h: 10,
+          high_price: 120,
+          low_price: 90,
+          trade_timestamp: Date.now(),
+        }))), { status: 200 });
+      }
+      if (url.includes('/v1/candles/minutes/1')) {
+        const request = new URL(url);
+        const market = request.searchParams.get('market');
+        if (market === 'KRW-BTC') {
+          return new Promise<Response>(() => undefined);
+        }
+        const offset = market === 'KRW-ETH' ? 10 : 20;
+        return new Response(JSON.stringify(Array.from({ length: 60 }, (_, index) => {
+          const close = 100 + offset + (index % 7) * 1.4 + (index % 4 === 0 ? 3 : 0);
+          return {
+            candle_date_time_utc: new Date(1777809600000 + index * 60_000).toISOString().replace('.000Z', ''),
+            opening_price: close - 1,
+            high_price: close + 2,
+            low_price: close - 2,
+            trade_price: close,
+            candle_acc_trade_volume: 1,
+            candle_acc_trade_price: close,
+          };
+        })), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: 'unexpected path', url }), { status: 500 });
+    });
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    const pending = app.inject({ method: 'GET', url: '/market/sparkline?exchange=upbit&quoteCurrency=KRW&marketIds=KRW-BTC,KRW-ETH,KRW-XRP&limit=60&interval=1m&priority=top' });
+    await vi.advanceTimersByTimeAsync(900);
+    const response = await pending;
+    const body = JSON.parse(response.body);
+
+    expect(response.statusCode).toBe(200);
+    expect(body.data.diagnostics.elapsedMs).toBeLessThanOrEqual(1200);
+    expect(body.data.diagnostics.fullCount).toBe(2);
+    expect(body.data.diagnostics.unavailableCount).toBe(1);
+    expect(body.data.items.find((item: any) => item.marketId === 'KRW-BTC').diagnostics.decision).toBe('timeout_unavailable');
+    expect(body.data.items.find((item: any) => item.marketId === 'KRW-ETH').diagnostics.decision).toBe('provider_full');
+    expect(body.data.items.find((item: any) => item.marketId === 'KRW-XRP').diagnostics.decision).toBe('provider_full');
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/sparkline calculates display scale from rangeRatio', async () => {
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/v1/market/all')) {
+        return new Response(JSON.stringify([
+          { market: 'KRW-BTC', korean_name: '비트코인', english_name: 'Bitcoin' },
+        ]), { status: 200 });
+      }
+      if (url.includes('/v1/ticker')) {
+        return new Response(JSON.stringify([{
+          market: 'KRW-BTC',
+          trade_price: 100.1,
+          signed_change_rate: 0.01,
+          signed_change_price: 0.1,
+          acc_trade_price_24h: 1000,
+          acc_trade_volume_24h: 10,
+          high_price: 101,
+          low_price: 99,
+          trade_timestamp: 1777809600000,
+        }]), { status: 200 });
+      }
+      if (url.includes('/v1/candles/minutes/1')) {
+        return new Response(JSON.stringify(Array.from({ length: 60 }, (_, index) => {
+          const forward = 59 - index;
+          const close = 100 + (forward % 5) * 0.03 + (forward % 3 === 0 ? 0.02 : 0);
+          return {
+            candle_date_time_utc: new Date(1777809600000 - index * 60_000).toISOString().replace('.000Z', ''),
+            opening_price: close,
+            high_price: close + 0.01,
+            low_price: close - 0.01,
+            trade_price: close,
+            candle_acc_trade_volume: 1,
+            candle_acc_trade_price: close,
+          };
+        })), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: 'unexpected path', url }), { status: 500 });
+    });
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    const response = await app.inject({ method: 'GET', url: '/market/sparkline?exchange=upbit&quoteCurrency=KRW&marketIds=KRW-BTC&limit=60&interval=1m' });
+    const item = JSON.parse(response.body).data.items[0];
+
+    expect(response.statusCode).toBe(200);
+    expect(item.realSeries).toBe(true);
+    expect(item.graphDisplayAllowed).toBe(true);
+    expect(item.diagnostics.rangeRatio).toBeLessThan(0.002);
+    expect(item.recommendedDisplayScale).toBe(0.25);
+    expect(item.diagnostics.recommendedDisplayScale).toBe(0.25);
+    expect(item.diagnostics.volatilityHint).toBe('low');
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/tickers schedules warm-up logs for top volume markets when enabled', async () => {
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/v1/market/all')) {
+        return new Response(JSON.stringify([
+          { market: 'KRW-BTC', korean_name: '비트코인', english_name: 'Bitcoin' },
+          { market: 'KRW-ETH', korean_name: '이더리움', english_name: 'Ethereum' },
+        ]), { status: 200 });
+      }
+      if (url.includes('/v1/ticker')) {
+        return new Response(JSON.stringify([
+          {
+            market: 'KRW-BTC',
+            trade_price: 100,
+            signed_change_rate: 0.01,
+            signed_change_price: 1,
+            acc_trade_price_24h: 2000,
+            acc_trade_volume_24h: 10,
+            high_price: 120,
+            low_price: 90,
+            trade_timestamp: 1777809600000,
+          },
+          {
+            market: 'KRW-ETH',
+            trade_price: 80,
+            signed_change_rate: 0.01,
+            signed_change_price: 1,
+            acc_trade_price_24h: 1000,
+            acc_trade_volume_24h: 10,
+            high_price: 120,
+            low_price: 70,
+            trade_timestamp: 1777809600000,
+          },
+        ]), { status: 200 });
+      }
+      if (url.includes('/v1/candles/minutes/1')) {
+        return new Response(JSON.stringify(Array.from({ length: 60 }, (_, index) => {
+          const close = 100 + (index % 7) * 1.1 + (index % 5 === 0 ? 2 : 0);
+          return {
+            candle_date_time_utc: new Date(1777809600000 + index * 60_000).toISOString().replace('.000Z', ''),
+            opening_price: close,
+            high_price: close + 1,
+            low_price: close - 1,
+            trade_price: close,
+            candle_acc_trade_volume: 1,
+            candle_acc_trade_price: close,
+          };
+        })), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: 'unexpected path', url }), { status: 500 });
+    });
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0', SPARKLINE_WARMUP_ENABLED: 'true' });
+    const { logger } = await import('../src/utils/logger');
+    const logSpy = vi.spyOn(logger, 'info');
+
+    const response = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=2' });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(response.statusCode).toBe(200);
+    expect(logSpy.mock.calls.some((call) => String(call[1] ?? '').includes('[SparklineWarmupQueued]'))).toBe(true);
+    expect(logSpy.mock.calls.some((call) => String(call[1] ?? '').includes('[SparklineWarmupStored]'))).toBe(true);
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/sparkline resolves Binance USDT marketIds and uses 1m klines as real series', async () => {
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/api/v3/exchangeInfo') {
+        return new Response(JSON.stringify({
+          symbols: [
+            { symbol: 'BTCUSDT', baseAsset: 'BTC', quoteAsset: 'USDT', status: 'TRADING' },
+            { symbol: 'ETHUSDT', baseAsset: 'ETH', quoteAsset: 'USDT', status: 'TRADING' },
+            { symbol: 'SOLUSDT', baseAsset: 'SOL', quoteAsset: 'USDT', status: 'TRADING' },
+            { symbol: 'ETHBTC', baseAsset: 'ETH', quoteAsset: 'BTC', status: 'TRADING' },
+          ],
+        }), { status: 200 });
+      }
+      if (url.pathname === '/api/v3/ticker/24hr') {
+        const markets = JSON.parse(url.searchParams.get('symbols') ?? '[]') as string[];
+        return new Response(JSON.stringify(markets.map((symbol, index) => ({
+          symbol,
+          lastPrice: String(100 + index),
+          priceChangePercent: '1.2',
+          quoteVolume: String(1000 - index),
+          volume: String(10 + index),
+          highPrice: '110',
+          lowPrice: '90',
+          closeTime: 1777809600000,
+        }))), { status: 200 });
+      }
+      if (url.pathname === '/api/v3/klines') {
+        const symbol = url.searchParams.get('symbol') ?? 'BTCUSDT';
+        const offset = symbol === 'BTCUSDT' ? 0 : symbol === 'ETHUSDT' ? 10 : 20;
+        return new Response(JSON.stringify(Array.from({ length: 60 }, (_, index) => {
+          const close = 100 + offset + (index % 7) * 1.25 + (index % 4 === 0 ? 2 : 0);
+          return [
+            1777809600000 + index * 60_000,
+            String(close - 0.5),
+            String(close + 1),
+            String(close - 1),
+            String(close),
+            '10',
+            1777809659999 + index * 60_000,
+            String(close * 10),
+            10,
+            '5',
+            String(close * 5),
+            '0',
+          ];
+        })), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: 'unexpected path', url: String(url) }), { status: 500 });
+    });
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    const response = await app.inject({ method: 'GET', url: '/market/sparkline?exchange=binance&quoteCurrency=USDT&marketIds=BTCUSDT,ETHUSDT,SOLUSDT&limit=60&interval=1m' });
+    const body = JSON.parse(response.body);
+
+    expect(response.statusCode).toBe(200);
+    expect(body.data.items.map((item: any) => item.marketId)).toEqual(['BTCUSDT', 'ETHUSDT', 'SOLUSDT']);
+    expect(body.data.items.every((item: any) => item.quoteCurrency === 'USDT')).toBe(true);
+    expect(body.data.items.every((item: any) => item.source === 'provider_candle_1m')).toBe(true);
+    expect(body.data.items.every((item: any) => item.realSeries === true)).toBe(true);
+    expect(body.data.items.every((item: any) => item.graphDisplayAllowed === true)).toBe(true);
+    expect(body.data.diagnostics.realSeriesCount).toBe(3);
+    expect(body.data.diagnostics.displayAllowedCount).toBe(3);
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/sparkline keeps Binance quote-specific marketIds isolated and reports quote mismatches', async () => {
+    mockExpandedMarketContractFetch();
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    const response = await app.inject({ method: 'GET', url: '/market/sparkline?exchange=binance&quoteCurrency=BTC&marketIds=BTCUSDT,ETHBTC&limit=60&interval=1m' });
+    const body = JSON.parse(response.body);
+
+    expect(response.statusCode).toBe(200);
+    expect(body.data.items).toHaveLength(1);
+    expect(body.data.items[0]).toMatchObject({
+      marketId: 'ETHBTC',
+      symbol: 'ETH',
+      quoteCurrency: 'BTC',
+    });
+    expect(body.data.unsupportedSymbols).toEqual(['BTCUSDT']);
+    expect(body.data.diagnostics.unsupportedDetails).toContainEqual({
+      input: 'BTCUSDT',
+      symbol: 'BTC',
+      marketId: 'BTCUSDT',
+      reason: 'quote_currency_mismatch',
+      resolvedBy: 'marketId',
+    });
+    expect(body.data.diagnostics.quoteMismatchCount).toBe(1);
+    expect(body.data.diagnostics.resolveFailedCount).toBe(0);
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/sparkline returns unavailable when only derived preview points exist', async () => {
     mockContractFetch();
     const app = await createApp();
 
@@ -639,10 +1460,75 @@ describe('market REST contract routes', () => {
     const item = body.data.items[0];
 
     expect(response.statusCode).toBe(200);
-    expect(item.sparklineSource).toBe('derived_change24h');
-    expect(item.sparklineQuality).toBe('derived_preview');
-    expect(item.isDerived).toBe(true);
-    expect(item.sparklinePointCount).toBe(6);
+    expect(item.sparklineSource).toBe('unavailable');
+    expect(item.sparklineQuality).toBe('unavailable');
+    expect(item.isDerived).toBe(false);
+    expect(item.sparklinePointCount).toBe(0);
+    expect(item.realSeries).toBe(false);
+    expect(item.graphDisplayAllowed).toBe(false);
+    expect(['prepared_cache', 'refined_mini', 'provider_mini']).not.toContain(item.sparklineQuality);
+    expect(item.diagnostics).toMatchObject({
+      pointCount: 0,
+      uniqueValueCount: 0,
+      valueRange: 0,
+      directionChanges: expect.any(Number),
+      linearityScore: expect.any(Number),
+      realSeries: false,
+      graphDisplayAllowed: false,
+    });
+    expect(body.data.diagnostics.derivedCount).toBe(0);
+    expect(body.data.diagnostics.unavailableCount).toBe(1);
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/sparkline returns unsupported diagnostics for Upbit USDT', async () => {
+    mockExpandedMarketContractFetch();
+    const app = await createApp();
+
+    const response = await app.inject({ method: 'GET', url: '/market/sparkline?exchange=upbit&quoteCurrency=USDT&symbols=BTC&limit=60' });
+    const body = JSON.parse(response.body);
+
+    expect(response.statusCode).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.data).toMatchObject({
+      exchange: 'upbit',
+      quoteCurrency: 'USDT',
+      supportedQuotes: ['KRW', 'BTC'],
+      defaultQuoteCurrency: 'KRW',
+      items: [],
+    });
+    expect(body.data.diagnostics).toMatchObject({
+      requestedExchange: 'upbit',
+      requestedQuoteCurrency: 'USDT',
+      requestedCount: 1,
+      returnedCount: 0,
+      unsupported: true,
+      reason: 'quote_currency_not_supported',
+      heavyPathUsed: false,
+    });
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/sparkline resolves marketIds before symbols when both are provided', async () => {
+    mockExpandedMarketContractFetch();
+    const app = await createApp();
+
+    const response = await app.inject({ method: 'GET', url: '/market/sparkline?exchange=upbit&quoteCurrency=KRW&symbols=BTC&marketIds=KRW-BIO&limit=24' });
+    const body = JSON.parse(response.body);
+
+    expect(response.statusCode).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.data.items).toHaveLength(1);
+    expect(body.data.items[0]).toMatchObject({
+      symbol: 'BIO',
+      marketId: 'KRW-BIO',
+      quoteCurrency: 'KRW',
+      displayPair: 'BIO/KRW',
+    });
+    expect(body.data.items[0].diagnostics.fallbackReason).toBe('provider_unavailable');
+    expect(body.data.diagnostics.requestedCount).toBe(1);
 
     await app.close();
   }, 15000);
@@ -695,6 +1581,41 @@ describe('market REST contract routes', () => {
     await app.close();
   }, 15000);
 
+  it('does not advertise Upbit USDT and returns unsupported diagnostics for Upbit USDT tickers', async () => {
+    mockExpandedMarketContractFetch();
+    const app = await createApp();
+
+    const exchangesResponse = await app.inject({ method: 'GET', url: '/market/exchanges' });
+    const upbit = JSON.parse(exchangesResponse.body).data.items.find((item: any) => item.exchange === 'upbit');
+    expect(upbit).toMatchObject({
+      supportedQuotes: ['KRW', 'BTC'],
+      defaultQuoteCurrency: 'KRW',
+    });
+    expect(upbit.supportedQuotes).not.toContain('USDT');
+
+    const unsupportedResponse = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=USDT' });
+    const unsupported = JSON.parse(unsupportedResponse.body);
+    expect(unsupportedResponse.statusCode).toBe(200);
+    expect(unsupported.success).toBe(true);
+    expect(unsupported.data).toMatchObject({
+      exchange: 'upbit',
+      quoteCurrency: 'USDT',
+      supportedQuotes: ['KRW', 'BTC'],
+      defaultQuoteCurrency: 'KRW',
+      items: [],
+    });
+    expect(unsupported.data.diagnostics).toMatchObject({
+      requestedExchange: 'upbit',
+      requestedQuoteCurrency: 'USDT',
+      supportedQuotes: ['KRW', 'BTC'],
+      defaultQuoteCurrency: 'KRW',
+      unsupported: true,
+      reason: 'quote_currency_not_supported',
+    });
+
+    await app.close();
+  }, 15000);
+
   it('keeps Upbit KRW/BTC quote rows isolated and normalizes KRW-BTC as BTC/KRW', async () => {
     mockExpandedMarketContractFetch();
     const app = await createApp();
@@ -709,12 +1630,22 @@ describe('market REST contract routes', () => {
       quoteCurrency: 'KRW',
       displayPair: 'BTC/KRW',
     });
+    expect(krw.items.every((item: any) => item.marketId.startsWith('KRW-'))).toBe(true);
 
     const btcResponse = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=BTC&limit=10' });
     const btc = JSON.parse(btcResponse.body).data;
     expect(btc.items.every((item: any) => item.exchange === 'upbit' && item.quoteCurrency === 'BTC')).toBe(true);
     expect(btc.items.every((item: any) => item.displayPair.endsWith('/BTC'))).toBe(true);
+    expect(btc.items.every((item: any) => item.marketId.startsWith('BTC-'))).toBe(true);
     expect(btc.items.some((item: any) => item.marketId === 'KRW-BTC')).toBe(false);
+
+    const krwSparkline = JSON.parse((await app.inject({ method: 'GET', url: '/market/sparkline?exchange=upbit&quoteCurrency=KRW&marketIds=KRW-BTC&limit=60' })).body).data.items[0];
+    expect(krwSparkline).toMatchObject({
+      symbol: 'BTC',
+      marketId: 'KRW-BTC',
+      displayPair: 'BTC/KRW',
+      quoteCurrency: 'KRW',
+    });
 
     await app.close();
   }, 15000);
@@ -784,6 +1715,104 @@ describe('market REST contract routes', () => {
     await app.close();
   }, 15000);
 
+  it('GET /market/sparkline resolves Bithumb, Coinone, and Korbit ticker marketIds directly', async () => {
+    mockExpandedMarketContractFetch();
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    for (const exchange of ['bithumb', 'coinone', 'korbit']) {
+      const tickersResponse = await app.inject({ method: 'GET', url: `/market/tickers?exchange=${exchange}&quoteCurrency=KRW&limit=1` });
+      const ticker = JSON.parse(tickersResponse.body).data.items[0];
+      const sparklineResponse = await app.inject({ method: 'GET', url: `/market/sparkline?exchange=${exchange}&quoteCurrency=KRW&symbols=ETH&marketIds=${ticker.marketId}&limit=60&interval=1m` });
+      const sparkline = JSON.parse(sparklineResponse.body).data;
+
+      expect(sparklineResponse.statusCode).toBe(200);
+      expect(sparkline.items).toHaveLength(1);
+      expect(sparkline.items[0]).toMatchObject({
+        exchange,
+        marketId: ticker.marketId,
+        symbol: ticker.symbol,
+        quoteCurrency: 'KRW',
+        displayPair: `${ticker.symbol}/KRW`,
+      });
+      expect(sparkline.items[0].diagnostics.resolvedBy).toBeTruthy();
+      if (exchange === 'bithumb') {
+        expect(sparkline.items[0].diagnostics.providerMarket).toBe(ticker.marketId);
+      } else if (exchange === 'coinone') {
+        expect(sparkline.items[0].diagnostics.providerMarket).toBe(ticker.symbol);
+        expect(sparkline.items[0].diagnostics.cacheKey).toBe(`coinone:KRW:${ticker.marketId}`);
+      } else if (exchange === 'korbit') {
+        expect(sparkline.items[0].diagnostics.providerMarket).toBe(`${ticker.symbol.toLowerCase()}_krw`);
+        expect(sparkline.items[0].diagnostics.cacheKey).toBe(`korbit:KRW:${ticker.marketId}`);
+      }
+      expect(sparkline.unsupportedSymbols).toEqual([]);
+    }
+
+    await app.close();
+  }, 15000);
+
+  it('Coinone and Korbit KRW stale real cache stays displayable after the fast cache expires', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1777809600000);
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/public/v2/chart/KRW/BTC')) {
+        return new Response(JSON.stringify({
+          chart: Array.from({ length: 60 }, (_, index) => ({
+            timestamp: 1777809600000 + index * 60_000,
+            open: 100 + index,
+            high: 102 + index,
+            low: 99 + index,
+            close: 100 + (index % 9) * 1.5 + (index % 4 === 0 ? 2 : 0),
+            volume: 10,
+            quote_volume: 1000,
+          })),
+        }), { status: 200 });
+      }
+      if (url.includes('/v2/candles')) {
+        return new Response(JSON.stringify({
+          data: Array.from({ length: 60 }, (_, index) => ({
+            timestamp: 1777809600000 + index * 60_000,
+            open: 50 + index,
+            high: 52 + index,
+            low: 49 + index,
+            close: 50 + (index % 7) * 1.2 + (index % 5 === 0 ? 1.7 : 0),
+            volume: 10,
+            quoteVolume: 1000,
+          })),
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: 'unexpected path', url }), { status: 500 });
+    });
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    for (const exchange of ['coinone', 'korbit']) {
+      vi.setSystemTime(1777809600000);
+      const first = await app.inject({ method: 'GET', url: `/market/sparkline?exchange=${exchange}&quoteCurrency=KRW&marketIds=KRW-BTC&limit=60&interval=1m&priority=top` });
+      expect(first.statusCode).toBe(200);
+      expect(JSON.parse(first.body).data.items[0]).toMatchObject({
+        marketId: 'KRW-BTC',
+        quoteCurrency: 'KRW',
+        realSeries: true,
+        graphDisplayAllowed: true,
+      });
+
+      vi.setSystemTime(1777809600000 + 61_000);
+      const second = await app.inject({ method: 'GET', url: `/market/sparkline?exchange=${exchange}&quoteCurrency=KRW&marketIds=KRW-BTC&limit=60&interval=1m&priority=top` });
+      const item = JSON.parse(second.body).data.items[0];
+
+      expect(second.statusCode).toBe(200);
+      expect(item.marketId).toBe('KRW-BTC');
+      expect(item.quality).toBe('staleRealSeries');
+      expect(item.realSeries).toBe(true);
+      expect(item.graphDisplayAllowed).toBe(true);
+      expect(item.diagnostics.decision).toBe('cache_stale_full');
+      expect(item.diagnostics.cacheKey).toBe(`${exchange}:KRW:KRW-BTC`);
+      expect(item.diagnostics.providerMarket).toBe(exchange === 'coinone' ? 'BTC' : 'btc_krw');
+    }
+
+    await app.close();
+  }, 15000);
+
   it('uses exchange + quoteCurrency + marketId for sparkline buffers and does not share symbols across exchanges', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1777809600000);
@@ -805,8 +1834,8 @@ describe('market REST contract routes', () => {
     expect(bithumbSparkline.marketId).toBe('KRW-BTC');
     expect(upbitSparkline.pointCount).toBeGreaterThanOrEqual(20);
     expect(bithumbSparkline.pointCount).toBeGreaterThanOrEqual(20);
-    expect(upbitSparkline.quality).toBe('refined_mini');
-    expect(bithumbSparkline.quality).toBe('refined_mini');
+    expect(upbitSparkline.quality).toBe('liveDetailed');
+    expect(bithumbSparkline.quality).toBe('liveDetailed');
     expect(upbitSparkline.isDerived).toBe(false);
     expect(bithumbSparkline.isDerived).toBe(false);
 

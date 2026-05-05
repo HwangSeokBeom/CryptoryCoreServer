@@ -456,7 +456,7 @@ export async function marketRoutes(app: FastifyInstance) {
   });
 
   app.get('/sparkline', async (request, reply) => {
-    const { exchange, quoteCurrency, quote, symbols, marketIds, interval, limit, debug, batchIndex, allowStale } = request.query as {
+    const { exchange, quoteCurrency, quote, symbols, marketIds, interval, limit, priority, debug, batchIndex, allowStale } = request.query as {
       exchange?: string;
       quoteCurrency?: string;
       quote?: string;
@@ -464,6 +464,7 @@ export async function marketRoutes(app: FastifyInstance) {
       marketIds?: string;
       interval?: string;
       limit?: string;
+      priority?: string;
       debug?: string;
       batchIndex?: string;
       allowStale?: string;
@@ -510,6 +511,13 @@ export async function marketRoutes(app: FastifyInstance) {
           acceptedValues: ['1M', '5M', '15M', '1H', '4H', '1D', '1W'],
         }, 'INVALID_TIMEFRAME'));
       }
+      const parsedPriority = priority?.trim().toLowerCase();
+      if (parsedPriority && !['top', 'interactive'].includes(parsedPriority)) {
+        return reply.status(400).send(createErrorResponse('priority must be top or interactive', {
+          field: 'priority',
+          acceptedValues: ['top', 'interactive'],
+        }, 'INVALID_PRIORITY'));
+      }
 
       const requestedSymbols = (symbols ?? '').split(',').map((value) => value.trim()).filter(Boolean);
       const requestedMarketIds = (marketIds ?? '').split(',').map((value) => value.trim()).filter(Boolean);
@@ -546,6 +554,7 @@ export async function marketRoutes(app: FastifyInstance) {
           marketIds: requestedMarketIds,
           interval: parsedInterval,
           limit: parsedLimit,
+          priority: parsedPriority === 'top' || parsedPriority === 'interactive' ? parsedPriority : undefined,
         });
         const renderable = response.items.filter((item) => item.isRenderable).length;
         const refined = response.items.filter((item) => item.sparklineQuality === 'refined_mini' || item.sparklineQuality === 'prepared_cache').length;
@@ -568,7 +577,15 @@ export async function marketRoutes(app: FastifyInstance) {
           },
           `[MarketSparkline] response returned=${response.items.length} refined=${refined} derivedFallback=${derivedFallback} flat=${flat} unavailable=${response.unavailableSymbols.length} elapsedMs=${Date.now() - startedAt}`,
         );
-        return createSuccessResponse(response);
+        const httpResponse = {
+          ...response,
+          items: response.items.map((item) => ({
+            ...item,
+            sparklinePreview: item.sparkline,
+            sparklinePoints: item.sparkline,
+          })),
+        };
+        return createSuccessResponse(httpResponse);
       } catch (error) {
         if (error instanceof AppError) {
           return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details, error.code));
@@ -749,15 +766,18 @@ export async function marketRoutes(app: FastifyInstance) {
   }));
 
   app.get('/tickers', async (request, reply) => {
-    const { exchange, symbol, marketId, limit, quoteCurrency, quote, sort, order } = request.query as {
+    const { exchange, symbol, marketId, limit, cursor, quoteCurrency, quote, sort, order, sortKey, sortDirection } = request.query as {
       exchange?: string;
       symbol?: string;
       marketId?: string;
       limit?: string;
+      cursor?: string;
       quoteCurrency?: string;
       quote?: string;
       sort?: string;
       order?: string;
+      sortKey?: string;
+      sortDirection?: string;
     };
     const requestedQuoteCurrency = quoteCurrency ?? quote;
     const candidateContractExchange = parseContractExchange(exchange);
@@ -787,17 +807,29 @@ export async function marketRoutes(app: FastifyInstance) {
             exchange: parsedExchange,
             quoteCurrency: parsedQuoteCurrency,
             limit: parsedLimit ?? null,
+            cursor: cursor ?? null,
           },
-          `[MarketTickers] request source=http exchange=${parsedExchange} quoteCurrency=${parsedQuoteCurrency} limit=${parsedLimit ?? ''}`,
+          `[MarketTickers] request source=http exchange=${parsedExchange} quoteCurrency=${parsedQuoteCurrency} limit=${parsedLimit ?? ''} cursor=${cursor ?? ''}`,
         );
+        const requestedSort = sortKey ?? sort;
+        const requestedOrder = sortDirection ?? order;
         const response = await getMarketTickerList({
           exchange: parsedExchange,
           quoteCurrency: parsedQuoteCurrency,
-          sort: parseTickerSort(sort),
-          order: parseTickerSortOrder(sort, order),
+          sort: parseTickerSort(requestedSort),
+          order: parseTickerSortOrder(requestedSort, requestedOrder),
           limit: parsedLimit,
+          cursor,
+          requestId: request.id,
         });
         const sparklineSummary = summarizeTickerSparklines(response.items);
+        const httpResponse = {
+          ...response,
+          items: response.items.map((item) => ({
+            ...item,
+            sparklinePoints: item.sparkline,
+          })),
+        };
         logger.info(
           {
             domain: 'market-contract',
@@ -815,7 +847,7 @@ export async function marketRoutes(app: FastifyInstance) {
           },
           `[MarketTickers] response count=${response.items.length} sparklineReady=${sparklineSummary.ready} sparklineProvider=${sparklineSummary.provider} sparklineDerived=${sparklineSummary.derived} flat=${sparklineSummary.flat} unavailable=${sparklineSummary.unavailable} elapsedMs=${Date.now() - startedAt}`,
         );
-        return createSuccessResponse(response);
+        return createSuccessResponse(httpResponse);
       } catch (error) {
         if (error instanceof AppError) {
           const exchangeContract = getMarketExchangeContract(parsedExchange);
@@ -834,6 +866,8 @@ export async function marketRoutes(app: FastifyInstance) {
               diagnostics: {
                 requestedExchange: parsedExchange,
                 requestedQuoteCurrency: parsedQuoteCurrency,
+                supportedQuotes: exchangeContract.supportedQuotes,
+                defaultQuoteCurrency: exchangeContract.defaultQuoteCurrency,
                 supported: isQuoteCurrencySupported(parsedExchange, parsedQuoteCurrency),
                 unsupported: !isQuoteCurrencySupported(parsedExchange, parsedQuoteCurrency),
                 providerStatus: 'error',

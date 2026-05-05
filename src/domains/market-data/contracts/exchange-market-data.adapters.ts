@@ -2,6 +2,7 @@ import { AppError } from '../../../utils/errors';
 import { logger } from '../../../utils/logger';
 import { getExchangeConfig } from '../../../config/exchange.config';
 import { aggregateCandles } from './candle-aggregation';
+import { createHash } from 'crypto';
 import type {
   CandleSnapshotParams,
   ContractExchange,
@@ -79,6 +80,11 @@ type KorbitTickerResponse = {
   data?: unknown;
 };
 
+type GenericCandleResponse = {
+  chart?: unknown;
+  data?: unknown;
+};
+
 type BinanceExchangeInfoResponse = {
   symbols?: Array<{
     symbol?: string;
@@ -99,6 +105,21 @@ type BinanceTickerResponse = Array<{
   closeTime?: number | string;
 }>;
 
+type BinanceKlineResponse = Array<[
+  number,
+  string,
+  string,
+  string,
+  string,
+  string,
+  number,
+  string,
+  number,
+  string,
+  string,
+  string,
+]>;
+
 const BASE_URLS: Record<ContractExchange, string> = {
   upbit: 'https://api.upbit.com',
   bithumb: 'https://api.bithumb.com',
@@ -115,6 +136,16 @@ const DIRECT_MINUTE_UNITS: Partial<Record<ContractTimeframe, number>> = {
   '5M': 5,
   '15M': 15,
   '1H': 60,
+};
+
+const BINANCE_INTERVALS: Partial<Record<ContractTimeframe, string>> = {
+  '1M': '1m',
+  '5M': '5m',
+  '15M': '15m',
+  '1H': '1h',
+  '4H': '4h',
+  '1D': '1d',
+  '1W': '1w',
 };
 
 function safeNumber(value: unknown) {
@@ -141,6 +172,163 @@ function positiveNumberOrNull(value: unknown) {
 
 function normalizeSymbol(symbol: string) {
   return symbol.trim().toUpperCase();
+}
+
+const MARKET_IDENTITY_QUOTES: ContractQuoteCurrency[] = ['KRW', 'USDT', 'BTC', 'ETH'];
+
+export type NormalizedMarketIdentity = {
+  exchange: ContractExchange;
+  quoteCurrency: ContractQuoteCurrency;
+  rawMarketId: string;
+  marketId: string;
+  canonicalMarketId: string;
+  symbol: string;
+  baseCurrency: string;
+  displaySymbol: string;
+  displayPair: string;
+  valid: boolean;
+  reason: string | null;
+};
+
+function parseMarketIdentityBase(
+  exchange: ContractExchange,
+  rawMarketId: string,
+  quoteCurrency: ContractQuoteCurrency,
+) {
+  const normalized = normalizeSymbol(rawMarketId);
+  if (!normalized) {
+    return { baseCurrency: '', reason: 'empty_market_id' };
+  }
+
+  const baseFirstUnderscoreOrSlash = normalized.match(/^([A-Z0-9]+)[_/](KRW|USDT|BTC|ETH)$/);
+  if (baseFirstUnderscoreOrSlash) {
+    return {
+      baseCurrency: baseFirstUnderscoreOrSlash[1],
+      reason: baseFirstUnderscoreOrSlash[2] === quoteCurrency ? null : 'quote_currency_mismatch',
+    };
+  }
+
+  const quoteFirst = normalized.match(/^(KRW|USDT|BTC|ETH)-([A-Z0-9]+)$/);
+  if (quoteFirst) {
+    return {
+      baseCurrency: quoteFirst[2],
+      reason: quoteFirst[1] === quoteCurrency ? null : 'quote_currency_mismatch',
+    };
+  }
+
+  const baseFirst = normalized.match(/^([A-Z0-9]+)-(KRW|USDT|BTC|ETH)$/);
+  if (baseFirst) {
+    return {
+      baseCurrency: baseFirst[1],
+      reason: baseFirst[2] === quoteCurrency ? null : 'quote_currency_mismatch',
+    };
+  }
+
+  if (exchange === 'binance') {
+    for (const quote of MARKET_IDENTITY_QUOTES) {
+      if (normalized.endsWith(quote) && normalized.length > quote.length) {
+        return {
+          baseCurrency: normalized.slice(0, -quote.length),
+          reason: quote === quoteCurrency ? null : 'quote_currency_mismatch',
+        };
+      }
+    }
+  }
+
+  return { baseCurrency: normalized, reason: null };
+}
+
+export function normalizeMarketIdentity(
+  exchange: ContractExchange,
+  rawMarketId: string,
+  quoteCurrency: ContractQuoteCurrency,
+): NormalizedMarketIdentity {
+  const parsed = parseMarketIdentityBase(exchange, rawMarketId, quoteCurrency);
+  const baseCurrency = normalizeSymbol(parsed.baseCurrency);
+  const canonicalMarketId = baseCurrency ? `${quoteCurrency}-${baseCurrency}` : '';
+  const invalidReason = parsed.reason
+    ?? (!baseCurrency ? 'adapter_parse_failed' : null)
+    ?? (baseCurrency === quoteCurrency ? 'base_equals_quote' : null)
+    ?? (exchange === 'coinone' && baseCurrency.length === 1 ? 'suspicious_truncated_symbol' : null);
+  const valid = invalidReason === null;
+  const identity = {
+    exchange,
+    quoteCurrency,
+    rawMarketId,
+    marketId: canonicalMarketId,
+    canonicalMarketId,
+    symbol: baseCurrency,
+    baseCurrency,
+    displaySymbol: baseCurrency ? `${baseCurrency}/${quoteCurrency}` : '',
+    displayPair: baseCurrency ? `${baseCurrency}/${quoteCurrency}` : '',
+    valid,
+    reason: invalidReason,
+  };
+  logger.info(
+    {
+      domain: 'market-contract',
+      exchange,
+      quoteCurrency,
+      rawMarketId,
+      canonicalMarketId,
+      symbol: baseCurrency,
+      baseCurrency,
+      valid,
+    },
+    `[MarketIdentityNormalize] exchange=${exchange} quoteCurrency=${quoteCurrency} rawMarketId=${rawMarketId} canonicalMarketId=${canonicalMarketId} symbol=${baseCurrency} baseCurrency=${baseCurrency} valid=${valid}`,
+  );
+  if (!valid) {
+    logger.warn(
+      {
+        domain: 'market-contract',
+        exchange,
+        quoteCurrency,
+        rawMarketId,
+        canonicalMarketId,
+        symbol: baseCurrency,
+        reason: invalidReason,
+      },
+      `[MarketIdentityMismatch] exchange=${exchange} quoteCurrency=${quoteCurrency} rawMarketId=${rawMarketId} canonicalMarketId=${canonicalMarketId} symbol=${baseCurrency} reason=${invalidReason}`,
+    );
+  }
+  return identity;
+}
+
+function splitQuoteFirstOrBaseFirstMarket(market: string): { symbol: string; quoteCurrency: ContractQuoteCurrency } | null {
+  const normalized = market.trim().toUpperCase();
+  const baseFirstUnderscoreOrSlash = normalized.match(/^([A-Z0-9]+)[_/](KRW|BTC|USDT|ETH)$/);
+  if (baseFirstUnderscoreOrSlash) {
+    return {
+      quoteCurrency: baseFirstUnderscoreOrSlash[2] as ContractQuoteCurrency,
+      symbol: baseFirstUnderscoreOrSlash[1],
+    };
+  }
+
+  const quoteFirst = normalized.match(/^(KRW|BTC|USDT|ETH)[-_/]([A-Z0-9]+)$/);
+  if (quoteFirst) {
+    return {
+      quoteCurrency: quoteFirst[1] as ContractQuoteCurrency,
+      symbol: quoteFirst[2],
+    };
+  }
+
+  const baseFirst = normalized.match(/^([A-Z0-9]+)[-_/](KRW|BTC|USDT|ETH)$/);
+  if (baseFirst) {
+    return {
+      quoteCurrency: baseFirst[2] as ContractQuoteCurrency,
+      symbol: baseFirst[1],
+    };
+  }
+
+  const slash = normalized.match(/^([A-Z0-9]+)\/(KRW|BTC|USDT|ETH)$/);
+  if (slash) {
+    return {
+      quoteCurrency: slash[2] as ContractQuoteCurrency,
+      symbol: slash[1],
+    };
+  }
+
+  return null;
 }
 
 function parseTimestamp(item: V1CandleResponse[number]) {
@@ -297,6 +485,45 @@ function resolveSparklineQuality(source: TickerSparklineSource) {
   return 'placeholder' as const;
 }
 
+function contractTimeframeToPublicInterval(timeframe: ContractTimeframe) {
+  switch (timeframe) {
+    case '1M':
+      return '1m';
+    case '5M':
+      return '5m';
+    case '15M':
+      return '15m';
+    case '1H':
+      return '1h';
+    case '4H':
+      return '4h';
+    case '1D':
+      return '1d';
+    case '1W':
+      return '1w';
+  }
+}
+
+function toGenericMarketCandle(item: any): MarketCandle {
+  const rawTimestamp = item.timestamp ?? item.time ?? item.openTime ?? item.open_time ?? Date.now();
+  const numericTimestamp = safeNumber(rawTimestamp);
+  const timestamp = typeof rawTimestamp === 'string' && Number.isNaN(Number(rawTimestamp))
+    ? new Date(rawTimestamp).toISOString()
+    : new Date(numericTimestamp > 0 && numericTimestamp < 10_000_000_000 ? numericTimestamp * 1000 : numericTimestamp).toISOString();
+  const quoteVolume = safeNumber(item.quote_volume ?? item.quoteVolume ?? item.trade_price_volume ?? item.value ?? item.volume);
+  return {
+    timestamp,
+    open: safeNumber(item.open ?? item.open_price ?? item.opening_price),
+    high: safeNumber(item.high ?? item.high_price),
+    low: safeNumber(item.low ?? item.low_price),
+    close: safeNumber(item.close ?? item.close_price ?? item.trade_price ?? item.last),
+    volume: safeNumber(item.target_volume ?? item.baseVolume ?? item.base_volume ?? item.volume),
+    quoteVolume,
+    value: quoteVolume,
+    tradePriceVolume: quoteVolume,
+  };
+}
+
 function buildTickerSparkline(params: {
   currentPrice: number | null;
   previousPrice24h: number | null;
@@ -358,6 +585,24 @@ function buildTickerSparkline(params: {
   };
 }
 
+function hashSparklinePoints(points: Array<{ price: number; timestamp: number }>) {
+  const payload = points.map((point) => [point.timestamp, point.price]);
+  return createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 24);
+}
+
+function buildSparklineVersionFields(points: Array<{ price: number; timestamp: number }>, source: TickerSparklineSource) {
+  const pointsHash = hashSparklinePoints(points);
+  const lastTimestamp = points[points.length - 1]?.timestamp ?? null;
+  return {
+    sparklineUpdatedAt: lastTimestamp !== null ? new Date(lastTimestamp).toISOString() : null,
+    sparklineSourceUpdatedAt: lastTimestamp !== null ? new Date(lastTimestamp).toISOString() : null,
+    sparklineSourceVersion: lastTimestamp !== null ? `${source}:1H:${lastTimestamp}:${points.length}:${pointsHash}` : null,
+    sparklinePointsHash: pointsHash,
+    sparklineTimeframe: '1H' as ContractTimeframe,
+    sparklineUniquePriceCount: new Set(points.map((point) => point.price)).size,
+  };
+}
+
 function readProviderSparkline(item: V1TickerResponse[number], sourceTimestamp: number) {
   const record = item as Record<string, unknown>;
   const pointCandidates = [record.sparklinePoints, record.sparkline_points];
@@ -416,7 +661,8 @@ function toTickerItem(params: {
   updatedAt?: string;
   providerSparkline?: Array<{ price: number; timestamp: number }> | null;
 }) {
-  const symbol = normalizeSymbol(params.symbol);
+  const identity = normalizeMarketIdentity(params.exchange, params.marketId, params.quoteCurrency);
+  const symbol = identity.valid ? identity.symbol : normalizeSymbol(params.symbol);
   const displayPair = toDisplayPair(symbol, params.quoteCurrency);
   const changeRate24h = params.changeRate24h;
   const signedChangePrice24h = params.signedChangePrice24h ?? 0;
@@ -430,13 +676,17 @@ function toTickerItem(params: {
     sourceTimestamp: params.timestamp,
     providerSparkline: params.providerSparkline,
   });
+  const sparklineSource = sparkline.sparklineSource as TickerSparklineSource;
+  const versionFields = buildSparklineVersionFields(sparkline.sparklinePoints, sparklineSource);
   const displayName = params.koreanName ?? params.englishName ?? symbol;
 
   return {
     exchange: params.exchange,
     exchangeName: exchangeDisplayName(params.exchange),
-    market: params.marketId,
-    marketId: params.marketId,
+    market: identity.canonicalMarketId || params.marketId,
+    marketId: identity.canonicalMarketId || params.marketId,
+    canonicalMarketId: identity.canonicalMarketId || params.marketId,
+    originalMarketId: params.rawSymbol ?? params.exchangeSymbol ?? params.marketId,
     exchangeSymbol: params.exchangeSymbol ?? params.marketId,
     rawSymbol: params.rawSymbol ?? params.exchangeSymbol ?? params.marketId,
     symbol,
@@ -473,10 +723,28 @@ function toTickerItem(params: {
     previousPrice24h: sparkline.previousPrice24h,
     sparkline: sparkline.sparkline,
     sparklinePoints: sparkline.sparklinePoints,
-    sparklineSource: sparkline.sparklineSource,
+    sparklineSource,
     sparklineQuality: sparkline.sparklineQuality,
     sparklinePointCount: sparkline.sparklinePointCount,
     sparklineIsDerived: sparkline.sparklineIsDerived,
+    ...versionFields,
+    sparklineUnavailableReason: sparkline.sparklinePointCount >= 2
+      ? null
+      : sparkline.sparklineSource === 'unavailable'
+        ? 'current_price_unavailable'
+        : 'insufficient_points',
+    graphDisplayAllowed: false,
+    previewGraphQuality: sparklineSource === 'unavailable'
+      ? 'unavailable'
+      : sparklineSource === 'derived_change24h'
+        ? 'derived_preview'
+        : sparklineSource === 'provider' || sparklineSource === 'cache'
+          ? 'provider_preview'
+          : 'linear_preview',
+    previewGraphIsDerived: sparklineSource === 'derived_change24h' || sparklineSource === 'flat_current',
+    previewGraphPointCount: sparkline.sparklinePointCount,
+    previewGraphRealSeries: false,
+    previewGraphDisplayAllowed: false,
   } satisfies MarketTickerItem;
 }
 
@@ -498,6 +766,9 @@ function sortAndLimitTickerItems(items: MarketTickerItem[], params: TickerListPa
       : sort === 'changeRate'
         ? right.changeRate24h ?? Number.NEGATIVE_INFINITY
         : right.accTradePrice24h;
+    if (leftValue === rightValue) {
+      return (left.canonicalMarketId ?? left.marketId).localeCompare(right.canonicalMarketId ?? right.marketId);
+    }
     return direction * (leftValue - rightValue);
   });
   return params.limit ? sorted.slice(0, params.limit) : sorted;
@@ -518,14 +789,31 @@ export class V1ExchangeMarketDataAdapter implements ExchangeMarketDataAdapter {
   }
 
   parseMarket(market: string) {
-    const match = market.trim().toUpperCase().match(/^(KRW|BTC|USDT|ETH)-([A-Z0-9]+)$/);
-    if (!match) {
-      return null;
+    if (this.exchange === 'bithumb') {
+      const normalized = market.trim().toUpperCase();
+      const underscoreBaseFirst = normalized.match(/^([A-Z0-9]+)_(KRW|BTC|USDT|ETH)$/);
+      if (underscoreBaseFirst) {
+        return {
+          quoteCurrency: underscoreBaseFirst[2] as ContractQuoteCurrency,
+          symbol: underscoreBaseFirst[1],
+        };
+      }
+      const quoteFirst = normalized.match(/^(KRW|BTC|USDT|ETH)-([A-Z0-9]+)$/);
+      if (quoteFirst && quoteFirst[1] !== quoteFirst[2]) {
+        return {
+          quoteCurrency: quoteFirst[1] as ContractQuoteCurrency,
+          symbol: quoteFirst[2],
+        };
+      }
+      const baseFirst = normalized.match(/^([A-Z0-9]+)[-_/](KRW|BTC|USDT|ETH)$/);
+      if (baseFirst) {
+        return {
+          quoteCurrency: baseFirst[2] as ContractQuoteCurrency,
+          symbol: baseFirst[1],
+        };
+      }
     }
-    return {
-      quoteCurrency: match[1] as ContractQuoteCurrency,
-      symbol: match[2],
-    };
+    return splitQuoteFirstOrBaseFirstMarket(market);
   }
 
   async listMarkets(quoteCurrency: ContractQuoteCurrency) {
@@ -718,22 +1006,7 @@ abstract class QuoteFirstMarketDataAdapter implements ExchangeMarketDataAdapter 
   }
 
   parseMarket(market: string) {
-    const normalized = market.trim().toUpperCase();
-    const hyphen = normalized.match(/^(KRW|BTC|USDT|ETH)-([A-Z0-9]+)$/);
-    if (hyphen) {
-      return {
-        quoteCurrency: hyphen[1] as ContractQuoteCurrency,
-        symbol: hyphen[2],
-      };
-    }
-    const slash = normalized.match(/^([A-Z0-9]+)\/(KRW|BTC|USDT|ETH)$/);
-    if (slash) {
-      return {
-        quoteCurrency: slash[2] as ContractQuoteCurrency,
-        symbol: slash[1],
-      };
-    }
-    return null;
+    return splitQuoteFirstOrBaseFirstMarket(market);
   }
 
   async getCandles(_params: CandleSnapshotParams): Promise<MarketCandle[]> {
@@ -776,6 +1049,21 @@ abstract class QuoteFirstMarketDataAdapter implements ExchangeMarketDataAdapter 
 export class CoinoneMarketDataAdapter extends QuoteFirstMarketDataAdapter {
   constructor() {
     super('coinone');
+  }
+
+  parseMarket(market: string) {
+    const parsed = super.parseMarket(market);
+    if (parsed) {
+      return parsed;
+    }
+    const symbol = normalizeSymbol(market);
+    if (!symbol || symbol === 'KRW' || symbol.length === 1) {
+      return null;
+    }
+    return {
+      symbol,
+      quoteCurrency: 'KRW' as const,
+    };
   }
 
   async listMarkets(quoteCurrency: ContractQuoteCurrency) {
@@ -847,6 +1135,20 @@ export class CoinoneMarketDataAdapter extends QuoteFirstMarketDataAdapter {
       }, 'EXCHANGE_UNAVAILABLE');
     }
     return sortAndLimitTickerItems(tickers, params);
+  }
+
+  async getCandles(params: CandleSnapshotParams): Promise<MarketCandle[]> {
+    const interval = contractTimeframeToPublicInterval(params.timeframe);
+    const response = await fetchJson<GenericCandleResponse>(this.exchange, `/public/v2/chart/${params.quoteCurrency}/${params.symbol}`, {
+      interval,
+      size: String(Math.min(Math.max(params.limit, 1), 200)),
+    });
+    const raw = response.chart ?? (response.data as any)?.chart ?? response.data ?? [];
+    return (Array.isArray(raw) ? raw : [])
+      .map(toGenericMarketCandle)
+      .filter((candle) => candle.close > 0 && Number.isFinite(Date.parse(candle.timestamp)))
+      .sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp))
+      .slice(-params.limit);
   }
 }
 
@@ -931,6 +1233,37 @@ export class KorbitMarketDataAdapter extends QuoteFirstMarketDataAdapter {
     }
     return sortAndLimitTickerItems(tickers, params);
   }
+
+  async getCandles(params: CandleSnapshotParams): Promise<MarketCandle[]> {
+    const intervalMap: Partial<Record<ContractTimeframe, string>> = {
+      '1M': '1',
+      '5M': '5',
+      '15M': '15',
+      '1H': '60',
+      '4H': '240',
+      '1D': '1440',
+      '1W': '10080',
+    };
+    const interval = intervalMap[params.timeframe];
+    if (!interval) {
+      throw new AppError(400, 'unsupported Korbit candle timeframe', {
+        exchange: this.exchange,
+        timeframe: params.timeframe,
+      }, 'CANDLES_UNSUPPORTED');
+    }
+    const symbol = `${params.symbol.toLowerCase()}_${params.quoteCurrency.toLowerCase()}`;
+    const response = await fetchJson<GenericCandleResponse>(this.exchange, '/v2/candles', {
+      symbol,
+      interval,
+      limit: String(Math.min(Math.max(params.limit, 1), 200)),
+    });
+    const raw = response.data ?? response;
+    return (Array.isArray(raw) ? raw : [])
+      .map(toGenericMarketCandle)
+      .filter((candle) => candle.close > 0 && Number.isFinite(Date.parse(candle.timestamp)))
+      .sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp))
+      .slice(-params.limit);
+  }
 }
 
 export class BinanceMarketDataAdapter implements ExchangeMarketDataAdapter {
@@ -945,6 +1278,10 @@ export class BinanceMarketDataAdapter implements ExchangeMarketDataAdapter {
   }
 
   parseMarket(market: string) {
+    const separated = splitQuoteFirstOrBaseFirstMarket(market);
+    if (separated) {
+      return separated;
+    }
     const normalized = market.trim().toUpperCase().replace(/[-_/]/g, '');
     for (const quoteCurrency of ['USDT', 'BTC', 'ETH', 'KRW'] as ContractQuoteCurrency[]) {
       if (normalized.endsWith(quoteCurrency) && normalized.length > quoteCurrency.length) {
@@ -980,10 +1317,38 @@ export class BinanceMarketDataAdapter implements ExchangeMarketDataAdapter {
       .filter((item): item is MarketDescriptor => item !== null);
   }
 
-  async getCandles(_params: CandleSnapshotParams): Promise<MarketCandle[]> {
-    throw new AppError(400, 'Binance candles are not supported by this market contract path', {
-      exchange: this.exchange,
-    }, 'CANDLES_UNSUPPORTED');
+  async getCandles(params: CandleSnapshotParams): Promise<MarketCandle[]> {
+    const interval = BINANCE_INTERVALS[params.timeframe];
+    if (!interval) {
+      throw new AppError(400, 'unsupported Binance candle timeframe', {
+        exchange: this.exchange,
+        timeframe: params.timeframe,
+      }, 'CANDLES_UNSUPPORTED');
+    }
+    const symbol = this.normalizeMarket(params.symbol, params.quoteCurrency);
+    const response = await fetchJson<BinanceKlineResponse>(this.exchange, '/api/v3/klines', {
+      symbol,
+      interval,
+      limit: String(Math.min(Math.max(params.limit, 1), 1000)),
+    });
+    return response
+      .map<MarketCandle>((item) => {
+        const openTime = safeNumber(item[0]);
+        const quoteVolume = safeNumber(item[7]);
+        return {
+          timestamp: new Date(openTime).toISOString(),
+          open: safeNumber(item[1]),
+          high: safeNumber(item[2]),
+          low: safeNumber(item[3]),
+          close: safeNumber(item[4]),
+          volume: safeNumber(item[5]),
+          quoteVolume,
+          value: quoteVolume,
+          tradePriceVolume: quoteVolume,
+        };
+      })
+      .sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp))
+      .slice(-params.limit);
   }
 
   async getTickers(params: TickerListParams) {

@@ -221,7 +221,10 @@ Query:
 - `quoteCurrency`: optional. Supported values depend on `exchange`.
 - `sort`: optional `volume | changeRate | price | name | volume_desc | change_desc | price_desc`
 - `order`: optional `asc | desc`
+- `sortKey`: optional alias for `sort`. Accepted row keys include `volume24h`, `changeRate24h`, `currentPrice`, and `assetName`.
+- `sortDirection`: optional alias for `order`.
 - `limit`: optional, max `500`
+- `cursor`: optional opaque cursor from `data.meta.nextCursor`
 
 Exchange quote contract:
 
@@ -234,6 +237,7 @@ Exchange quote contract:
 | `binance` | 바이낸스 | `USDT`, `BTC`, `ETH` | `USDT` | Binance is not KRW-centered. `exchange=binance` without `quoteCurrency` defaults to `USDT`; `KRW` is unsupported unless a separate conversion contract is introduced. |
 
 Clients should call `GET /market/exchanges` or read `supportedQuotes` from `/market/tickers` before rendering quote segmented controls. Unsupported quote requests return `success=true` with `items=[]` and diagnostics instead of an ambiguous empty list.
+Upbit currently advertises only `KRW` and `BTC`. Clients must not render an Upbit `USDT` quote tab unless the server contract starts including `USDT` in `supportedQuotes`.
 
 Response:
 
@@ -275,17 +279,44 @@ Response:
         "timestamp": 1777809600000,
         "sourceTimestamp": 1777809600000,
         "stale": false,
-        "sparkline": [0.0296, 0.0297, 0.0298, 0.0299, 0.03, 0.0301],
-        "sparklinePoints": [
-          { "price": 0.0296, "timestamp": 1777723200000 },
-          { "price": 0.0301, "timestamp": 1777809600000 }
-        ],
-        "sparklineSource": "derived_change24h",
-        "sparklineQuality": "derived_preview",
-        "sparklinePointCount": 6,
-        "sparklineIsDerived": true
+        "sparkline": [0.0296, 0.0297, 0.0298],
+        "sparklinePoints": [0.0296, 0.0297, 0.0298],
+        "sparklineSource": "ticker_ring_buffer",
+        "sparklineQuality": "lowInformation",
+        "sparklinePointCount": 3,
+        "sparklineIsDerived": false,
+        "sparklineUpdatedAt": "2026-05-04T12:00:00.000Z",
+        "sparklineUnavailableReason": null,
+        "sparklineLowInformationReason": "insufficient_history_points",
+        "graphDisplayAllowed": false,
+        "previewSparkline": [0.0296, 0.0297, 0.0298],
+        "previewGraphQuality": "provider_preview",
+        "previewGraphIsDerived": false,
+        "previewGraphPointCount": 3,
+        "previewGraphRealSeries": true,
+        "previewGraphDisplayAllowed": false
       }
     ],
+    "meta": {
+      "exchange": "upbit",
+      "quoteCurrency": "BTC",
+      "requestedLimit": 10,
+      "returnedCount": 10,
+      "nextCursor": "eyJzb3J0S2V5Ijoidm9sdW1lIiw...",
+      "hasNext": true,
+      "sparklineTargetPointCount": 24,
+      "sparklineAttachedCount": 9,
+      "sparklineMissingCount": 0,
+      "sparklineUnavailableCount": 1,
+      "sparklineLowInformationCount": 2,
+      "supportedQuotes": ["KRW", "BTC"],
+      "defaultQuoteCurrency": "KRW",
+      "timing": {
+        "totalMs": 120,
+        "tickerFetchMs": 95,
+        "sparklineAttachMs": 3
+      }
+    },
     "diagnostics": {
       "requestedExchange": "upbit",
       "requestedQuoteCurrency": "BTC",
@@ -300,7 +331,11 @@ Response:
       "zeroPriceCount": 0,
       "zeroVolumeCount": 0,
       "staleCount": 0,
-      "reason": null
+      "reason": null,
+      "previewGraphIsDerived": true,
+      "previewGraphDerivedCount": 10,
+      "previewGraphRealSeries": false,
+      "previewGraphDisplayAllowed": false
     }
   }
 }
@@ -310,7 +345,7 @@ Response:
 `quoteCurrency=BTC` returns only BTC quote markets. Upbit `KRW-BTC` is the Bitcoin/KRW market and must not appear in an Upbit BTC quote response. The server applies `TICKER_CACHE_TTL_SECONDS`.
 `/market/tickers` is ticker-first: it never calls all-symbol trades/candles/history APIs to build first-paint rows.
 Ticker rows include both canonical fields (`currentPrice`, `changeRate24h`, `accTradePrice24h`) and compatibility aliases (`exchangeSymbol`, `displayName`, `price`, `current`, `percent`, `volume24h`, `timestamp`, `sourceTimestamp`, `stale`) so old and new iOS mappers can render rows without dropping them.
-Ticker sparkline values are first-paint previews. `derived_change24h` is not a real time series and is marked with `sparklineQuality=derived_preview` and `sparklineIsDerived=true` so clients can replace it with `/market/sparkline` for visible rows.
+Ticker list sparklines target 24 points and are attached before pagination responses are returned. Source priority is provider candle points embedded by the adapter, cached candle/sparkline rows, ticker ring buffer (`exchange|quoteCurrency|canonicalMarketId`, retained up to 240 observations), stale previous snapshot, then explicit `unavailable`. The list path does not fabricate linear 24-point trends from current price or 24h change; if observed history has only 2-11 points or repeated low-variation samples, it returns `sparklineQuality=lowInformation` with `sparklineLowInformationReason`. If there are 0-1 usable points it returns `sparklineQuality=unavailable`, `sparklinePoints=[]`, and `sparklineUnavailableReason`.
 
 Unsupported quote example:
 
@@ -318,15 +353,17 @@ Unsupported quote example:
 {
   "success": true,
   "data": {
-    "exchange": "coinone",
-    "quoteCurrency": "BTC",
-    "supportedQuotes": ["KRW"],
+    "exchange": "upbit",
+    "quoteCurrency": "USDT",
+    "supportedQuotes": ["KRW", "BTC"],
     "defaultQuoteCurrency": "KRW",
     "status": "unsupported",
     "items": [],
     "diagnostics": {
-      "requestedExchange": "coinone",
-      "requestedQuoteCurrency": "BTC",
+      "requestedExchange": "upbit",
+      "requestedQuoteCurrency": "USDT",
+      "supportedQuotes": ["KRW", "BTC"],
+      "defaultQuoteCurrency": "KRW",
       "supported": false,
       "unsupported": true,
       "providerStatus": "unsupported",
@@ -1758,6 +1795,7 @@ Query:
 - `marketIds`: comma-separated market ids. Use this when available to avoid ambiguity.
 - `interval`: optional, defaults to `1H`
 - `limit`: optional, defaults to `24`, max `60`
+- `priority`: optional. `priority=top`, or `marketIds` count `1..4` with `limit=60`, uses the fast interactive sparkline path.
 - `batchIndex?`: optional non-negative client batch index for logs/debugging
 - `allowStale?`: optional, defaults to allowing short stale sparkline cache reuse
 - `debug?`: optional
@@ -1768,15 +1806,27 @@ Policy:
 
 - `/market/tickers` is for fast first paint rows plus a derived preview.
 - `/market/sparkline?quoteCurrency=...` is for visible row mini graphs keyed by `exchange + quoteCurrency + marketId`.
-- The prepared ring buffer key is `exchange:quoteCurrency:marketId:interval`; Upbit `KRW-BIO` and Bithumb `KRW-BIO` never share points.
-- It uses prepared in-memory ticker snapshot ring buffers, last-known-good prepared rows, then explicit fallback (`derived_change24h` or `flat_current`).
-- The canonical sparkline route does not call trades, orderbook, or selected-symbol candle fan-out. `/market/candles` remains the selected detail chart endpoint.
+- The prepared ring buffer key is `exchange:quoteCurrency:marketId`, for example `upbit:KRW:KRW-BIO` or `binance:USDT:BTCUSDT`; Upbit `KRW-BIO` and Bithumb `KRW-BIO` never share points.
+- `priority=top` targets an overall response within `1200ms`; each item independently settles as cache, stale cache, ring partial, provider full/partial, timeout with partial, timeout unavailable, provider unavailable, resolve failed, or quote mismatch. One slow provider must not hold the whole batch open.
+- It resolves `marketIds` first, then checks the in-memory sparkline cache, ticker snapshot ring buffer, provider candle/minute data, partial real fallback, and finally explicit `unavailable`. It does not promote derived/linear previews to displayable graph quality.
+- The canonical sparkline route does not call trades or orderbook providers. For `limit=60&interval=1m`, provider minute candles may be used as `provider_candle_1m`; `/market/candles` remains the selected detail chart endpoint.
 - Symbol cap is 50. Cap violations return `400 SYMBOLS_LIMIT_EXCEEDED`; partial success is allowed for unsupported or unavailable symbols.
-- Quality enum: `placeholder`, `flat_current`, `derived_preview`, `provider_mini`, `prepared_cache`, `refined_mini`, `selected_chart`.
+- Quality enum includes `provider_candle_1m`, `provider_partial_real`, `provider_mini`, `provider_mini_real`, `prepared_cache`, `prepared_cache_real`, `cache_partial_real`, `cache_stale_real`, `live_buffer_partial`, `refined_mini`, `refined_mini_real`, `derived_preview`, `derived_interpolated`, `insufficient_variation`, `flat_current`, `placeholder`, and `unavailable`.
 - `pointCount = points.length`.
 - `pointCount <= 6` must be `derived_preview`, `flat_current`, `placeholder`, or unavailable; it must not be reported as prepared/provider quality.
-- `prepared_cache`, `refined_mini`, and `provider_mini` mean `isDerived=false`. `pointCount >= 20` is required for prepared/refined rows.
-- Server start or cold buffer returns `derived_preview` or `unavailable`, not a fake prepared cache.
+- `prepared_cache`, `prepared_cache_real`, `cache_partial_real`, `cache_stale_real`, `live_buffer_partial`, `provider_partial_real`, `refined_mini`, `refined_mini_real`, `provider_mini`, `provider_mini_real`, and `provider_candle_1m` mean `isDerived=false`, but clients should still require `realSeries=true`. `pointCount >= 8`, `uniqueValueCount >= 3`, `valueRange > 0`, and `isLinearDerived=false` are sufficient for displayable partial real rows.
+- Server start or cold buffer returns provider candle data, displayable partial real data, or `unavailable`; it must not fabricate a fake prepared cache.
+- `pointCount=60` alone is not enough. If values are flat, have too few unique values, or look like first/last interpolation, the server sets `realSeries=false` and downgrades `quality` to `insufficient_variation`, `derived_preview`, or `derived_interpolated`.
+- `marketIds` take precedence over `symbols` when both are present. `symbols` are resolved with `exchange + quoteCurrency`, so `KRW-BTC` resolves only as `BTC/KRW` when `quoteCurrency=KRW`; it is never treated as a BTC quote market.
+- Clients should replace a preview row graph only when `graphDisplayAllowed=true`, `isDerived=false`, `realSeries=true`, quality is `provider_candle_1m`, `provider_partial_real`, `prepared_cache`, `prepared_cache_real`, `cache_partial_real`, `cache_stale_real`, `live_buffer_partial`, `refined_mini`, `refined_mini_real`, `provider_mini`, or `provider_mini_real`, and `exchange`, `quoteCurrency`, `marketId`, and generation context match the row being replaced. Partial rows may be displayed only when the server has already set `graphDisplayAllowed=true`.
+- Partial real rows set `partial=true`, `diagnostics.partial=true`, `diagnostics.partialReason` (`buffer_warming`, `provider_partial`, or `timeout_with_partial`), `diagnostics.coverageRatio=pointCount/requestedLimit`, and `recommendedDisplayScale`.
+- High-quality real cache writes are quality ranked. `unavailable`, provider timeout, resolve failure, empty provider responses, derived previews, and linear/fake graphs do not delete or overwrite an existing displayable real cache entry. Item diagnostics include `cacheKey`, `cacheWriteDecision`, `previousQuality`, and `newQuality`.
+- Coinone and Korbit keep app canonical `marketId` separate from provider format. Cache keys always include `KRW`, for example `coinone:KRW:KRW-BTC` and `korbit:KRW:KRW-BTC`; Coinone provider market is the base symbol such as `BTC`, while Korbit provider market is lower snake case such as `btc_krw`.
+- Response diagnostics include `priority`, `elapsedMs`, `timeoutMs`, `providerTimeoutCount`, `providerFailedCount`, `resolveFailedCount`, `quoteMismatchCount`, `displayAllowedCount`, `partialCount`, `fullCount`, `staleCount`, `cacheHitCount`, `staleCacheHitCount`, `ringBufferHitCount`, `providerFetchCount`, `minPointCount`, `maxPointCount`, `qualities`, and `heavyPathUsed`.
+- Item diagnostics include `decision`, `resolvedBy`, `provider`, `providerMarket`, `cacheKey`, `cacheHit`, `stale`, `cacheAgeMs`, `cacheWriteDecision`, `previousQuality`, `newQuality`, `ringBufferHit`, `providerFetched`, `providerLatencyMs`, `providerTimeout`, `providerError`, `fallbackReason`, `partial`, `partialReason`, `coverageRatio`, value statistics, `isFlat`, `isLinearDerived`, `graphDisplayAllowedReason`, and `recommendedDisplayScale`.
+- The server computes `rangeRatio=valueRange/abs(meanValue)`, `firstLastChangeRatio`, `uniqueValueCount`, `directionChanges`, `zeroDeltaCount`, `duplicateTimestampCount`, `linearityScore`, `isFlat`, and `isLinearDerived` for every item. `recommendedDisplayScale` is `0.25` for `rangeRatio < 0.002`, `0.40` for `< 0.005`, `0.60` for `< 0.015`, and `0.80` otherwise.
+
+The example below abbreviates `points`, `sparkline`, and `sparklinePoints`; real responses always have `pointCount === points.length === sparklinePointCount`. Each point includes both `price` for backward compatibility and `value` for the detailed graph contract.
 
 ```json
 {
@@ -1787,38 +1837,82 @@ Policy:
     "supportedQuotes": ["KRW", "BTC"],
     "defaultQuoteCurrency": "KRW",
     "interval": "1H",
+    "limit": 60,
     "items": [
       {
         "exchange": "upbit",
-        "symbol": "BTC",
-        "marketId": "KRW-BTC",
-        "baseCurrency": "BTC",
+        "symbol": "BIO",
+        "marketId": "KRW-BIO",
+        "baseCurrency": "BIO",
         "quoteCurrency": "KRW",
-        "displayPair": "BTC/KRW",
+        "displayPair": "BIO/KRW",
         "points": [
-          { "price": 99000000, "timestamp": 1710000000000 },
-          { "price": 100000000, "timestamp": 1710003600000 }
+          { "price": 86.1, "value": 86.1, "timestamp": 1777875600000 },
+          { "price": 86.7, "value": 86.7, "timestamp": 1777875660000 }
         ],
-        "sparkline": [99000000, 99500000, 100000000],
+        "sparkline": [86.1, 86.7],
         "sparklinePoints": [
-          { "price": 99000000, "timestamp": 1710000000000 },
-          { "price": 100000000, "timestamp": 1710003600000 }
+          { "price": 86.1, "value": 86.1, "timestamp": 1777875600000 },
+          { "price": 86.7, "value": 86.7, "timestamp": 1777875660000 }
         ],
         "source": "prepared_cache",
         "sparklineSource": "prepared_cache",
-        "quality": "refined_mini",
-        "sparklineQuality": "refined_mini",
-        "sparklinePointCount": 24,
-        "pointCount": 24,
+        "quality": "prepared_cache",
+        "sparklineQuality": "prepared_cache",
+        "sparklinePointCount": 60,
+        "pointCount": 60,
         "isRenderable": true,
         "isDerived": false,
+        "realSeries": true,
+        "graphDisplayAllowed": true,
+        "recommendedDisplayScale": 0.8,
+        "volatilityHint": "high",
         "stale": false,
-        "updatedAt": 1710003600000,
+        "updatedAt": 1777875660000,
         "interval": "1H",
-        "from": 1710000000000,
-        "to": 1710003600000,
+        "requestedLimit": 60,
+        "from": 1777875600000,
+        "to": 1777875660000,
         "generatedAt": "2026-05-04T10:00:00.000Z",
-        "sourceReason": "ticker_snapshot_ring_buffer"
+        "sourceReason": "ticker_snapshot_ring_buffer",
+        "diagnostics": {
+          "requestedLimit": 60,
+          "pointCount": 60,
+          "provider": null,
+          "cacheHit": false,
+          "cacheAgeMs": null,
+          "stale": false,
+          "ringBufferHit": true,
+          "providerFetched": false,
+          "providerLatencyMs": null,
+          "providerTimeout": false,
+          "partial": false,
+          "partialReason": null,
+          "coverageRatio": 1,
+          "uniqueValueCount": 24,
+          "minValue": 84.9,
+          "maxValue": 88.2,
+          "meanValue": 86.7,
+          "firstValue": 86.1,
+          "lastValue": 86.7,
+          "valueRange": 3.3,
+          "rangeRatio": 0.0380622837,
+          "firstLastChangeRatio": 0.0069686411,
+          "directionChanges": 18,
+          "zeroDeltaCount": 0,
+          "duplicateTimestampCount": 0,
+          "linearityScore": 0.41,
+          "straightnessScore": 0.41,
+          "isFlat": false,
+          "isLinearDerived": false,
+          "realSeries": true,
+          "graphDisplayAllowed": true,
+          "graphDisplayAllowedReason": "real_series_ready",
+          "recommendedDisplayScale": 0.8,
+          "volatilityHint": "high",
+          "fallbackReason": "ticker_snapshot_ring_buffer",
+          "resolvedBy": "ring_buffer"
+        }
       }
     ],
     "unsupportedSymbols": [],
@@ -1826,15 +1920,222 @@ Policy:
     "diagnostics": {
       "requestedExchange": "upbit",
       "requestedQuoteCurrency": "KRW",
-      "unsupported": false,
-      "reason": null,
+      "exchange": "upbit",
+      "quoteCurrency": "KRW",
+      "requestedCount": 1,
       "returnedCount": 1,
-      "pointCountMin": 24,
-      "pointCountMax": 24
+      "fullCount": 1,
+      "partialCount": 0,
+      "fallbackCount": 0,
+      "derivedCount": 0,
+      "realSeriesCount": 1,
+      "displayAllowedCount": 1,
+      "unavailableCount": 0,
+      "qualities": { "prepared_cache": 1 },
+      "cacheHitCount": 0,
+      "ringBufferHitCount": 1,
+      "providerFetchCount": 0,
+      "providerTimeoutCount": 0,
+      "avgLatencyMs": 1,
+      "maxLatencyMs": 1,
+      "unsupported": false,
+      "unsupportedDetails": [],
+      "reason": null,
+      "supportedQuotes": ["KRW", "BTC"],
+      "defaultQuoteCurrency": "KRW",
+      "minPointCount": 60,
+      "maxPointCount": 60,
+      "pointCountMin": 60,
+      "pointCountMax": 60,
+      "invalidPointCount": 0,
+      "heavyPathUsed": false
     }
   }
 }
 ```
+
+Curl verification examples:
+
+```bash
+curl 'http://127.0.0.1:3000/market/sparkline?exchange=binance&quoteCurrency=USDT&marketIds=USDCUSDT,BTCUSDT,ETHUSDT,SOLUSDT&limit=60&interval=1m&priority=top'
+curl 'http://127.0.0.1:3000/market/tickers?exchange=bithumb&quoteCurrency=KRW&limit=4'
+curl 'http://127.0.0.1:3000/market/sparkline?exchange=bithumb&quoteCurrency=KRW&marketIds={top4-marketIds-from-tickers}&limit=60&interval=1m&priority=top'
+curl 'http://127.0.0.1:3000/market/tickers?exchange=coinone&quoteCurrency=KRW&limit=4'
+curl 'http://127.0.0.1:3000/market/sparkline?exchange=coinone&quoteCurrency=KRW&marketIds={top4-marketIds-from-tickers}&limit=60&interval=1m&priority=top'
+curl 'http://127.0.0.1:3000/market/tickers?exchange=korbit&quoteCurrency=KRW&limit=4'
+curl 'http://127.0.0.1:3000/market/sparkline?exchange=korbit&quoteCurrency=KRW&marketIds={top4-marketIds-from-tickers}&limit=60&interval=1m&priority=top'
+```
+
+Check response diagnostics for `priority`, `elapsedMs`, `displayAllowedCount`, `partialCount`, `fullCount`, `staleCount`, `unavailableCount`, and `quoteMismatchCount`. Check each item for `marketId`, `pointCount`, `quality`, `realSeries`, `graphDisplayAllowed`, `diagnostics.decision`, `diagnostics.cacheKey`, `diagnostics.providerMarket`, `diagnostics.cacheWriteDecision`, and `diagnostics.fallbackReason`. Full real rows should usually have quality `provider_candle_1m` or `prepared_cache_real` with decision `provider_full`, `cache_full`, or `cache_stale_full`; partial displayable rows should be `provider_partial_real`, `live_buffer_partial`, `cache_partial_real`, or `cache_stale_real`; provider misses should be explicit `unavailable` or stale real cache, not a derived preview.
+
+Fallback example where a 60-point response is not a detailed graph:
+
+```json
+{
+  "success": true,
+  "data": {
+    "exchange": "upbit",
+    "quoteCurrency": "KRW",
+    "interval": "1M",
+    "limit": 60,
+    "items": [
+      {
+        "exchange": "upbit",
+        "symbol": "BTC",
+        "marketId": "KRW-BTC",
+        "quoteCurrency": "KRW",
+        "displayPair": "BTC/KRW",
+        "pointCount": 60,
+        "points": [
+          { "price": 100000000, "value": 100000000, "timestamp": 1777875600000 }
+        ],
+        "quality": "insufficient_variation",
+        "source": "provider_candle_1m",
+        "isDerived": false,
+        "realSeries": false,
+        "graphDisplayAllowed": false,
+        "recommendedDisplayScale": 0.25,
+        "diagnostics": {
+          "pointCount": 60,
+          "uniqueValueCount": 1,
+          "minValue": 100000000,
+          "maxValue": 100000000,
+          "meanValue": 100000000,
+          "firstValue": 100000000,
+          "lastValue": 100000000,
+          "valueRange": 0,
+          "rangeRatio": 0,
+          "firstLastChangeRatio": 0,
+          "directionChanges": 0,
+          "zeroDeltaCount": 59,
+          "duplicateTimestampCount": 0,
+          "linearityScore": 1,
+          "straightnessScore": 1,
+          "isFlat": true,
+          "isLinearDerived": true,
+          "realSeries": false,
+          "graphDisplayAllowed": false,
+          "recommendedDisplayScale": 0.25,
+          "volatilityHint": "flat",
+          "fallbackReason": "insufficient_variation",
+          "resolvedBy": "provider_candle"
+        }
+      }
+    ],
+    "diagnostics": {
+      "requestedCount": 1,
+      "returnedCount": 1,
+      "fallbackCount": 1,
+      "derivedCount": 0,
+      "realSeriesCount": 0,
+      "displayAllowedCount": 0,
+      "unavailableCount": 0,
+      "qualities": { "insufficient_variation": 1 },
+      "heavyPathUsed": false
+    }
+  }
+}
+```
+
+Derived fallback example:
+
+```json
+{
+  "success": true,
+  "data": {
+    "exchange": "upbit",
+    "quoteCurrency": "KRW",
+    "items": [
+      {
+        "exchange": "upbit",
+        "symbol": "BTC",
+        "marketId": "KRW-BTC",
+        "displayPair": "BTC/KRW",
+        "pointCount": 6,
+        "points": [
+          { "price": 99000000, "value": 99000000, "timestamp": 1777723200000 },
+          { "price": 100000000, "value": 100000000, "timestamp": 1777809600000 }
+        ],
+        "quality": "derived_preview",
+        "source": "derived_change24h",
+        "isDerived": true,
+        "realSeries": false,
+        "graphDisplayAllowed": false,
+        "recommendedDisplayScale": 0.6,
+        "diagnostics": {
+          "resolvedBy": "ticker_preview",
+          "fallbackReason": "provider_unavailable",
+          "pointCount": 6,
+          "uniqueValueCount": 6,
+          "rangeRatio": 0.01005,
+          "isLinearDerived": false,
+          "realSeries": false,
+          "graphDisplayAllowed": false
+        }
+      }
+    ],
+    "diagnostics": {
+      "requestedCount": 1,
+      "returnedCount": 1,
+      "fallbackCount": 1,
+      "derivedCount": 1,
+      "realSeriesCount": 0,
+      "displayAllowedCount": 0,
+      "qualities": { "derived_preview": 1 }
+    }
+  }
+}
+```
+
+Provider unavailable example:
+
+```json
+{
+  "success": true,
+  "data": {
+    "exchange": "coinone",
+    "quoteCurrency": "KRW",
+    "items": [
+      {
+        "exchange": "coinone",
+        "symbol": "BTC",
+        "marketId": "KRW-BTC",
+        "displayPair": "BTC/KRW",
+        "pointCount": 0,
+        "points": [],
+        "quality": "unavailable",
+        "source": "unavailable",
+        "isDerived": false,
+        "realSeries": false,
+        "graphDisplayAllowed": false,
+        "diagnostics": {
+          "resolvedBy": "provider_candle",
+          "fallbackReason": "provider_unavailable",
+          "pointCount": 0,
+          "uniqueValueCount": 0,
+          "valueRange": 0,
+          "rangeRatio": 0,
+          "isFlat": false,
+          "realSeries": false,
+          "graphDisplayAllowed": false
+        }
+      }
+    ],
+    "diagnostics": {
+      "requestedCount": 1,
+      "returnedCount": 1,
+      "fallbackCount": 1,
+      "derivedCount": 0,
+      "realSeriesCount": 0,
+      "displayAllowedCount": 0,
+      "unavailableCount": 1,
+      "qualities": { "unavailable": 1 }
+    }
+  }
+}
+```
+
+Unsupported quote requests, for example `/market/sparkline?exchange=upbit&quoteCurrency=USDT&symbols=BTC`, return `items: []`, `supportedQuotes: ["KRW", "BTC"]`, `defaultQuoteCurrency: "KRW"`, and `diagnostics.unsupported: true` with `reason: "quote_currency_not_supported"` and `heavyPathUsed: false`.
 
 ### `GET /market/symbols`
 
