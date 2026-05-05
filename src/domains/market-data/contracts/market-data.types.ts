@@ -19,6 +19,7 @@ export type SparklineQuality =
   | 'derivedPreview'
   | 'placeholder'
   | 'unavailable'
+  | 'insufficient_points'
   | 'flat_current'
   | 'insufficient_variation'
   | 'derived_preview'
@@ -135,6 +136,7 @@ export type MarketTickerItem = {
   sparklineUnavailableReason?: string | null;
   sparklineLowInformationReason?: string | null;
   graphDisplayAllowed: boolean;
+  lowConfidence?: boolean;
   previewSparkline?: number[];
   previewSparklinePoints?: Array<{ price: number; value: number; timestamp: number }>;
   previewSparklineQuality?: SparklineQuality;

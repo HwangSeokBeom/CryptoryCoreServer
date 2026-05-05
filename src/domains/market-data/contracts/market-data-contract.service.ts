@@ -562,6 +562,9 @@ function buildSparklineVersionFields(params: {
 }
 
 function normalizeSparklineReason(reason: string | null | undefined, quality: SparklineQuality) {
+  if (quality === 'insufficient_points') {
+    return 'insufficient_sparkline_points';
+  }
   if (quality === 'lowInformation') {
     if (reason === 'repeated_price_history' || reason === 'rapid_repeated_price_history') {
       return 'low_unique_price_count';
@@ -644,24 +647,49 @@ function withListSparklineFields(params: {
   lowInformationReason?: string | null;
   stale?: boolean;
 }) {
-  const points = toListSparklinePoints(params.points);
+  const rawPoints = toListSparklinePoints(params.points);
+  const rejectedTickerRingBuffer = params.source === 'ticker_ring_buffer' && rawPoints.length < 12;
+  const points = rejectedTickerRingBuffer ? [] : rawPoints;
   const pointCount = points.length;
   const classified = classifyListSparkline(points, params.source, params.stale);
-  const unavailableReason = pointCount >= 2
+  const unavailableReason = rejectedTickerRingBuffer
+    ? 'insufficient_sparkline_points'
+    : pointCount >= 2
     ? null
     : normalizeSparklineReason(params.reason ?? 'provider_candle_unavailable', 'unavailable');
-  const quality = pointCount >= 2 ? (params.quality === 'lowInformation' ? params.quality : classified.quality) : 'unavailable';
+  const quality = rejectedTickerRingBuffer
+    ? 'insufficient_points'
+    : pointCount >= 2 ? (params.quality === 'lowInformation' ? params.quality : classified.quality) : 'unavailable';
   const source = pointCount >= 2 ? params.source : 'unavailable';
   const lowInformationReason = quality === 'lowInformation'
     ? normalizeSparklineReason(params.lowInformationReason ?? classified.lowInformationReason ?? params.reason ?? 'insufficient_history', 'lowInformation')
     : null;
-  const graphDisplayAllowed = pointCount >= 12 && quality !== 'lowInformation' && quality !== 'unavailable' && !params.isDerived;
+  const lowConfidence = pointCount >= 12 && pointCount < LIST_SPARKLINE_TARGET_POINT_COUNT && !params.isDerived;
+  const graphDisplayAllowed = pointCount >= 12
+    && quality !== 'lowInformation'
+    && quality !== 'unavailable'
+    && quality !== 'insufficient_points'
+    && !params.isDerived;
   const versionFields = buildSparklineVersionFields({
     points,
     source,
     timeframe: LIST_SPARKLINE_DEFAULT_TIMEFRAME,
     refreshedAt: params.stale ? undefined : Date.now(),
   });
+  if (rejectedTickerRingBuffer) {
+    logger.info(
+      {
+        domain: 'market-contract',
+        exchange: params.item.exchange,
+        quoteCurrency: params.item.quoteCurrency,
+        marketId: params.item.marketId,
+        source: params.source,
+        pointCount: rawPoints.length,
+        reason: 'insufficient_points',
+      },
+      `[ListSparklineRejected] reason=insufficient_points source=ticker_ring_buffer pointCount=${rawPoints.length}`,
+    );
+  }
   return {
     ...params.item,
     sparkline: points.map((point) => point.price),
@@ -671,9 +699,10 @@ function withListSparklineFields(params: {
     sparklineSource: source,
     sparklineIsDerived: pointCount >= 2 ? params.isDerived : false,
     ...versionFields,
-    sparklineUnavailableReason: quality === 'unavailable' ? unavailableReason : null,
+    sparklineUnavailableReason: quality === 'unavailable' || quality === 'insufficient_points' ? unavailableReason : null,
     sparklineLowInformationReason: lowInformationReason,
     graphDisplayAllowed,
+    lowConfidence,
     previewSparkline: points.map((point) => point.price),
     previewSparklinePoints: points.map((point) => ({ ...point, value: point.price })),
     previewSparklineQuality: quality,
@@ -1523,6 +1552,7 @@ function isQualityDisplayBlocked(quality: SparklineQuality) {
   return quality === 'derived_preview'
     || quality === 'derived_interpolated'
     || quality === 'unavailable'
+    || quality === 'insufficient_points'
     || quality === 'placeholder'
     || quality === 'flat_current'
     || quality === 'insufficient_variation';
@@ -2488,7 +2518,7 @@ function buildTickerSparklineSummary(items: MarketTickerItem[], attachMs: number
     staleListSparkline24: qualityCount('staleListSparkline24'),
     fallbackListSparkline: qualityCount('fallbackListSparkline'),
     lowInformation: qualityCount('lowInformation'),
-    unavailable: qualityCount('unavailable'),
+    unavailable: qualityCount('unavailable') + qualityCount('insufficient_points'),
     missing,
     avgPointCount,
     updatedWithin30s: items.filter((item) => item.sparklineUpdatedAt && now - Date.parse(item.sparklineUpdatedAt) <= 30_000).length,
