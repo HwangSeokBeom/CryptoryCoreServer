@@ -1,6 +1,6 @@
 import { env } from '../../../config/env';
 import { AppError } from '../../../utils/errors';
-import { logger } from '../../../utils/logger';
+import { logger, summarizeListForLog } from '../../../utils/logger';
 import { createHash } from 'crypto';
 import {
   BinanceMarketDataAdapter,
@@ -164,6 +164,7 @@ type CacheLoad<T> = {
 };
 
 const SPARKLINE_SYMBOL_CAP = 50;
+const SPARKLINE_REQUEST_PATH_LIMIT = 12;
 const LIST_SPARKLINE_TARGET_POINT_COUNT = 24;
 const LIST_SPARKLINE_DEFAULT_TIMEFRAME: ContractTimeframe = '1H';
 const SPARKLINE_DEFAULT_INTERVAL: ContractTimeframe = '1H';
@@ -177,6 +178,7 @@ const PREPARED_SPARKLINE_USABLE_STALE_MS = 5 * 60_000;
 const SPARKLINE_FULL_REAL_TTL_MS = 60_000;
 const SPARKLINE_PARTIAL_REAL_TTL_MS = 30_000;
 const SPARKLINE_PROVIDER_TIMEOUT_MS = 1_000;
+const SPARKLINE_BATCH_REQUEST_BUDGET_MS = 900;
 const SPARKLINE_TOP_RESPONSE_TIMEOUT_MS = 1_200;
 const SPARKLINE_TOP_PROVIDER_TIMEOUT_MS = 850;
 const SPARKLINE_WARMUP_TOP_LIMIT = 100;
@@ -211,6 +213,21 @@ type ProviderCandleFetchMetric = {
   statusCode: number | null;
   latencyMs: number;
   droppedReason: string | null;
+};
+
+type SparklineNormalizedRequestMeta = {
+  original: {
+    timeframe?: string | null;
+    interval?: string | null;
+    limit?: number | null;
+  };
+  canonical: {
+    timeframe: ContractTimeframe;
+    interval: ContractTimeframe;
+    limit: number;
+    profile: 'listSparkline24';
+  };
+  reason: string;
 };
 
 type ProviderCandleAttachStats = {
@@ -1432,6 +1449,12 @@ async function waitForProviderCandleSlot(params: {
   const profile = getProviderCandleRateLimitProfile(params.exchange);
   const state = getProviderCandleRateLimitState(params.exchange);
   const now = Date.now();
+  if (state.nextStartAt - now > profile.cooldownMs) {
+    state.nextStartAt = now;
+  }
+  if (state.cooldownUntil - now > profile.cooldownMs * 2) {
+    state.cooldownUntil = 0;
+  }
   if (state.cooldownUntil > now) {
     return { allowed: false as const, reason: 'cooldown' as const, waitMs: state.cooldownUntil - now };
   }
@@ -1456,7 +1479,7 @@ function logProviderCandleFetchDropped(params: {
   error: string;
   droppedReason: string;
   latencyMs: number;
-  route: '/market/tickers' | 'warmup';
+  route: '/market/tickers' | '/market/sparkline' | 'warmup';
 }) {
   logger.warn(
     {
@@ -1481,7 +1504,7 @@ async function fetchProviderListSparklineAttach(item: MarketTickerItem, params: 
   quoteCurrency: ContractQuoteCurrency;
   timeoutMs: number;
   deadlineAt: number | null;
-  route: '/market/tickers' | 'warmup';
+  route: '/market/tickers' | '/market/sparkline' | 'warmup';
 }): Promise<{ replacement: ListSparklineAttachResult | null; metric: ProviderCandleFetchMetric }> {
   const startedAt = Date.now();
   const key = preparedSparklineKey(params.exchange, params.quoteCurrency, item.marketId);
@@ -3187,7 +3210,7 @@ function scheduleSparklineWarmup(params: {
   exchange: ContractExchange;
   quoteCurrency: ContractQuoteCurrency;
   items: MarketTickerItem[];
-  reason: 'ticker_top_volume' | 'top_cards' | 'stale_refresh';
+  reason: 'ticker_top_volume' | 'top_cards' | 'stale_refresh' | 'sparkline_batch_deferred';
 }) {
   const profile = getProviderCandleRateLimitProfile(params.exchange);
   if (!shouldRunSparklineWarmup() || params.items.length === 0) {
@@ -4022,6 +4045,14 @@ function normalizeSparklineSymbols(params: {
   return Array.from(new Set(normalized));
 }
 
+function verboseSparklineSymbolLogsEnabled() {
+  return process.env.MARKET_PROVIDER_VERBOSE_SYMBOL_LOGS === 'true';
+}
+
+function sparklineListLogPayload(values: string[]) {
+  return verboseSparklineSymbolLogsEnabled() ? values : summarizeListForLog(values, 10);
+}
+
 function resolveSparklineInputs(params: {
   exchange: ContractExchange;
   quoteCurrency: ContractQuoteCurrency;
@@ -4112,10 +4143,14 @@ export async function getMarketSparklineBatch(params: {
   interval?: ContractTimeframe;
   limit?: number;
   priority?: Exclude<SparklinePriority, 'normal'>;
+  normalizedRequest?: SparklineNormalizedRequestMeta | null;
 }) {
   const startedAt = Date.now();
   const interval = params.interval ?? SPARKLINE_DEFAULT_INTERVAL;
   const limit = Math.min(Math.max(params.limit ?? SPARKLINE_DEFAULT_LIMIT, 1), SPARKLINE_LIMIT_MAX);
+  const profile = getProviderCandleRateLimitProfile(params.exchange);
+  const requestBudgetMs = Math.min(SPARKLINE_BATCH_REQUEST_BUDGET_MS, Math.max(profile.requestMaxAttachMs, 700));
+  let requestDeadlineAt = startedAt + requestBudgetMs;
   const requestedInputCount = (params.marketIds && params.marketIds.length > 0 ? params.marketIds : params.symbols)
     .map((value) => value.trim())
     .filter(Boolean)
@@ -4137,12 +4172,13 @@ export async function getMarketSparklineBatch(params: {
       requestedCount: requestedInputs.length,
       marketIdsCount: params.marketIds?.length ?? 0,
       symbolsCount: params.symbols.length,
-      symbols: params.symbols,
-      marketIds: params.marketIds ?? [],
+      symbols: sparklineListLogPayload(params.symbols),
+      marketIds: sparklineListLogPayload(params.marketIds ?? []),
       limit,
       interval,
       priority,
       timeoutMs,
+      requestBudgetMs,
     },
     `[SparklineRequest] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} requestedCount=${requestedInputs.length} marketIdsCount=${params.marketIds?.length ?? 0} symbolsCount=${params.symbols.length} limit=${limit} interval=${interval} priority=${priority}`,
   );
@@ -4153,13 +4189,13 @@ export async function getMarketSparklineBatch(params: {
         priority,
         exchange: params.exchange,
         quoteCurrency: params.quoteCurrency,
-        marketIds: params.marketIds ?? [],
+        marketIds: sparklineListLogPayload(params.marketIds ?? []),
         requestedCount: requestedInputs.length,
         limit,
         interval,
         timeoutMs,
       },
-      `[SparklineTopRequest] priority=${priority} exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} marketIds=${(params.marketIds ?? []).join(',')} requestedCount=${requestedInputs.length} limit=${limit} interval=${interval} timeoutMs=${timeoutMs}`,
+      `[SparklineTopRequest] priority=${priority} exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} requestedCount=${requestedInputs.length} limit=${limit} interval=${interval} timeoutMs=${timeoutMs}`,
     );
   }
   if (!isQuoteCurrencySupported(params.exchange, params.quoteCurrency)) {
@@ -4189,6 +4225,23 @@ export async function getMarketSparklineBatch(params: {
       })),
       unsupportedSymbols: requestedInputs,
       unavailableSymbols: [],
+      meta: {
+        normalizedRequest: params.normalizedRequest ?? null,
+        requestedCount: requestedInputs.length,
+        processedCount: 0,
+        deferredCount: 0,
+        truncatedMarketIds: [],
+        deferredMarketIds: [],
+        attachMs: Date.now() - startedAt,
+        totalMs: Date.now() - startedAt,
+        budgetMs: requestBudgetMs,
+        budgetExceeded: false,
+        providerFetchFailed: 0,
+        providerFetchHttp429: 0,
+        providerFetch4xx: 0,
+        providerFetch5xx: 0,
+        firstMarketIds: [],
+      },
       diagnostics: {
         priority,
         timeoutMs,
@@ -4237,21 +4290,61 @@ export async function getMarketSparklineBatch(params: {
       },
     };
   }
-  const resolvedInputs = resolveSparklineInputs({
+  const allResolvedInputs = resolveSparklineInputs({
     exchange: params.exchange,
     quoteCurrency: params.quoteCurrency,
     symbols: params.symbols,
     marketIds: params.marketIds,
   });
-  if (resolvedInputs.length === 0) {
+  if (allResolvedInputs.length === 0) {
     throw new AppError(400, 'symbols is required', { field: 'symbols' }, 'INVALID_SYMBOLS');
   }
-  if (resolvedInputs.length > SPARKLINE_SYMBOL_CAP) {
-    throw new AppError(400, `symbols must contain at most ${SPARKLINE_SYMBOL_CAP} items`, {
-      field: 'symbols',
-      max: SPARKLINE_SYMBOL_CAP,
-      requested: resolvedInputs.length,
-    }, 'SYMBOLS_LIMIT_EXCEEDED');
+  const resolvedInputs = allResolvedInputs.slice(0, SPARKLINE_REQUEST_PATH_LIMIT);
+  const deferredInputs = allResolvedInputs.slice(SPARKLINE_REQUEST_PATH_LIMIT);
+  const truncatedMarketIds = deferredInputs.map((input) => input.marketId ?? input.input);
+  if (deferredInputs.length > 0) {
+    logger.info(
+      {
+        domain: 'market-contract',
+        route: '/market/sparkline',
+        exchange: params.exchange,
+        quoteCurrency: params.quoteCurrency,
+        requestedCount: allResolvedInputs.length,
+        processedCount: resolvedInputs.length,
+        deferredCount: deferredInputs.length,
+        firstMarketIds: summarizeListForLog(resolvedInputs.map((input) => input.marketId ?? input.input), 10),
+        deferredMarketIds: summarizeListForLog(truncatedMarketIds, 10),
+      },
+      `[SparklineBatchTruncated] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} requestedCount=${allResolvedInputs.length} processedCount=${resolvedInputs.length} deferredCount=${deferredInputs.length}`,
+    );
+  }
+  logger.info(
+    {
+      domain: 'market-contract',
+      route: '/market/sparkline',
+      exchange: params.exchange,
+      quoteCurrency: params.quoteCurrency,
+      requestedCount: allResolvedInputs.length,
+      processedCount: resolvedInputs.length,
+      deferredCount: deferredInputs.length,
+      interval,
+      limit,
+      normalizedRequest: params.normalizedRequest ?? null,
+      firstMarketIds: summarizeListForLog(resolvedInputs.map((input) => input.marketId ?? input.input), 10),
+    },
+    `[SparklineBatchRequestSummary] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} requestedCount=${allResolvedInputs.length} processedCount=${resolvedInputs.length} deferredCount=${deferredInputs.length} interval=${interval} limit=${limit}`,
+  );
+  if (params.normalizedRequest) {
+    logger.info(
+      {
+        domain: 'market-contract',
+        route: '/market/sparkline',
+        exchange: params.exchange,
+        quoteCurrency: params.quoteCurrency,
+        normalizedRequest: params.normalizedRequest,
+      },
+      `[SparklineBatchNormalized] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} reason=${params.normalizedRequest.reason} canonicalInterval=${params.normalizedRequest.canonical.interval} canonicalLimit=${params.normalizedRequest.canonical.limit}`,
+    );
   }
 
   contractSparklineHeavyPathUsed = false;
@@ -4292,6 +4385,7 @@ export async function getMarketSparklineBatch(params: {
   } finally {
     activeContractSparklineRequests -= 1;
   }
+  requestDeadlineAt = Date.now() + requestBudgetMs;
   const unsupportedDetails = resolvedInputs
     .filter((input) => input.mismatchReason || !input.symbol || !input.marketId || !(rowsByMarketId.has(input.marketId.toUpperCase()) || rowsBySymbol.has(input.symbol)))
     .map((input) => ({
@@ -4304,12 +4398,27 @@ export async function getMarketSparklineBatch(params: {
   const unsupportedSymbols = unsupportedDetails.map((input) => input.input);
   const quoteMismatchCount = unsupportedDetails.filter((input) => input.reason === 'quote_currency_mismatch').length;
   const resolveFailedCount = unsupportedDetails.length - quoteMismatchCount;
+  const deferredWarmupItems = deferredInputs
+    .filter((input) => !input.mismatchReason && input.symbol && input.marketId)
+    .map((input) => rowsByMarketId.get(input.marketId!.toUpperCase()) ?? rowsBySymbol.get(input.symbol!))
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+  if (deferredWarmupItems.length > 0) {
+    scheduleSparklineWarmup({
+      exchange: params.exchange,
+      quoteCurrency: params.quoteCurrency,
+      items: deferredWarmupItems,
+      reason: 'sparkline_batch_deferred',
+    });
+  }
   let cacheHitCount = 0;
   let staleCacheHitCount = 0;
   let ringBufferHitCount = 0;
   let providerFetchCount = 0;
   let providerTimeoutCount = 0;
   let providerFailedCount = 0;
+  let providerFetchHttp429 = 0;
+  let providerFetch4xx = 0;
+  let providerFetch5xx = 0;
   const itemLatencies: number[] = [];
   for (const input of resolvedInputs) {
     const matchedTicker = input.marketId ? rowsByMarketId.get(input.marketId.toUpperCase()) ?? null : input.symbol ? rowsBySymbol.get(input.symbol) ?? null : null;
@@ -4364,11 +4473,14 @@ export async function getMarketSparklineBatch(params: {
       );
     }
   }
-  const rawItems = await Promise.all(resolvedInputs
+  const rawItemTargets = resolvedInputs
     .filter((input) => !input.mismatchReason && input.symbol && input.marketId)
     .map((input) => rowsByMarketId.get(input.marketId!.toUpperCase()) ?? rowsBySymbol.get(input.symbol!))
-    .filter((item): item is NonNullable<typeof item> => Boolean(item))
-    .map(async (item) => {
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+  const requestConcurrency = isInteractivePriority
+    ? Math.max(profile.requestConcurrency, Math.min(3, rawItemTargets.length))
+    : profile.requestConcurrency;
+  const rawItems = await mapBounded(rawItemTargets, requestConcurrency, async (item) => {
       const itemStartedAt = Date.now();
       const providerMarket = resolveProviderMarket(params.exchange, item.symbol, params.quoteCurrency);
       const responseItem = params.exchange === 'binance'
@@ -4566,9 +4678,85 @@ export async function getMarketSparklineBatch(params: {
       }
 
       let providerFailureReason: string | null = null;
+      if (Date.now() >= requestDeadlineAt) {
+        providerFailureReason = 'budget_exhausted';
+        providerTimeoutCount += 1;
+        const budgetFallback = partialFallback
+          ? withSparklineDecision(partialFallback, 'timeout_with_partial', {
+              providerMarket,
+              cacheKey: preparedKey,
+              providerFetched: false,
+              providerTimeout: true,
+              providerError: providerFailureReason,
+              fallbackReason: providerFailureReason,
+            })
+          : withSparklineDecision(buildUnavailableSparklineItem({
+              item: responseItem,
+              limit,
+              interval,
+              fallbackReason: providerFailureReason,
+              providerFetched: false,
+              providerTimeout: true,
+            }), 'timeout_unavailable', {
+              providerMarket,
+              cacheKey: preparedKey,
+              providerError: providerFailureReason,
+            });
+        itemLatencies.push(Date.now() - itemStartedAt);
+        logSparklineItemDecision({
+          exchange: params.exchange,
+          quoteCurrency: params.quoteCurrency,
+          item: budgetFallback,
+          elapsedMs: Date.now() - itemStartedAt,
+          reason: providerFailureReason,
+        });
+        return budgetFallback;
+      }
       const providerStartedAt = Date.now();
       providerFetchCount += 1;
       try {
+        const slot = await waitForProviderCandleSlot({
+          exchange: params.exchange,
+          deadlineAt: requestDeadlineAt,
+        });
+        if (!slot.allowed) {
+          providerFailureReason = slot.reason;
+          if (slot.reason === 'budget_exhausted') {
+            providerTimeoutCount += 1;
+          }
+          const slotFallback = partialFallback
+            ? withSparklineDecision(partialFallback, slot.reason === 'budget_exhausted' ? 'timeout_with_partial' : 'provider_unavailable', {
+                providerMarket,
+                cacheKey: preparedKey,
+                providerFetched: false,
+                providerLatencyMs: Date.now() - providerStartedAt,
+                providerTimeout: slot.reason === 'budget_exhausted',
+                providerError: providerFailureReason,
+                fallbackReason: providerFailureReason,
+              })
+            : withSparklineDecision(buildUnavailableSparklineItem({
+                item: responseItem,
+                limit,
+                interval,
+                fallbackReason: providerFailureReason,
+                providerFetched: false,
+                providerLatencyMs: Date.now() - providerStartedAt,
+                providerTimeout: slot.reason === 'budget_exhausted',
+              }), slot.reason === 'budget_exhausted' ? 'timeout_unavailable' : 'provider_unavailable', {
+                providerMarket,
+                cacheKey: preparedKey,
+                providerError: providerFailureReason,
+              });
+          itemLatencies.push(Date.now() - itemStartedAt);
+          logSparklineItemDecision({
+            exchange: params.exchange,
+            quoteCurrency: params.quoteCurrency,
+            item: slotFallback,
+            elapsedMs: Date.now() - itemStartedAt,
+            reason: providerFailureReason,
+          });
+          return slotFallback;
+        }
         const timeoutSentinel = { timeout: true as const };
         const candleLoad = getAdapter(params.exchange).getCandles({
           exchange: params.exchange,
@@ -4866,9 +5054,37 @@ export async function getMarketSparklineBatch(params: {
           return providerUnavailablePartial;
         }
       } catch (error) {
-        providerFailureReason = 'provider_unavailable';
+        const providerStatusCode = extractProviderFailureStatus(error);
+        const rawProviderFailureReason = extractProviderFailureReason(error);
+        providerFailureReason = rawProviderFailureReason === 'EXCHANGE_UNAVAILABLE'
+          ? 'provider_unavailable'
+          : rawProviderFailureReason;
+        registerProviderCandleFailure({
+          exchange: params.exchange,
+          statusCode: providerStatusCode,
+        });
         providerFailedCount += 1;
+        if (providerStatusCode === 429) {
+          providerFetchHttp429 += 1;
+        }
+        if (providerStatusCode !== null && providerStatusCode >= 400 && providerStatusCode < 500) {
+          providerFetch4xx += 1;
+        }
+        if (providerStatusCode !== null && providerStatusCode >= 500) {
+          providerFetch5xx += 1;
+        }
         const providerLatencyMs = Date.now() - providerStartedAt;
+        logProviderCandleFetchDropped({
+          exchange: params.exchange,
+          quoteCurrency: params.quoteCurrency,
+          marketId: item.marketId,
+          timeframe: interval,
+          statusCode: providerStatusCode,
+          error: rawProviderFailureReason,
+          droppedReason: classifyProviderDropReason(providerFailureReason, providerStatusCode),
+          latencyMs: providerLatencyMs,
+          route: '/market/sparkline',
+        });
         logger.info(
           {
             domain: 'market-contract',
@@ -4882,6 +5098,7 @@ export async function getMarketSparklineBatch(params: {
             success: false,
             pointCount: 0,
             reason: providerFailureReason,
+            httpStatus: providerStatusCode,
             latencyMs: providerLatencyMs,
           },
           `[SparklineProviderFetch] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} marketId=${item.marketId} provider=${params.exchange} providerMarket=${providerMarket} limit=${limit} interval=${interval} success=false pointCount=0 reason=${providerFailureReason} latencyMs=${providerLatencyMs}`,
@@ -5035,22 +5252,41 @@ export async function getMarketSparklineBatch(params: {
         reason: decidedFallback.diagnostics.fallbackReason,
       });
       return decidedFallback;
-    }));
+  });
   const items = rawItems.map((item) => {
     const cached = withCacheDiagnostics(item, {
       cacheKey: preparedSparklineKey(params.exchange, params.quoteCurrency, item.marketId),
       newQuality: item.quality,
     });
     const publicQuality = toPublicBatchSparklineQuality(cached);
+    const publicGraphDisplayAllowed = cached.graphDisplayAllowed
+      && cached.pointCount >= 12
+      && publicQuality !== 'lowInformation'
+      && publicQuality !== 'unavailable'
+      && publicQuality !== 'insufficient_points'
+      && !cached.isDerived;
+    const publicUnavailableReason = cached.pointCount >= 2
+      ? null
+      : cached.unavailableReason ?? cached.diagnostics.fallbackReason ?? cached.sourceReason ?? 'insufficient_points';
+    const publicLowInformationReason = !publicGraphDisplayAllowed && cached.pointCount > 0
+      ? cached.diagnostics.graphDisplayAllowedReason ?? cached.diagnostics.fallbackReason ?? null
+      : null;
+    const sourceVersion = cached.to !== null
+      ? `${cached.source}:${cached.interval}:${cached.to}:${cached.pointCount}:${hashSparklinePoints(cached.sparklinePoints)}`
+      : null;
     return {
       ...cached,
       marketId: cached.marketId,
       canonicalMarketId: cached.canonicalMarketId ?? cached.marketId,
       quality: publicQuality,
       sparklineQuality: publicQuality,
-      unavailableReason: cached.pointCount >= 2
-        ? null
-        : cached.unavailableReason ?? cached.diagnostics.fallbackReason ?? cached.sourceReason ?? 'insufficient_points',
+      graphDisplayAllowed: publicGraphDisplayAllowed,
+      isRenderable: publicGraphDisplayAllowed,
+      sourceVersion,
+      sparklineSourceVersion: sourceVersion,
+      sparklineUnavailableReason: publicUnavailableReason,
+      sparklineLowInformationReason: publicLowInformationReason,
+      unavailableReason: publicUnavailableReason,
     };
   });
   const unavailableSymbols = items
@@ -5084,6 +5320,8 @@ export async function getMarketSparklineBatch(params: {
   const derivedCount = items.filter((item) => item.isDerived).length;
   const displayAllowedCount = items.filter((item) => item.graphDisplayAllowed).length;
   const unavailableCount = unavailableSymbols.length;
+  const totalMs = Date.now() - startedAt;
+  const budgetExceeded = totalMs >= requestBudgetMs || providerTimeoutCount > 0 || deferredInputs.length > 0;
   const avgLatencyMs = itemLatencies.length > 0
     ? Math.round(itemLatencies.reduce((sum, value) => sum + value, 0) / itemLatencies.length)
     : 0;
@@ -5095,15 +5333,20 @@ export async function getMarketSparklineBatch(params: {
       domain: 'market-contract',
       exchange: params.exchange,
       quoteCurrency: params.quoteCurrency,
-      requestedCount: resolvedInputs.length,
+      requestedCount: allResolvedInputs.length,
+      processedCount: resolvedInputs.length,
+      deferredCount: deferredInputs.length,
       providerFetchCount,
       timeoutMs: providerTimeoutMs,
       successCount: items.filter((item) => item.realSeries).length,
       timeoutCount: providerTimeoutCount,
       failedCount: fallbackCount,
-      elapsedMs: Date.now() - startedAt,
+      http429Count: providerFetchHttp429,
+      http4xxCount: providerFetch4xx,
+      http5xxCount: providerFetch5xx,
+      elapsedMs: totalMs,
     },
-    `[SparklineProviderBatch] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} requestedCount=${resolvedInputs.length} providerFetchCount=${providerFetchCount} timeoutMs=${providerTimeoutMs} successCount=${items.filter((item) => item.realSeries).length} timeoutCount=${providerTimeoutCount} failedCount=${fallbackCount} elapsedMs=${Date.now() - startedAt}`,
+    `[SparklineProviderBatch] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} requestedCount=${allResolvedInputs.length} processedCount=${resolvedInputs.length} deferredCount=${deferredInputs.length} providerFetchCount=${providerFetchCount} timeoutMs=${providerTimeoutMs} successCount=${items.filter((item) => item.realSeries).length} timeoutCount=${providerTimeoutCount} failedCount=${fallbackCount} elapsedMs=${totalMs}`,
   );
   logger.info(
     {
@@ -5111,18 +5354,20 @@ export async function getMarketSparklineBatch(params: {
       priority,
       exchange: params.exchange,
       quoteCurrency: params.quoteCurrency,
-      requestedCount: resolvedInputs.length,
+      requestedCount: allResolvedInputs.length,
+      processedCount: resolvedInputs.length,
+      deferredCount: deferredInputs.length,
       displayAllowedCount,
       partialCount,
       fullCount,
       staleCount,
       unavailableCount,
-      elapsedMs: Date.now() - startedAt,
+      elapsedMs: totalMs,
       providerTimeoutCount,
       resolveFailedCount,
       quoteMismatchCount,
     },
-    `[SparklineResponseSummary] priority=${priority} exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} requestedCount=${resolvedInputs.length} displayAllowedCount=${displayAllowedCount} partialCount=${partialCount} fullCount=${fullCount} staleCount=${staleCount} unavailableCount=${unavailableCount} elapsedMs=${Date.now() - startedAt} providerTimeoutCount=${providerTimeoutCount} resolveFailedCount=${resolveFailedCount} quoteMismatchCount=${quoteMismatchCount}`,
+    `[SparklineResponseSummary] priority=${priority} exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} requestedCount=${allResolvedInputs.length} processedCount=${resolvedInputs.length} deferredCount=${deferredInputs.length} displayAllowedCount=${displayAllowedCount} partialCount=${partialCount} fullCount=${fullCount} staleCount=${staleCount} unavailableCount=${unavailableCount} elapsedMs=${totalMs} providerTimeoutCount=${providerTimeoutCount} resolveFailedCount=${resolveFailedCount} quoteMismatchCount=${quoteMismatchCount}`,
   );
   logger.info(
     {
@@ -5130,7 +5375,9 @@ export async function getMarketSparklineBatch(params: {
       exchange: params.exchange,
       quoteCurrency: params.quoteCurrency,
       interval,
-      requested: resolvedInputs.length,
+      requested: allResolvedInputs.length,
+      processed: resolvedInputs.length,
+      deferred: deferredInputs.length,
       returned: items.length,
       missing: missing.length,
       live: items.filter((item) => item.quality === 'liveDetailed').length,
@@ -5138,7 +5385,47 @@ export async function getMarketSparklineBatch(params: {
       derived: items.filter((item) => item.quality === 'derivedPreview').length,
       unavailable: missing.length,
     },
-    `[SparklineBatchSummary] requested=${resolvedInputs.length} returned=${items.length} missing=${missing.length} live=${items.filter((item) => item.quality === 'liveDetailed').length} stale=${items.filter((item) => item.quality === 'staleRealSeries').length} derived=${items.filter((item) => item.quality === 'derivedPreview').length} unavailable=${missing.length}`,
+    `[SparklineBatchSummary] requested=${allResolvedInputs.length} processed=${resolvedInputs.length} deferred=${deferredInputs.length} returned=${items.length} missing=${missing.length} live=${items.filter((item) => item.quality === 'liveDetailed').length} stale=${items.filter((item) => item.quality === 'staleRealSeries').length} derived=${items.filter((item) => item.quality === 'derivedPreview').length} unavailable=${missing.length}`,
+  );
+  logger.info(
+    {
+      domain: 'market-contract',
+      route: '/market/sparkline',
+      exchange: params.exchange,
+      quoteCurrency: params.quoteCurrency,
+      targetCount: rawItemTargets.length,
+      attemptedCount: providerFetchCount,
+      successCount: items.filter((item) => item.realSeries).length,
+      failedCount: providerFailedCount,
+      skippedBudgetCount: budgetExceeded ? Math.max(deferredInputs.length, 0) : 0,
+      skippedCooldownCount: 0,
+      warmupQueuedCount: deferredWarmupItems.length,
+      http429Count: providerFetchHttp429,
+      http4xxCount: providerFetch4xx,
+      http5xxCount: providerFetch5xx,
+      latencyP50Ms: percentile(itemLatencies, 0.5),
+      latencyP95Ms: percentile(itemLatencies, 0.95),
+    },
+    `[ProviderCandleRateLimitSummary] route=/market/sparkline exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} targetCount=${rawItemTargets.length} attemptedCount=${providerFetchCount} successCount=${items.filter((item) => item.realSeries).length} failedCount=${providerFailedCount} warmupQueuedCount=${deferredWarmupItems.length} http429Count=${providerFetchHttp429} http4xxCount=${providerFetch4xx} http5xxCount=${providerFetch5xx} latencyP50Ms=${percentile(itemLatencies, 0.5)} latencyP95Ms=${percentile(itemLatencies, 0.95)}`,
+  );
+  logger.info(
+    {
+      domain: 'market-contract',
+      route: '/market/sparkline',
+      exchange: params.exchange,
+      quoteCurrency: params.quoteCurrency,
+      requestedCount: allResolvedInputs.length,
+      processedCount: resolvedInputs.length,
+      deferredCount: deferredInputs.length,
+      attachMs: totalMs,
+      totalMs,
+      budgetMs: requestBudgetMs,
+      budgetExceeded,
+      providerFetchFailed: providerFailedCount,
+      providerFetchHttp429,
+      firstMarketIds: summarizeListForLog(resolvedInputs.map((input) => input.marketId ?? input.input), 10),
+    },
+    `[SparklineAttachPerformanceSummary] route=/market/sparkline exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} attachMs=${totalMs} totalMs=${totalMs} budgetMs=${requestBudgetMs} budgetExceeded=${budgetExceeded} processedCount=${resolvedInputs.length} deferredCount=${deferredInputs.length} providerFetchFailed=${providerFailedCount} providerFetchHttp429=${providerFetchHttp429}`,
   );
   for (const item of missing) {
     logger.info(
@@ -5164,15 +5451,39 @@ export async function getMarketSparklineBatch(params: {
     missing,
     unsupportedSymbols,
     unavailableSymbols,
+    meta: {
+      normalizedRequest: params.normalizedRequest ?? null,
+      requestedCount: allResolvedInputs.length,
+      processedCount: resolvedInputs.length,
+      deferredCount: deferredInputs.length,
+      truncatedMarketIds,
+      deferredMarketIds: truncatedMarketIds,
+      attachMs: totalMs,
+      totalMs,
+      budgetMs: requestBudgetMs,
+      budgetExceeded,
+      providerFetchFailed: providerFailedCount,
+      providerFetchHttp429,
+      providerFetch4xx,
+      providerFetch5xx,
+      firstMarketIds: resolvedInputs.map((input) => input.marketId ?? input.input).slice(0, 10),
+    },
     diagnostics: {
       priority,
       timeoutMs,
-      elapsedMs: Date.now() - startedAt,
+      elapsedMs: totalMs,
       exchange: params.exchange,
       quoteCurrency: params.quoteCurrency,
       requestedExchange: params.exchange,
       requestedQuoteCurrency: params.quoteCurrency,
-      requestedCount: resolvedInputs.length,
+      requestedCount: allResolvedInputs.length,
+      processedCount: resolvedInputs.length,
+      deferredCount: deferredInputs.length,
+      truncatedMarketIds,
+      deferredMarketIds: truncatedMarketIds,
+      normalizedRequest: params.normalizedRequest ?? null,
+      budgetMs: requestBudgetMs,
+      budgetExceeded,
       returnedCount: items.length,
       fullCount,
       partialCount,
@@ -5187,6 +5498,9 @@ export async function getMarketSparklineBatch(params: {
       staleCacheHitCount,
       ringBufferHitCount,
       providerFetchCount,
+      providerFetchHttp429,
+      providerFetch4xx,
+      providerFetch5xx,
       providerTimeoutCount,
       providerFailedCount,
       resolveFailedCount,
