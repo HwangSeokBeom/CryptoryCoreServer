@@ -10,6 +10,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "smoke:market-contract": "tsx scripts/smoke-market-contract.ts",
+    "smoke:market-sparkline-coverage": "tsx scripts/smoke-market-sparkline-coverage.ts",
     "seed": "tsx prisma/seed.ts",
     "lint": "eslint src/",
     "test": "vitest run",

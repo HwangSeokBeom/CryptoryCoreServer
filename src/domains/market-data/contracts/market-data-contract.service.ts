@@ -182,10 +182,108 @@ const SPARKLINE_TOP_PROVIDER_TIMEOUT_MS = 850;
 const SPARKLINE_WARMUP_TOP_LIMIT = 100;
 const LIST_SPARKLINE_ATTACH_CONCURRENCY = 8;
 const LIST_SPARKLINE_PROVIDER_TIMEOUT_MS = 1_200;
+const DEFAULT_LIST_SPARKLINE_ATTACH_BUDGET_MS = 650;
 const SPARKLINE_WILDCARDS = new Set(['all', '*', 'null', 'undefined']);
 const TICKER_CURSOR_VERSION = 1;
 const TICKER_CURSOR_TTL_MS = 5 * 60_000;
 const TICKER_LIMIT_MAX = 100;
+
+type ProviderCandleRateLimitProfile = {
+  requestMaxFetches: number;
+  requestMaxAttachMs: number;
+  requestConcurrency: number;
+  warmupConcurrency: number;
+  warmupBatchSize: number;
+  minIntervalMs: number;
+  timeoutMs: number;
+  cooldownMs: number;
+};
+
+type ProviderCandleRateLimitState = {
+  nextStartAt: number;
+  cooldownUntil: number;
+};
+
+type ProviderCandleFetchMetric = {
+  attempted: boolean;
+  skippedReason: 'budget_exhausted' | 'cooldown' | 'provider_market_not_found' | 'unsupported_quote' | null;
+  success: boolean;
+  statusCode: number | null;
+  latencyMs: number;
+  droppedReason: string | null;
+};
+
+type ProviderCandleAttachStats = {
+  targetCount: number;
+  attemptedCount: number;
+  successCount: number;
+  failedCount: number;
+  skippedBudgetCount: number;
+  skippedCooldownCount: number;
+  skippedUnsupportedCount: number;
+  warmupQueuedCount: number;
+  http429Count: number;
+  http4xxCount: number;
+  http5xxCount: number;
+  latencyMs: number[];
+  droppedReasons: Record<string, number>;
+  cooldownUntil: number | null;
+  budgetMs: number;
+  budgetExhausted: boolean;
+};
+
+const PROVIDER_CANDLE_RATE_LIMIT_PROFILES: Record<ContractExchange, ProviderCandleRateLimitProfile> = {
+  upbit: {
+    requestMaxFetches: 8,
+    requestMaxAttachMs: DEFAULT_LIST_SPARKLINE_ATTACH_BUDGET_MS,
+    requestConcurrency: 2,
+    warmupConcurrency: 1,
+    warmupBatchSize: 24,
+    minIntervalMs: 135,
+    timeoutMs: 850,
+    cooldownMs: 20_000,
+  },
+  bithumb: {
+    requestMaxFetches: 6,
+    requestMaxAttachMs: DEFAULT_LIST_SPARKLINE_ATTACH_BUDGET_MS,
+    requestConcurrency: 2,
+    warmupConcurrency: 1,
+    warmupBatchSize: 20,
+    minIntervalMs: 180,
+    timeoutMs: 900,
+    cooldownMs: 20_000,
+  },
+  coinone: {
+    requestMaxFetches: 6,
+    requestMaxAttachMs: DEFAULT_LIST_SPARKLINE_ATTACH_BUDGET_MS,
+    requestConcurrency: 2,
+    warmupConcurrency: 1,
+    warmupBatchSize: 20,
+    minIntervalMs: 180,
+    timeoutMs: 900,
+    cooldownMs: 20_000,
+  },
+  korbit: {
+    requestMaxFetches: 5,
+    requestMaxAttachMs: DEFAULT_LIST_SPARKLINE_ATTACH_BUDGET_MS,
+    requestConcurrency: 1,
+    warmupConcurrency: 1,
+    warmupBatchSize: 16,
+    minIntervalMs: 220,
+    timeoutMs: 900,
+    cooldownMs: 25_000,
+  },
+  binance: {
+    requestMaxFetches: 10,
+    requestMaxAttachMs: DEFAULT_LIST_SPARKLINE_ATTACH_BUDGET_MS,
+    requestConcurrency: 3,
+    warmupConcurrency: 2,
+    warmupBatchSize: 32,
+    minIntervalMs: 80,
+    timeoutMs: 850,
+    cooldownMs: 15_000,
+  },
+};
 
 const adapters: Record<ContractExchange, ExchangeMarketDataAdapter> = {
   upbit: new V1ExchangeMarketDataAdapter('upbit'),
@@ -251,6 +349,7 @@ const marketSparklineFastCache = new Map<string, SparklineCacheEntry>();
 const lastKnownGoodSparklineCache = new Map<string, ContractSparklineItem>();
 const lastTickerSparklineVersionByMarket = new Map<string, SparklineVersionSnapshot>();
 const sparklineWarmupInFlight = new Set<string>();
+const providerCandleRateLimitState = new Map<ContractExchange, ProviderCandleRateLimitState>();
 let activeContractSparklineRequests = 0;
 let contractSparklineHeavyPathUsed = false;
 let tickerRequestSeq = 0;
@@ -679,7 +778,7 @@ function withListSparklineFields(params: {
     refreshedAt: params.stale ? undefined : Date.now(),
   });
   if (rejectedTickerRingBuffer) {
-    logger.info(
+    logger.debug(
       {
         domain: 'market-contract',
         exchange: params.item.exchange,
@@ -1239,6 +1338,115 @@ function extractProviderFailureReason(error: unknown) {
   return 'provider_candle_unavailable';
 }
 
+function getProviderCandleRateLimitProfile(exchange: ContractExchange) {
+  return PROVIDER_CANDLE_RATE_LIMIT_PROFILES[exchange];
+}
+
+function getProviderCandleRateLimitState(exchange: ContractExchange) {
+  let state = providerCandleRateLimitState.get(exchange);
+  if (!state) {
+    state = { nextStartAt: 0, cooldownUntil: 0 };
+    providerCandleRateLimitState.set(exchange, state);
+  }
+  return state;
+}
+
+function classifyProviderDropReason(reason: string, statusCode: number | null) {
+  if (statusCode === 429) {
+    return 'rate_limited';
+  }
+  if (reason === 'CANDLES_UNSUPPORTED') {
+    return 'unsupported_quote';
+  }
+  if (reason === 'provider_timeout') {
+    return 'provider_timeout';
+  }
+  if (reason === 'cooldown') {
+    return 'cache_pending';
+  }
+  if (reason === 'budget_exhausted') {
+    return 'cache_pending';
+  }
+  if (reason.startsWith('insufficient_provider_points')) {
+    return 'insufficient_points';
+  }
+  if (reason === 'INVALID_MARKET') {
+    return 'provider_market_not_found';
+  }
+  return 'provider_candle_fetch_failed';
+}
+
+function registerProviderCandleFailure(params: {
+  exchange: ContractExchange;
+  statusCode: number | null;
+}) {
+  if (params.statusCode !== 429) {
+    return;
+  }
+  const profile = getProviderCandleRateLimitProfile(params.exchange);
+  const state = getProviderCandleRateLimitState(params.exchange);
+  state.cooldownUntil = Math.max(state.cooldownUntil, Date.now() + profile.cooldownMs);
+}
+
+function countProviderMetric(stats: ProviderCandleAttachStats, metric: ProviderCandleFetchMetric) {
+  if (metric.attempted) {
+    stats.attemptedCount += 1;
+  }
+  if (metric.success) {
+    stats.successCount += 1;
+  }
+  if (metric.attempted && !metric.success) {
+    stats.failedCount += 1;
+  }
+  if (metric.skippedReason === 'budget_exhausted') {
+    stats.skippedBudgetCount += 1;
+    stats.budgetExhausted = true;
+  }
+  if (metric.skippedReason === 'cooldown') {
+    stats.skippedCooldownCount += 1;
+  }
+  if (metric.skippedReason === 'provider_market_not_found' || metric.skippedReason === 'unsupported_quote') {
+    stats.skippedUnsupportedCount += 1;
+  }
+  if (metric.statusCode === 429) {
+    stats.http429Count += 1;
+  }
+  if (metric.statusCode !== null && metric.statusCode >= 400 && metric.statusCode < 500) {
+    stats.http4xxCount += 1;
+  }
+  if (metric.statusCode !== null && metric.statusCode >= 500) {
+    stats.http5xxCount += 1;
+  }
+  if (metric.latencyMs > 0) {
+    stats.latencyMs.push(metric.latencyMs);
+  }
+  if (metric.droppedReason) {
+    stats.droppedReasons[metric.droppedReason] = (stats.droppedReasons[metric.droppedReason] ?? 0) + 1;
+  }
+}
+
+async function waitForProviderCandleSlot(params: {
+  exchange: ContractExchange;
+  deadlineAt: number | null;
+}) {
+  const profile = getProviderCandleRateLimitProfile(params.exchange);
+  const state = getProviderCandleRateLimitState(params.exchange);
+  const now = Date.now();
+  if (state.cooldownUntil > now) {
+    return { allowed: false as const, reason: 'cooldown' as const, waitMs: state.cooldownUntil - now };
+  }
+  const startAt = Math.max(now, state.nextStartAt);
+  if (params.deadlineAt !== null && startAt + 5 > params.deadlineAt) {
+    return { allowed: false as const, reason: 'budget_exhausted' as const, waitMs: startAt - now };
+  }
+  state.nextStartAt = startAt + profile.minIntervalMs + Math.floor(Math.random() * Math.min(profile.minIntervalMs, 40));
+  const waitMs = Math.max(startAt - now, 0);
+  if (waitMs > 0 && process.env.NODE_ENV !== 'test') {
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+  return { allowed: true as const, reason: null, waitMs };
+}
+
 function logProviderCandleFetchDropped(params: {
   exchange: ContractExchange;
   quoteCurrency: ContractQuoteCurrency;
@@ -1272,12 +1480,31 @@ async function fetchProviderListSparklineAttach(item: MarketTickerItem, params: 
   exchange: ContractExchange;
   quoteCurrency: ContractQuoteCurrency;
   timeoutMs: number;
-}): Promise<ListSparklineAttachResult | null> {
+  deadlineAt: number | null;
+  route: '/market/tickers' | 'warmup';
+}): Promise<{ replacement: ListSparklineAttachResult | null; metric: ProviderCandleFetchMetric }> {
   const startedAt = Date.now();
   const key = preparedSparklineKey(params.exchange, params.quoteCurrency, item.marketId);
   const timeframe = LIST_SPARKLINE_DEFAULT_TIMEFRAME;
   const providerMarket = resolveProviderMarket(params.exchange, item.symbol, params.quoteCurrency);
   const timeoutSentinel = { timeout: true as const };
+  const slot = await waitForProviderCandleSlot({
+    exchange: params.exchange,
+    deadlineAt: params.deadlineAt,
+  });
+  if (!slot.allowed) {
+    return {
+      replacement: null,
+      metric: {
+        attempted: false,
+        skippedReason: slot.reason,
+        success: false,
+        statusCode: null,
+        latencyMs: Date.now() - startedAt,
+        droppedReason: slot.reason,
+      },
+    };
+  }
   try {
     const candleLoad = getAdapter(params.exchange).getCandles({
       exchange: params.exchange,
@@ -1311,11 +1538,21 @@ async function fetchProviderListSparklineAttach(item: MarketTickerItem, params: 
         timeframe,
         statusCode: null,
         error: `insufficient_provider_points:${points.length}`,
-        droppedReason: 'insufficient_provider_points',
+        droppedReason: 'insufficient_points',
         latencyMs: Date.now() - startedAt,
-        route: '/market/tickers',
+        route: params.route,
       });
-      return null;
+      return {
+        replacement: null,
+        metric: {
+          attempted: true,
+          skippedReason: null,
+          success: false,
+          statusCode: null,
+          latencyMs: Date.now() - startedAt,
+          droppedReason: 'insufficient_points',
+        },
+      };
     }
 
     const providerItem = buildProviderCandleSparklineItem({
@@ -1343,7 +1580,7 @@ async function fetchProviderListSparklineAttach(item: MarketTickerItem, params: 
       isDerived: false,
       reason: null,
     });
-    logger.info(
+    logger.debug(
       {
         domain: 'market-contract',
         route: '/market/tickers',
@@ -1360,29 +1597,55 @@ async function fetchProviderListSparklineAttach(item: MarketTickerItem, params: 
       `[ProviderCandleListAttach] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} marketId=${item.marketId} providerMarket=${providerMarket} timeframe=${timeframe} pointCount=${attachedItem.sparklinePointCount} quality=${attachedItem.sparklineQuality} graphDisplayAllowed=${attachedItem.graphDisplayAllowed} latencyMs=${Date.now() - startedAt}`,
     );
     return {
-      item: attachedItem,
-      elapsedMs: Date.now() - startedAt,
-      cacheKey: key,
-      rawPointCount: points.length,
-      source: 'provider_candle',
-      reason: attachedItem.sparklineLowInformationReason ?? attachedItem.sparklineUnavailableReason ?? null,
-      candleCacheHit: false,
-      ringBufferCount: preparedSparklineCache.get(key)?.length ?? 0,
+      replacement: {
+        item: attachedItem,
+        elapsedMs: Date.now() - startedAt,
+        cacheKey: key,
+        rawPointCount: points.length,
+        source: 'provider_candle',
+        reason: attachedItem.sparklineLowInformationReason ?? attachedItem.sparklineUnavailableReason ?? null,
+        candleCacheHit: false,
+        ringBufferCount: preparedSparklineCache.get(key)?.length ?? 0,
+      },
+      metric: {
+        attempted: true,
+        skippedReason: null,
+        success: true,
+        statusCode: null,
+        latencyMs: Date.now() - startedAt,
+        droppedReason: null,
+      },
     };
   } catch (error) {
     const reason = extractProviderFailureReason(error);
+    const statusCode = extractProviderFailureStatus(error);
+    const droppedReason = classifyProviderDropReason(reason, statusCode);
+    registerProviderCandleFailure({
+      exchange: params.exchange,
+      statusCode,
+    });
     logProviderCandleFetchDropped({
       exchange: params.exchange,
       quoteCurrency: params.quoteCurrency,
       marketId: item.marketId,
       timeframe,
-      statusCode: extractProviderFailureStatus(error),
+      statusCode,
       error: reason,
-      droppedReason: reason === 'provider_timeout' ? 'provider_timeout' : 'provider_candle_fetch_failed',
+      droppedReason,
       latencyMs: Date.now() - startedAt,
-      route: '/market/tickers',
+      route: params.route,
     });
-    return null;
+    return {
+      replacement: null,
+      metric: {
+        attempted: true,
+        skippedReason: null,
+        success: false,
+        statusCode,
+        latencyMs: Date.now() - startedAt,
+        droppedReason,
+      },
+    };
   }
 }
 
@@ -1393,12 +1656,39 @@ async function attachProviderListSparklinesForVisibleItems(
     quoteCurrency: ContractQuoteCurrency;
   },
 ) {
+  const profile = getProviderCandleRateLimitProfile(params.exchange);
+  const startedAt = Date.now();
+  const deadlineAt = startedAt + profile.requestMaxAttachMs;
+  const stats: ProviderCandleAttachStats = {
+    targetCount: 0,
+    attemptedCount: 0,
+    successCount: 0,
+    failedCount: 0,
+    skippedBudgetCount: 0,
+    skippedCooldownCount: 0,
+    skippedUnsupportedCount: 0,
+    warmupQueuedCount: 0,
+    http429Count: 0,
+    http4xxCount: 0,
+    http5xxCount: 0,
+    latencyMs: [],
+    droppedReasons: {},
+    cooldownUntil: null,
+    budgetMs: profile.requestMaxAttachMs,
+    budgetExhausted: false,
+  };
   const fetchTargets = attached
     .map((result, index) => ({ result, index }))
     .filter(({ result }) => shouldFetchProviderListSparkline(result.item));
+  stats.targetCount = fetchTargets.length;
   if (fetchTargets.length === 0) {
-    return attached;
+    return { attached, stats };
   }
+  const requestTargets = fetchTargets.slice(0, profile.requestMaxFetches);
+  const deferredTargets = fetchTargets.slice(profile.requestMaxFetches);
+  stats.warmupQueuedCount = deferredTargets.length;
+  stats.skippedBudgetCount += deferredTargets.length;
+  stats.budgetExhausted = deferredTargets.length > 0;
 
   logger.info(
     {
@@ -1407,28 +1697,60 @@ async function attachProviderListSparklinesForVisibleItems(
       exchange: params.exchange,
       quoteCurrency: params.quoteCurrency,
       targetCount: fetchTargets.length,
-      concurrency: LIST_SPARKLINE_ATTACH_CONCURRENCY,
-      timeoutMs: LIST_SPARKLINE_PROVIDER_TIMEOUT_MS,
+      requestTargetCount: requestTargets.length,
+      deferredTargetCount: deferredTargets.length,
+      concurrency: profile.requestConcurrency,
+      timeoutMs: profile.timeoutMs,
+      budgetMs: profile.requestMaxAttachMs,
     },
-    `[ProviderCandleListAttachBatch] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} targetCount=${fetchTargets.length} concurrency=${LIST_SPARKLINE_ATTACH_CONCURRENCY} timeoutMs=${LIST_SPARKLINE_PROVIDER_TIMEOUT_MS}`,
+    `[ProviderCandleListAttachBatch] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} targetCount=${fetchTargets.length} requestTargetCount=${requestTargets.length} deferredTargetCount=${deferredTargets.length} concurrency=${profile.requestConcurrency} timeoutMs=${profile.timeoutMs} budgetMs=${profile.requestMaxAttachMs}`,
   );
 
   const replacements = await mapBounded(
-    fetchTargets,
-    LIST_SPARKLINE_ATTACH_CONCURRENCY,
-    ({ result }) => fetchProviderListSparklineAttach(result.item, {
+    requestTargets,
+    profile.requestConcurrency,
+    async ({ result }) => {
+      if (Date.now() >= deadlineAt) {
+        return {
+          replacement: null,
+          metric: {
+            attempted: false,
+            skippedReason: 'budget_exhausted' as const,
+            success: false,
+            statusCode: null,
+            latencyMs: 0,
+            droppedReason: 'budget_exhausted',
+          },
+        };
+      }
+      return fetchProviderListSparklineAttach(result.item, {
       exchange: params.exchange,
       quoteCurrency: params.quoteCurrency,
-      timeoutMs: LIST_SPARKLINE_PROVIDER_TIMEOUT_MS,
-    }),
+        timeoutMs: profile.timeoutMs,
+        deadlineAt,
+        route: '/market/tickers',
+      });
+    },
   );
   const next = [...attached];
-  replacements.forEach((replacement, replacementIndex) => {
+  replacements.forEach(({ replacement, metric }, replacementIndex) => {
+    countProviderMetric(stats, metric);
     if (replacement) {
-      next[fetchTargets[replacementIndex].index] = replacement;
+      next[requestTargets[replacementIndex].index] = replacement;
     }
   });
-  return next;
+  const state = getProviderCandleRateLimitState(params.exchange);
+  stats.cooldownUntil = state.cooldownUntil > Date.now() ? state.cooldownUntil : null;
+  if (deferredTargets.length > 0) {
+    scheduleSparklineWarmup({
+      exchange: params.exchange,
+      quoteCurrency: params.quoteCurrency,
+      items: deferredTargets.map((target) => target.result.item),
+      reason: 'ticker_top_volume',
+    });
+  }
+  stats.budgetExhausted = stats.budgetExhausted || Date.now() >= deadlineAt;
+  return { attached: next, stats };
 }
 
 function preparedSparklineKey(
@@ -2750,16 +3072,24 @@ export async function getMarketCandleSnapshot(params: CandleSnapshotParams) {
 }
 
 function shouldRunSparklineWarmup() {
+  if (process.env.SPARKLINE_WARMUP_ENABLED === 'false') {
+    return false;
+  }
   return process.env.SPARKLINE_WARMUP_ENABLED === 'true' || process.env.NODE_ENV !== 'test';
 }
 
-function buildTickerSparklineSummary(items: MarketTickerItem[], attachMs: number) {
+function buildTickerSparklineSummary(
+  items: MarketTickerItem[],
+  attachMs: number,
+  providerStats?: ProviderCandleAttachStats,
+) {
   const now = Date.now();
   const pointCounts = items.map((item) => item.sparklinePointCount ?? 0);
   const avgPointCount = pointCounts.length > 0
     ? pointCounts.reduce((sum, value) => sum + value, 0) / pointCounts.length
     : 0;
   const qualityCount = (quality: SparklineQuality) => items.filter((item) => item.sparklineQuality === quality).length;
+  const pointCountDistribution = summarizeSparklinePointCountDistribution(items);
   const missing = items.filter((item) => {
     if (item.sparklineQuality === 'lowInformation') {
       return !item.sparklineLowInformationReason;
@@ -2776,9 +3106,29 @@ function buildTickerSparklineSummary(items: MarketTickerItem[], attachMs: number
     listSparkline24: qualityCount('listSparkline24'),
     staleListSparkline24: qualityCount('staleListSparkline24'),
     fallbackListSparkline: qualityCount('fallbackListSparkline'),
+    tickerRingBuffer: items.filter((item) => item.sparklineSource === 'ticker_ring_buffer').length,
+    graphDisplayAllowed: items.filter((item) => item.graphDisplayAllowed).length,
     lowInformation: qualityCount('lowInformation'),
     unavailable: qualityCount('unavailable') + qualityCount('insufficient_points'),
     missing,
+    pointCountDistribution: {
+      count0: pointCountDistribution.count0,
+      count1: pointCountDistribution.count1,
+      count2to11: pointCountDistribution.count2to11,
+      count12to23: pointCountDistribution.count12to23,
+      count24: pointCountDistribution.count24,
+      countOver24: pointCountDistribution.countOver24,
+    },
+    providerFetchFailed: providerStats?.failedCount ?? 0,
+    providerFetchHttp429: providerStats?.http429Count ?? 0,
+    providerFetch4xx: providerStats?.http4xxCount ?? 0,
+    providerFetch5xx: providerStats?.http5xxCount ?? 0,
+    providerLatencyP50Ms: percentile(providerStats?.latencyMs ?? [], 0.5),
+    providerLatencyP95Ms: percentile(providerStats?.latencyMs ?? [], 0.95),
+    requestProviderFetches: providerStats?.attemptedCount ?? 0,
+    warmupQueued: providerStats?.warmupQueuedCount ?? 0,
+    attachBudgetMs: providerStats?.budgetMs ?? DEFAULT_LIST_SPARKLINE_ATTACH_BUDGET_MS,
+    attachBudgetExhausted: providerStats?.budgetExhausted ?? false,
     avgPointCount,
     updatedWithin30s: items.filter((item) => item.sparklineUpdatedAt && now - Date.parse(item.sparklineUpdatedAt) <= 30_000).length,
     updatedWithin60s: items.filter((item) => item.sparklineUpdatedAt && now - Date.parse(item.sparklineUpdatedAt) <= 60_000).length,
@@ -2839,13 +3189,14 @@ function scheduleSparklineWarmup(params: {
   items: MarketTickerItem[];
   reason: 'ticker_top_volume' | 'top_cards' | 'stale_refresh';
 }) {
+  const profile = getProviderCandleRateLimitProfile(params.exchange);
   if (!shouldRunSparklineWarmup() || params.items.length === 0) {
     return;
   }
   const targets = params.items
     .filter((item) => item.currentPrice !== null && item.currentPrice > 0)
     .sort((left, right) => right.accTradePrice24h - left.accTradePrice24h)
-    .slice(0, SPARKLINE_WARMUP_TOP_LIMIT);
+    .slice(0, Math.min(SPARKLINE_WARMUP_TOP_LIMIT, profile.warmupBatchSize));
   const marketIds = targets.map((item) => item.marketId);
   let cacheSkippedCount = 0;
   let inFlightSkippedCount = 0;
@@ -2873,6 +3224,8 @@ function scheduleSparklineWarmup(params: {
       inFlightSkippedCount,
       cacheSkippedCount,
       needsWarmCount: needsWarm.length,
+      concurrency: profile.warmupConcurrency,
+      batchSize: profile.warmupBatchSize,
     },
     `[SparklineWarmupQueued] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} marketIds=${marketIds.join(',')} reason=${params.reason} inFlightSkippedCount=${inFlightSkippedCount} cacheSkippedCount=${cacheSkippedCount}`,
   );
@@ -2894,10 +3247,17 @@ function scheduleSparklineWarmup(params: {
     return;
   }
   const timer = setTimeout(() => {
-    void mapBounded(needsWarm, LIST_SPARKLINE_ATTACH_CONCURRENCY, async (item) => {
+    void mapBounded(needsWarm, profile.warmupConcurrency, async (item) => {
       const startedAt = Date.now();
       const key = preparedSparklineKey(params.exchange, params.quoteCurrency, item.marketId);
       try {
+        const slot = await waitForProviderCandleSlot({
+          exchange: params.exchange,
+          deadlineAt: null,
+        });
+        if (!slot.allowed) {
+          throw new Error(slot.reason);
+        }
         const timeoutSentinel = { timeout: true as const };
         const candleLoad = getAdapter(params.exchange).getCandles({
           exchange: params.exchange,
@@ -2930,7 +3290,7 @@ function scheduleSparklineWarmup(params: {
           : null;
         if (normalized && isDisplayableRealSparkline(normalized)) {
           const cachedNormalized = writeRealSparklineCache(key, normalized);
-          logger.info(
+          logger.debug(
             {
               domain: 'market-contract',
               exchange: params.exchange,
@@ -2959,7 +3319,7 @@ function scheduleSparklineWarmup(params: {
             const normalizedPrepared = normalizeSparklineQuality(prepared);
             const cachedPrepared = writeRealSparklineCache(key, normalizedPrepared);
             if (isDisplayableRealSparkline(cachedPrepared)) {
-              logger.info(
+              logger.debug(
                 {
                   domain: 'market-contract',
                   exchange: params.exchange,
@@ -2978,7 +3338,7 @@ function scheduleSparklineWarmup(params: {
             }
           }
         }
-        logger.info(
+        logger.debug(
           {
             domain: 'market-contract',
             exchange: params.exchange,
@@ -3003,11 +3363,15 @@ function scheduleSparklineWarmup(params: {
           timeframe: '1M',
           statusCode: extractProviderFailureStatus(error),
           error: reason,
-          droppedReason: reason === 'provider_timeout' ? 'provider_timeout' : 'warmup_provider_candle_fetch_failed',
+          droppedReason: classifyProviderDropReason(reason, extractProviderFailureStatus(error)),
           latencyMs: Date.now() - startedAt,
           route: 'warmup',
         });
-        logger.info(
+        registerProviderCandleFailure({
+          exchange: params.exchange,
+          statusCode: extractProviderFailureStatus(error),
+        });
+        logger.debug(
           {
             domain: 'market-contract',
             exchange: params.exchange,
@@ -3041,7 +3405,7 @@ export async function getMarketTickerList(params: TickerListParams) {
   const normalizedQuery = normalizeTickerSearchQuery(params.query);
   const displayHint = quoteDisplayHint(params.quoteCurrency);
   if (!isQuoteCurrencySupported(params.exchange, params.quoteCurrency)) {
-    logger.info(
+    logger.debug(
       {
         domain: 'market-contract',
         exchange: params.exchange,
@@ -3228,11 +3592,12 @@ export async function getMarketTickerList(params: TickerListParams) {
     exchange: params.exchange,
     quoteCurrency: params.quoteCurrency,
   }));
-  const providerAttached = await attachProviderListSparklinesForVisibleItems(initialAttached, {
+  const providerAttachResult = await attachProviderListSparklinesForVisibleItems(initialAttached, {
     exchange: params.exchange,
     quoteCurrency: params.quoteCurrency,
   });
-  for (const attached of providerAttached) {
+  const providerAttachStats = providerAttachResult.stats;
+  for (const attached of providerAttachResult.attached) {
     const attachedItem = {
       ...attached.item,
       priceDisplayHint: displayHint,
@@ -3240,7 +3605,7 @@ export async function getMarketTickerList(params: TickerListParams) {
     attachLatencies.push(attached.elapsedMs);
     attachedItems.push(attachedItem);
     const uniquePriceCount = new Set(attachedItem.sparklinePoints.map((point) => point.price)).size;
-    logger.info(
+    logger.debug(
       {
         domain: 'market-contract',
         exchange: attachedItem.exchange,
@@ -3261,7 +3626,7 @@ export async function getMarketTickerList(params: TickerListParams) {
       },
       `[ListSparklineAttach] exchange=${attachedItem.exchange} quoteCurrency=${attachedItem.quoteCurrency} canonicalMarketId=${attachedItem.canonicalMarketId} symbol=${attachedItem.symbol} pointCount=${attachedItem.sparklinePointCount} quality=${attachedItem.sparklineQuality} source=${attachedItem.sparklineSource} isDerived=${attachedItem.sparklineIsDerived} lowInformationReason=${attachedItem.sparklineLowInformationReason ?? ''} unavailableReason=${attachedItem.sparklineUnavailableReason ?? ''}`,
     );
-    logger.info(
+    logger.debug(
       {
         domain: 'market-contract',
         exchange: attached.item.exchange,
@@ -3308,7 +3673,7 @@ export async function getMarketTickerList(params: TickerListParams) {
       updatedAt: attached.item.sparklineUpdatedAt,
     });
     if (params.exchange === 'korbit') {
-      logger.info(
+      logger.debug(
         {
           domain: 'market-contract',
           exchange: params.exchange,
@@ -3335,7 +3700,7 @@ export async function getMarketTickerList(params: TickerListParams) {
     reason: 'ticker_top_volume',
   });
   const attachMs = Date.now() - attachStartedAt;
-  const sparklineSummary = buildTickerSparklineSummary(attachedItems, attachMs);
+  const sparklineSummary = buildTickerSparklineSummary(attachedItems, attachMs, providerAttachStats);
   const pointCountDistribution = summarizeSparklinePointCountDistribution(attachedItems);
   const fallbackRatio = attachedItems.length > 0 ? sparklineSummary.fallbackListSparkline / attachedItems.length : 0;
   const previewGraphDerivedCount = attachedItems.filter((item) => item.sparklineIsDerived).length;
@@ -3384,6 +3749,67 @@ export async function getMarketTickerList(params: TickerListParams) {
   const averagePointCount = attachedItems.length > 0
     ? attachedItems.reduce((sum, item) => sum + item.sparklinePointCount, 0) / attachedItems.length
     : 0;
+  logger.info(
+    {
+      domain: 'market-contract',
+      exchange: params.exchange,
+      quoteCurrency: params.quoteCurrency,
+      requestedLimit,
+      returnedCount: attachedItems.length,
+      graphDisplayAllowed: attachedItems.filter((item) => item.graphDisplayAllowed).length,
+      providerCandle24: qualitySummary.providerCandle24 ?? 0,
+      listSparkline24: qualitySummary.listSparkline24 ?? 0,
+      staleListSparkline24: qualitySummary.staleListSparkline24 ?? 0,
+      tickerRingBuffer: attachedItems.filter((item) => item.sparklineSource === 'ticker_ring_buffer').length,
+      lowInformation: qualitySummary.lowInformation ?? 0,
+      unavailable: (qualitySummary.unavailable ?? 0) + (qualitySummary.insufficient_points ?? 0),
+      pointCountDistribution,
+      sparklineAttachMs: attachMs,
+      totalMs: Date.now() - startedAt,
+      providerFetchFailed: providerAttachStats.failedCount,
+      providerFetchHttp429: providerAttachStats.http429Count,
+      providerFetch4xx: providerAttachStats.http4xxCount,
+      providerFetch5xx: providerAttachStats.http5xxCount,
+    },
+    `[TickerSparklineCoverageByExchange] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} returnedCount=${attachedItems.length} graphDisplayAllowed=${attachedItems.filter((item) => item.graphDisplayAllowed).length} providerCandle24=${qualitySummary.providerCandle24 ?? 0} listSparkline24=${qualitySummary.listSparkline24 ?? 0} staleListSparkline24=${qualitySummary.staleListSparkline24 ?? 0} tickerRingBuffer=${attachedItems.filter((item) => item.sparklineSource === 'ticker_ring_buffer').length} lowInformation=${qualitySummary.lowInformation ?? 0} unavailable=${(qualitySummary.unavailable ?? 0) + (qualitySummary.insufficient_points ?? 0)} count0=${pointCountDistribution.count0} count1=${pointCountDistribution.count1} count2to11=${pointCountDistribution.count2to11} count12to23=${pointCountDistribution.count12to23} count24=${pointCountDistribution.count24} countOver24=${pointCountDistribution.countOver24} sparklineAttachMs=${attachMs} totalMs=${Date.now() - startedAt}`,
+  );
+  logger.info(
+    {
+      domain: 'market-contract',
+      exchange: params.exchange,
+      quoteCurrency: params.quoteCurrency,
+      targetCount: providerAttachStats.targetCount,
+      attemptedCount: providerAttachStats.attemptedCount,
+      successCount: providerAttachStats.successCount,
+      failedCount: providerAttachStats.failedCount,
+      skippedBudgetCount: providerAttachStats.skippedBudgetCount,
+      skippedCooldownCount: providerAttachStats.skippedCooldownCount,
+      skippedUnsupportedCount: providerAttachStats.skippedUnsupportedCount,
+      warmupQueuedCount: providerAttachStats.warmupQueuedCount,
+      http429Count: providerAttachStats.http429Count,
+      http4xxCount: providerAttachStats.http4xxCount,
+      http5xxCount: providerAttachStats.http5xxCount,
+      latencyP50Ms: percentile(providerAttachStats.latencyMs, 0.5),
+      latencyP95Ms: percentile(providerAttachStats.latencyMs, 0.95),
+      cooldownUntil: providerAttachStats.cooldownUntil ? new Date(providerAttachStats.cooldownUntil).toISOString() : null,
+      droppedReasons: providerAttachStats.droppedReasons,
+    },
+    `[ProviderCandleRateLimitSummary] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} targetCount=${providerAttachStats.targetCount} attemptedCount=${providerAttachStats.attemptedCount} successCount=${providerAttachStats.successCount} failedCount=${providerAttachStats.failedCount} skippedBudgetCount=${providerAttachStats.skippedBudgetCount} skippedCooldownCount=${providerAttachStats.skippedCooldownCount} warmupQueuedCount=${providerAttachStats.warmupQueuedCount} http429Count=${providerAttachStats.http429Count} http4xxCount=${providerAttachStats.http4xxCount} http5xxCount=${providerAttachStats.http5xxCount} latencyP50Ms=${percentile(providerAttachStats.latencyMs, 0.5)} latencyP95Ms=${percentile(providerAttachStats.latencyMs, 0.95)}`,
+  );
+  logger.info(
+    {
+      domain: 'market-contract',
+      exchange: params.exchange,
+      quoteCurrency: params.quoteCurrency,
+      sparklineAttachMs: attachMs,
+      totalMs: Date.now() - startedAt,
+      budgetMs: providerAttachStats.budgetMs,
+      budgetExhausted: providerAttachStats.budgetExhausted,
+      requestProviderFetches: providerAttachStats.attemptedCount,
+      warmupQueued: providerAttachStats.warmupQueuedCount,
+    },
+    `[SparklineAttachPerformanceSummary] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} sparklineAttachMs=${attachMs} totalMs=${Date.now() - startedAt} budgetMs=${providerAttachStats.budgetMs} budgetExhausted=${providerAttachStats.budgetExhausted} requestProviderFetches=${providerAttachStats.attemptedCount} warmupQueued=${providerAttachStats.warmupQueuedCount}`,
+  );
   logger.info(
     {
       domain: 'market-contract',
