@@ -69,6 +69,10 @@ export interface WebSocketClientDefinition {
   buildConnectionRequest?:
     | (() => Promise<{ url?: string; headers?: Record<string, string> } | void>)
     | (() => { url?: string; headers?: Record<string, string> } | void);
+  onUnexpectedResponse?: (
+    response: { statusCode?: number; statusMessage?: string; headers: Record<string, string | string[] | undefined> },
+    ctx: WebSocketClientManager,
+  ) => Promise<{ handled?: boolean } | void> | { handled?: boolean } | void;
   onOpen: (ctx: WebSocketClientManager) => Promise<void> | void;
   onMessage: (raw: WebSocket.RawData, ctx: WebSocketClientManager) => Promise<void> | void;
   onReconnect?: (ctx: WebSocketClientManager) => Promise<void> | void;
@@ -424,6 +428,66 @@ export class WebSocketClientManager {
           },
           reasonType === 'connect_error' ? 'Websocket connect failed' : 'Websocket client error',
         );
+      });
+
+      socket.on('unexpected-response', (_request, response) => {
+        if (socket !== this.socket && this.socket !== null) {
+          return;
+        }
+
+        const statusCode = response.statusCode;
+        const statusMessage = response.statusMessage;
+        this.lastReconnectMetadata = {
+          attempt: this.reconnectAttempts + 1,
+          reasonType: 'connect_error',
+          code: statusCode,
+          message: statusMessage ? `HTTP ${statusCode} ${statusMessage}` : `HTTP ${statusCode}`,
+        };
+        this.clearHeartbeatTimer();
+        if (this.socket === socket) {
+          this.socket = null;
+        }
+        response.resume();
+
+        void Promise.resolve(this.definition.onUnexpectedResponse?.({
+          statusCode,
+          statusMessage,
+          headers: response.headers,
+        }, this)).then((result) => {
+          logger[result?.handled ? 'info' : 'warn'](
+            {
+              domain: 'exchange-ws',
+              client: this.definition.name,
+              clientInstanceId: this.instanceId,
+              url: this.activeUrl,
+              connectAttempt,
+              statusCode,
+              statusMessage,
+              reconnectScheduled: this.reconnectTimer !== null,
+            },
+            result?.handled ? 'Websocket connect rejected and handled' : 'Websocket connect rejected',
+          );
+
+          if (!this.stopped && !this.stopping) {
+            void this.scheduleReconnect();
+          }
+        }).catch((error: unknown) => {
+          logger.warn(
+            {
+              domain: 'exchange-ws',
+              client: this.definition.name,
+              clientInstanceId: this.instanceId,
+              url: this.activeUrl,
+              connectAttempt,
+              statusCode,
+              err: error,
+            },
+            'Websocket unexpected-response handler failed',
+          );
+          if (!this.stopped && !this.stopping) {
+            void this.scheduleReconnect();
+          }
+        });
       });
 
       socket.on('ping', (data) => {

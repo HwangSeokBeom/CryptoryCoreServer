@@ -49,7 +49,7 @@ describe('Binance endpoint configuration', () => {
     expect(config.restBaseUrl).toBe('https://data-api.binance.vision');
     expect(config.publicRestBaseUrl).toBe('https://data-api.binance.vision');
     expect(config.privateRestBaseUrl).toBe('https://api.binance.com');
-    expect(config.publicWebSocketUrl).toBe('wss://stream.binance.com:9443');
+    expect(config.publicWebSocketUrl).toBe('wss://data-stream.binance.vision:9443');
   });
 
   it('keeps the legacy BINANCE_API_BASE_URL as a public REST fallback only', async () => {

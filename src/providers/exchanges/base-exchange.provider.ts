@@ -4,7 +4,7 @@ import { ExchangeCapabilityError } from '../../core/exchange/errors';
 import { EXCHANGE_METADATA } from '../../core/exchange/exchange.metadata';
 import { RestClient } from '../../core/exchange/rest.client';
 import type { ExchangeCapability, ExchangeId, ExchangeMetadata, MarketCapabilitySnapshot } from '../../core/exchange/exchange.types';
-import { logger } from '../../utils/logger';
+import { logger, summarizeListForLog, truncateForLog } from '../../utils/logger';
 
 type CachedProviderResponse<T> = {
   value: T;
@@ -37,6 +37,28 @@ function summarizeDroppedReasons(droppedSymbols: Array<{ symbol: string; reason:
     summary[item.reason] = (summary[item.reason] ?? 0) + 1;
     return summary;
   }, {});
+}
+
+function verboseMarketUniverseLogsEnabled() {
+  return process.env.MARKET_PROVIDER_VERBOSE_SYMBOL_LOGS === 'true';
+}
+
+function summarizeCapabilitySymbols(capabilitySymbols: MarketUniverseSnapshot['capabilitySymbols'] | undefined) {
+  return {
+    tickers: capabilitySymbols?.tickers?.length ?? 0,
+    orderbook: capabilitySymbols?.orderbook?.length ?? 0,
+    trades: capabilitySymbols?.trades?.length ?? 0,
+    candles: capabilitySymbols?.candles?.length ?? 0,
+  };
+}
+
+function summarizeCapabilitySymbolSamples(capabilitySymbols: MarketUniverseSnapshot['capabilitySymbols'] | undefined) {
+  return {
+    tickers: summarizeListForLog(capabilitySymbols?.tickers),
+    orderbook: summarizeListForLog(capabilitySymbols?.orderbook),
+    trades: summarizeListForLog(capabilitySymbols?.trades),
+    candles: summarizeListForLog(capabilitySymbols?.candles),
+  };
 }
 
 function extractUpstreamStatus(error: unknown) {
@@ -224,9 +246,9 @@ export abstract class BaseExchangeProvider {
         upstreamStatus: extractUpstreamStatus(error),
         rateLimited: isRateLimitError(error),
         responseUnavailable: value === undefined,
-        requestedSymbols: params.symbolDiff?.requestedSymbols,
-        resolvedSymbols,
-        droppedSymbols,
+        requestedSymbols: truncateForLog(params.symbolDiff?.requestedSymbols),
+        resolvedSymbols: truncateForLog(resolvedSymbols),
+        droppedSymbols: truncateForLog(droppedSymbols),
         droppedReasonsSummary: summarizeDroppedReasons(droppedSymbols),
         sourceOfTruth: 'provider_market_universe',
         totalAvailableCount,
@@ -258,6 +280,8 @@ export abstract class BaseExchangeProvider {
     const registrySymbolSet = new Set(params.universe.registrySymbols);
     const providerMarketCount = params.universe.marketSymbols.length;
     const registryMappedCount = params.universe.marketSymbols.filter((symbol) => registrySymbolSet.has(symbol)).length;
+    const verboseUniverseLogs = verboseMarketUniverseLogsEnabled();
+    const websocketTickerSymbols = params.universe.websocketTickerSymbols ?? params.universe.marketSymbols;
 
     logger.info(
       {
@@ -273,21 +297,33 @@ export abstract class BaseExchangeProvider {
         returnedCount: params.returnedSymbols.length,
         registryMappedCount,
         registryUnmappedCount: Math.max(providerMarketCount - registryMappedCount, 0),
-        requestedSymbols,
-        resolvedSymbols,
-        returnedSymbols: params.returnedSymbols,
-        droppedSymbols,
+        registrySymbolCount: params.universe.registrySymbols.length,
+        marketSymbolCount: params.universe.marketSymbols.length,
+        websocketTickerSymbolCount: websocketTickerSymbols.length,
+        capabilitySymbolCounts: summarizeCapabilitySymbols(params.universe.capabilitySymbols),
+        requestedSymbols: truncateForLog(requestedSymbols),
+        resolvedSymbols: truncateForLog(resolvedSymbols),
+        returnedSymbols: truncateForLog(params.returnedSymbols),
+        droppedSymbols: truncateForLog(droppedSymbols),
         droppedReasonsSummary: summarizeDroppedReasons(droppedSymbols),
         sourceOfTruth: 'provider_market_universe',
         appliedLimit: params.appliedLimit ?? null,
         totalAvailableCount: params.totalAvailableCount ?? providerMarketCount,
-        universe: {
-          registrySymbols: params.universe.registrySymbols,
-          marketSymbols: params.universe.marketSymbols,
-          websocketTickerSymbols: params.universe.websocketTickerSymbols ?? params.universe.marketSymbols,
-          capabilitySymbols: params.universe.capabilitySymbols,
-          capabilityExcludedSymbols: params.universe.capabilityExcludedSymbols,
-        },
+        universe: verboseUniverseLogs
+          ? {
+              registrySymbols: params.universe.registrySymbols,
+              marketSymbols: params.universe.marketSymbols,
+              websocketTickerSymbols,
+              capabilitySymbols: params.universe.capabilitySymbols,
+              capabilityExcludedSymbols: params.universe.capabilityExcludedSymbols,
+            }
+          : {
+              registrySymbols: summarizeListForLog(params.universe.registrySymbols),
+              marketSymbols: summarizeListForLog(params.universe.marketSymbols),
+              websocketTickerSymbols: summarizeListForLog(websocketTickerSymbols),
+              capabilitySymbols: summarizeCapabilitySymbolSamples(params.universe.capabilitySymbols),
+              capabilityExcludedSymbols: params.universe.capabilityExcludedSymbols,
+            },
       },
       'Resolved exchange market universe',
     );

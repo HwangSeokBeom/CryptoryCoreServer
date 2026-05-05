@@ -1,6 +1,35 @@
 import pino from 'pino';
 import { sanitizeSensitiveText } from '../domains/security/credential-security.service';
 
+const DEFAULT_LOG_ARRAY_MAX = 20;
+const DEFAULT_LOG_ARRAY_TRUNCATE_THRESHOLD = 30;
+
+export function truncateForLog<T>(
+  items: readonly T[] | undefined,
+  max = DEFAULT_LOG_ARRAY_MAX,
+  threshold = DEFAULT_LOG_ARRAY_TRUNCATE_THRESHOLD,
+) {
+  const values = Array.isArray(items) ? [...items] : [];
+  if (values.length <= threshold) {
+    return values;
+  }
+
+  return {
+    count: values.length,
+    items: values.slice(0, max),
+    omittedCount: Math.max(values.length - max, 0),
+  };
+}
+
+export function summarizeListForLog<T>(items: readonly T[] | undefined, max = DEFAULT_LOG_ARRAY_MAX) {
+  const values = Array.isArray(items) ? [...items] : [];
+  return {
+    count: values.length,
+    sample: values.slice(0, max),
+    omittedCount: Math.max(values.length - max, 0),
+  };
+}
+
 function serializeError(error: unknown) {
   if (!(error instanceof Error)) {
     return error;
