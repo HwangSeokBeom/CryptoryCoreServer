@@ -126,7 +126,7 @@ export const EXCHANGE_METADATA: Record<ExchangeId, ExchangeMetadata> = {
     restBaseUrl: 'https://data-api.binance.vision',
     publicRestBaseUrl: 'https://data-api.binance.vision',
     privateRestBaseUrl: 'https://api.binance.com',
-    publicWebSocketUrl: 'wss://stream.binance.com:9443',
+    publicWebSocketUrl: 'wss://data-stream.binance.vision:9443',
     referenceOnly: true,
     capabilities: [
       'market:list',

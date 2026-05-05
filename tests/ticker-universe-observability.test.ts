@@ -47,12 +47,35 @@ describe('Ticker universe observability', () => {
       requestedSymbols: ['BTC', 'ETH', 'XRP'],
       returnedSymbols: ['BTC', 'ETH'],
       droppedSymbols: [{ symbol: 'XRP', reason: 'missing_upstream_ticker' }],
+      registrySymbolCount: expect.any(Number),
+      marketSymbolCount: 3,
+      websocketTickerSymbolCount: 3,
+      capabilitySymbolCounts: {
+        tickers: 3,
+        orderbook: 2,
+      },
       universe: {
-        marketSymbols: ['BTC', 'ETH', 'XRP'],
-        websocketTickerSymbols: ['BTC', 'ETH', 'XRP'],
+        marketSymbols: {
+          count: 3,
+          sample: ['BTC', 'ETH', 'XRP'],
+          omittedCount: 0,
+        },
+        websocketTickerSymbols: {
+          count: 3,
+          sample: ['BTC', 'ETH', 'XRP'],
+          omittedCount: 0,
+        },
         capabilitySymbols: {
-          tickers: ['BTC', 'ETH', 'XRP'],
-          orderbook: ['BTC', 'ETH'],
+          tickers: {
+            count: 3,
+            sample: ['BTC', 'ETH', 'XRP'],
+            omittedCount: 0,
+          },
+          orderbook: {
+            count: 2,
+            sample: ['BTC', 'ETH'],
+            omittedCount: 0,
+          },
         },
         capabilityExcludedSymbols: {
           orderbook: [{ symbol: 'XRP', reason: 'capability not supported' }],
