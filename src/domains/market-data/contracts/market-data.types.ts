@@ -145,6 +145,7 @@ export type MarketTickerItem = {
   previewGraphPointCount?: number;
   previewGraphRealSeries?: boolean;
   previewGraphDisplayAllowed?: boolean;
+  priceDisplayHint?: QuoteDisplayHint;
 };
 
 export type CurrentPriceSnapshot = {
@@ -174,7 +175,15 @@ export type TickerListParams = {
   order?: SortOrder;
   limit?: number;
   cursor?: string;
+  query?: string;
   requestId?: string;
+};
+
+export type QuoteDisplayHint = {
+  quoteCurrency: ContractQuoteCurrency;
+  recommendedMaxFractionDigits: number;
+  recommendedSignificantDigits: number | null;
+  compactNotationAllowed: boolean;
 };
 
 export type MarketTickerDiagnostics = {
@@ -207,8 +216,12 @@ export type MarketTickerResponseMeta = {
   generationHint: string;
   requestedLimit: number;
   returnedCount: number;
+  query: string | null;
+  sortKey: string;
+  sortDirection: SortOrder;
   nextCursor: string | null;
   hasNext: boolean;
+  snapshotAt: string;
   serverReceivedAt: string;
   serverRespondedAt: string;
   sparklineTargetPointCount: number;
@@ -236,9 +249,12 @@ export type MarketTickerResponseMeta = {
   };
   supportedQuotes: ContractQuoteCurrency[];
   defaultQuoteCurrency: ContractQuoteCurrency;
+  quoteDisplayHint: QuoteDisplayHint;
   timing: {
     totalMs: number;
     tickerFetchMs: number;
+    sortMs: number;
+    cursorMs: number;
     sparklineAttachMs: number;
   };
 };

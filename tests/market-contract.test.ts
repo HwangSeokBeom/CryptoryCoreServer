@@ -438,6 +438,20 @@ describe('market REST contract routes', () => {
     await app.close();
   }, 15000);
 
+  it('GET /market/tickers caps compatibility limits at 100', async () => {
+    mockContractFetch();
+    const app = await createApp();
+
+    const response = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=500' });
+    const body = JSON.parse(response.body);
+
+    expect(response.statusCode).toBe(200);
+    expect(body.data.meta.requestedLimit).toBe(100);
+    expect(body.data.items.length).toBeLessThanOrEqual(100);
+
+    await app.close();
+  }, 15000);
+
   it('GET /market/tickers does not fake a 24 point sparkline from currentPrice and changeRate24h', async () => {
     mockContractFetchWithTicker({
       trade_price: 110,
@@ -570,6 +584,81 @@ describe('market REST contract routes', () => {
     expect(second.items[0].canonicalMarketId).not.toBe(first.items[0].canonicalMarketId);
     expect(Array.isArray(second.items[0].sparklinePoints)).toBe(true);
     expect(second.items[0].sparklinePointCount >= 2 || second.items[0].sparklineUnavailableReason).toBeTruthy();
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/tickers encodes cursor contract and rejects query/exchange mismatches', async () => {
+    mockContractFetch();
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    const firstResponse = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1&sortKey=volume24h&sortDirection=desc&query=KRW' });
+    const first = JSON.parse(firstResponse.body).data;
+    const cursorPayload = JSON.parse(Buffer.from(first.meta.nextCursor, 'base64url').toString('utf8'));
+
+    expect(firstResponse.statusCode).toBe(200);
+    expect(cursorPayload).toMatchObject({
+      version: 1,
+      exchange: 'upbit',
+      quoteCurrency: 'KRW',
+      sortKey: 'volume24h',
+      sortDirection: 'desc',
+      query: 'krw',
+      lastCanonicalMarketId: first.items[0].canonicalMarketId,
+      snapshotAt: expect.any(String),
+    });
+
+    const secondResponse = await app.inject({ method: 'GET', url: `/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1&sortKey=volume24h&sortDirection=desc&query=KRW&cursor=${encodeURIComponent(first.meta.nextCursor)}` });
+    const second = JSON.parse(secondResponse.body).data;
+    expect(secondResponse.statusCode).toBe(200);
+    expect(second.items[0].canonicalMarketId).not.toBe(first.items[0].canonicalMarketId);
+
+    const queryMismatch = await app.inject({ method: 'GET', url: `/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1&sortKey=volume24h&sortDirection=desc&query=ETH&cursor=${encodeURIComponent(first.meta.nextCursor)}` });
+    expect(queryMismatch.statusCode).toBe(400);
+    expect(JSON.parse(queryMismatch.body).error.code).toBe('INVALID_CURSOR');
+
+    const exchangeMismatch = await app.inject({ method: 'GET', url: `/market/tickers?exchange=bithumb&quoteCurrency=KRW&limit=1&sortKey=volume24h&sortDirection=desc&query=KRW&cursor=${encodeURIComponent(first.meta.nextCursor)}` });
+    expect(exchangeMismatch.statusCode).toBe(400);
+    expect(JSON.parse(exchangeMismatch.body).error.code).toBe('INVALID_CURSOR');
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/tickers applies stable sort tie-breakers and asc cursor pagination', async () => {
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/v1/market/all')) {
+        return new Response(JSON.stringify([
+          { market: 'KRW-CCC', korean_name: '씨씨씨', english_name: 'CCC' },
+          { market: 'KRW-AAA', korean_name: '에이에이', english_name: 'AAA' },
+          { market: 'KRW-BBB', korean_name: '비비비', english_name: 'BBB' },
+        ]), { status: 200 });
+      }
+      if (url.includes('/v1/ticker')) {
+        return new Response(JSON.stringify([
+          { market: 'KRW-CCC', trade_price: 30, signed_change_rate: 0.01, signed_change_price: 1, acc_trade_price_24h: 1000, acc_trade_volume_24h: 1, high_price: 31, low_price: 29, trade_timestamp: 1777809600000 },
+          { market: 'KRW-AAA', trade_price: 10, signed_change_rate: 0.01, signed_change_price: 1, acc_trade_price_24h: 1000, acc_trade_volume_24h: 1, high_price: 11, low_price: 9, trade_timestamp: 1777809600000 },
+          { market: 'KRW-BBB', trade_price: 20, signed_change_rate: 0.01, signed_change_price: 1, acc_trade_price_24h: 1000, acc_trade_volume_24h: 1, high_price: 21, low_price: 19, trade_timestamp: 1777809600000 },
+        ]), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: 'unexpected path' }), { status: 500 });
+    });
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    const firstResponse = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=2&sortKey=volume24h&sortDirection=desc' });
+    const first = JSON.parse(firstResponse.body).data;
+    expect(first.items.map((item: any) => item.canonicalMarketId)).toEqual(['KRW-AAA', 'KRW-BBB']);
+
+    const secondResponse = await app.inject({ method: 'GET', url: `/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=2&sortKey=volume24h&sortDirection=desc&cursor=${encodeURIComponent(first.meta.nextCursor)}` });
+    const second = JSON.parse(secondResponse.body).data;
+    expect(second.items.map((item: any) => item.canonicalMarketId)).toEqual(['KRW-CCC']);
+
+    const ascFirstResponse = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1&sortKey=price&sortDirection=asc' });
+    const ascFirst = JSON.parse(ascFirstResponse.body).data;
+    const ascSecondResponse = await app.inject({ method: 'GET', url: `/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1&sortKey=price&sortDirection=asc&cursor=${encodeURIComponent(ascFirst.meta.nextCursor)}` });
+    const ascSecond = JSON.parse(ascSecondResponse.body).data;
+    expect(ascFirst.items[0].canonicalMarketId).toBe('KRW-AAA');
+    expect(ascSecond.items[0].canonicalMarketId).toBe('KRW-BBB');
 
     await app.close();
   }, 15000);
@@ -1576,6 +1665,20 @@ describe('market REST contract routes', () => {
       market: 'BTC-ETH',
       symbol: 'ETH',
       quoteCurrency: 'BTC',
+      price: expect.any(Number),
+      priceDisplayHint: {
+        quoteCurrency: 'BTC',
+        recommendedMaxFractionDigits: 10,
+        recommendedSignificantDigits: 6,
+        compactNotationAllowed: false,
+      },
+    });
+    expect(body.data.items[0].price).toBeGreaterThan(0);
+    expect(body.data.items[0].price).toBeLessThan(1);
+    expect(body.data.meta.quoteDisplayHint).toMatchObject({
+      quoteCurrency: 'BTC',
+      recommendedMaxFractionDigits: 10,
+      recommendedSignificantDigits: 6,
     });
 
     await app.close();

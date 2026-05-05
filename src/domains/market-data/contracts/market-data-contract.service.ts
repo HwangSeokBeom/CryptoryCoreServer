@@ -20,6 +20,7 @@ import type {
   MarketCandle,
   MarketTickerItem,
   MarketTickerDiagnostics,
+  QuoteDisplayHint,
   SparklineQuality,
   SortOrder,
   TickerSparklineSource,
@@ -180,6 +181,9 @@ const SPARKLINE_TOP_RESPONSE_TIMEOUT_MS = 1_200;
 const SPARKLINE_TOP_PROVIDER_TIMEOUT_MS = 850;
 const SPARKLINE_WARMUP_TOP_LIMIT = 100;
 const SPARKLINE_WILDCARDS = new Set(['all', '*', 'null', 'undefined']);
+const TICKER_CURSOR_VERSION = 1;
+const TICKER_CURSOR_TTL_MS = 5 * 60_000;
+const TICKER_LIMIT_MAX = 100;
 
 const adapters: Record<ContractExchange, ExchangeMarketDataAdapter> = {
   upbit: new V1ExchangeMarketDataAdapter('upbit'),
@@ -331,6 +335,31 @@ function createTickerDiagnostics(params: {
     previewGraphDerivedCount: params.previewGraphDerivedCount ?? 0,
     previewGraphRealSeries: false,
     previewGraphDisplayAllowed: false,
+  };
+}
+
+function quoteDisplayHint(quoteCurrency: ContractQuoteCurrency): QuoteDisplayHint {
+  if (quoteCurrency === 'BTC' || quoteCurrency === 'ETH') {
+    return {
+      quoteCurrency,
+      recommendedMaxFractionDigits: 10,
+      recommendedSignificantDigits: 6,
+      compactNotationAllowed: false,
+    };
+  }
+  if (quoteCurrency === 'KRW') {
+    return {
+      quoteCurrency,
+      recommendedMaxFractionDigits: 0,
+      recommendedSignificantDigits: null,
+      compactNotationAllowed: true,
+    };
+  }
+  return {
+    quoteCurrency,
+    recommendedMaxFractionDigits: 8,
+    recommendedSignificantDigits: 6,
+    compactNotationAllowed: false,
   };
 }
 
@@ -707,42 +736,206 @@ function validateTickerIdentity(item: MarketTickerItem, exchange: ContractExchan
   return null;
 }
 
-function tickerSortValue(item: MarketTickerItem, sort: TickerSort) {
+type PublicTickerSortKey = 'volume24h' | 'changeRate24h' | 'price' | 'name';
+
+type TickerCursorPayload = {
+  version: 1;
+  exchange: ContractExchange;
+  quoteCurrency: ContractQuoteCurrency;
+  sortKey: PublicTickerSortKey;
+  sortDirection: SortOrder;
+  query: string | null;
+  lastSortValue: number | string | null;
+  lastCanonicalMarketId: string;
+  snapshotAt: string;
+};
+
+function toPublicTickerSortKey(sort: TickerSort): PublicTickerSortKey {
+  if (sort === 'volume') return 'volume24h';
+  if (sort === 'changeRate') return 'changeRate24h';
+  return sort;
+}
+
+function normalizeTickerSearchQuery(query?: string | null) {
+  const trimmed = query?.trim();
+  return trimmed ? trimmed.toLowerCase() : null;
+}
+
+function tickerSearchMatches(item: MarketTickerItem, query: string | null) {
+  if (!query) {
+    return true;
+  }
+  return [
+    item.symbol,
+    item.displaySymbol,
+    item.koreanName,
+    item.englishName,
+    item.canonicalMarketId,
+  ].some((value) => value.toLowerCase().includes(query));
+}
+
+function tickerSortValue(item: MarketTickerItem, sort: TickerSort): number | string | null {
   if (sort === 'name') {
     return item.symbol;
   }
   if (sort === 'price') {
-    return item.currentPrice ?? Number.NEGATIVE_INFINITY;
+    return item.currentPrice;
   }
   if (sort === 'changeRate') {
-    return item.changeRate24h ?? Number.NEGATIVE_INFINITY;
+    return item.changeRate24h;
   }
   return item.accTradePrice24h;
 }
 
-function encodeTickerCursor(item: MarketTickerItem, sort: TickerSort, order: SortOrder) {
-  return Buffer.from(JSON.stringify({
-    sortKey: sort,
-    sortDirection: order,
-    sortValue: tickerSortValue(item, sort),
-    canonicalMarketId: item.canonicalMarketId ?? item.marketId,
-  })).toString('base64url');
+function compareNullablePrimaryValues(
+  left: number | string | null,
+  right: number | string | null,
+  order: SortOrder,
+) {
+  if (left === null && right === null) return 0;
+  if (left === null) return 1;
+  if (right === null) return -1;
+  const compared = typeof left === 'string' || typeof right === 'string'
+    ? String(left).localeCompare(String(right))
+    : left - right;
+  return order === 'asc' ? compared : -compared;
 }
 
-function decodeTickerCursor(cursor: string | undefined): {
-  sortKey?: string;
-  sortDirection?: string;
-  sortValue?: number | string;
-  canonicalMarketId?: string;
-} | null {
+function compareTickerSortTuple(
+  leftValue: number | string | null,
+  leftCanonicalMarketId: string,
+  rightValue: number | string | null,
+  rightCanonicalMarketId: string,
+  order: SortOrder,
+) {
+  const primary = compareNullablePrimaryValues(leftValue, rightValue, order);
+  if (primary !== 0) {
+    return primary;
+  }
+  return leftCanonicalMarketId.localeCompare(rightCanonicalMarketId);
+}
+
+function stableSortTickerItems(items: MarketTickerItem[], sort: TickerSort, order: SortOrder) {
+  let nullSortValueCount = 0;
+  const sorted = [...items].sort((left, right) => {
+    const leftValue = tickerSortValue(left, sort);
+    const rightValue = tickerSortValue(right, sort);
+    if (leftValue === null) nullSortValueCount += 1;
+    if (rightValue === null) nullSortValueCount += 1;
+    return compareTickerSortTuple(
+      leftValue,
+      left.canonicalMarketId ?? left.marketId,
+      rightValue,
+      right.canonicalMarketId ?? right.marketId,
+      order,
+    );
+  });
+  return {
+    items: sorted,
+    nullSortValueCount: sorted.filter((item) => tickerSortValue(item, sort) === null).length,
+  };
+}
+
+function encodeTickerCursor(params: {
+  item: MarketTickerItem;
+  exchange: ContractExchange;
+  quoteCurrency: ContractQuoteCurrency;
+  sort: TickerSort;
+  order: SortOrder;
+  query: string | null;
+  snapshotAt: string;
+}) {
+  const payload: TickerCursorPayload = {
+    version: TICKER_CURSOR_VERSION,
+    exchange: params.exchange,
+    quoteCurrency: params.quoteCurrency,
+    sortKey: toPublicTickerSortKey(params.sort),
+    sortDirection: params.order,
+    query: params.query,
+    lastSortValue: tickerSortValue(params.item, params.sort),
+    lastCanonicalMarketId: params.item.canonicalMarketId ?? params.item.marketId,
+    snapshotAt: params.snapshotAt,
+  };
+  return Buffer.from(JSON.stringify(payload)).toString('base64url');
+}
+
+function decodeTickerCursor(cursor: string | undefined): TickerCursorPayload | null {
   if (!cursor) {
     return null;
   }
   try {
     const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
-    return parsed && typeof parsed === 'object' ? parsed : null;
+    if (!parsed || typeof parsed !== 'object') {
+      throw new Error('not_object');
+    }
+    const payload = parsed as Partial<TickerCursorPayload>;
+    if (
+      payload.version !== TICKER_CURSOR_VERSION
+      || !payload.exchange
+      || !payload.quoteCurrency
+      || !payload.sortKey
+      || !payload.sortDirection
+      || !Object.prototype.hasOwnProperty.call(payload, 'lastSortValue')
+      || typeof payload.lastCanonicalMarketId !== 'string'
+      || typeof payload.snapshotAt !== 'string'
+    ) {
+      throw new Error('invalid_shape');
+    }
+    return payload as TickerCursorPayload;
   } catch {
-    throw new AppError(400, 'invalid ticker cursor', { field: 'cursor' }, 'INVALID_CURSOR');
+    logger.info(
+      { domain: 'market-contract', valid: false, reason: 'decode_failed' },
+      '[CursorPaginationDecode] valid=false reason=decode_failed cursorExchange= cursorQuote= cursorSortKey= cursorQuery=',
+    );
+    throw new AppError(400, 'invalid ticker cursor', { field: 'cursor', reason: 'decode_failed' }, 'INVALID_CURSOR');
+  }
+}
+
+function validateTickerCursor(params: {
+  cursor: TickerCursorPayload | null;
+  exchange: ContractExchange;
+  quoteCurrency: ContractQuoteCurrency;
+  sort: TickerSort;
+  order: SortOrder;
+  query: string | null;
+  now: number;
+}) {
+  if (!params.cursor) {
+    return;
+  }
+  const reason = params.cursor.exchange !== params.exchange
+    ? 'exchange_mismatch'
+    : params.cursor.quoteCurrency !== params.quoteCurrency
+      ? 'quote_currency_mismatch'
+      : params.cursor.sortKey !== toPublicTickerSortKey(params.sort)
+        ? 'sort_key_mismatch'
+        : params.cursor.sortDirection !== params.order
+          ? 'sort_direction_mismatch'
+          : params.cursor.query !== params.query
+            ? 'query_mismatch'
+            : null;
+  logger.info(
+    {
+      domain: 'market-contract',
+      valid: reason === null,
+      reason,
+      cursorExchange: params.cursor.exchange,
+      cursorQuote: params.cursor.quoteCurrency,
+      cursorSortKey: params.cursor.sortKey,
+      cursorQuery: params.cursor.query,
+    },
+    `[CursorPaginationDecode] valid=${reason === null} reason=${reason ?? ''} cursorExchange=${params.cursor.exchange} cursorQuote=${params.cursor.quoteCurrency} cursorSortKey=${params.cursor.sortKey} cursorQuery=${params.cursor.query ?? ''}`,
+  );
+  if (reason) {
+    throw new AppError(400, 'ticker cursor does not match request parameters', { field: 'cursor', reason }, 'INVALID_CURSOR');
+  }
+  const snapshotMs = Date.parse(params.cursor.snapshotAt);
+  if (!Number.isFinite(snapshotMs) || params.now - snapshotMs > TICKER_CURSOR_TTL_MS) {
+    throw new AppError(410, 'ticker cursor expired', {
+      field: 'cursor',
+      reason: 'snapshot_expired',
+      resetRequired: true,
+    }, 'CURSOR_EXPIRED');
   }
 }
 
@@ -751,17 +944,46 @@ function paginateTickerItems(items: MarketTickerItem[], params: {
   cursor?: string;
   sort: TickerSort;
   order: SortOrder;
+  exchange: ContractExchange;
+  quoteCurrency: ContractQuoteCurrency;
+  query: string | null;
+  snapshotAt: string;
 }) {
   const decoded = decodeTickerCursor(params.cursor);
+  validateTickerCursor({
+    cursor: decoded,
+    exchange: params.exchange,
+    quoteCurrency: params.quoteCurrency,
+    sort: params.sort,
+    order: params.order,
+    query: params.query,
+    now: Date.now(),
+  });
   let startIndex = 0;
-  if (decoded?.canonicalMarketId) {
-    const found = items.findIndex((item) => (item.canonicalMarketId ?? item.marketId) === decoded.canonicalMarketId);
-    startIndex = found >= 0 ? found + 1 : 0;
+  if (decoded) {
+    startIndex = items.findIndex((item) => compareTickerSortTuple(
+      tickerSortValue(item, params.sort),
+      item.canonicalMarketId ?? item.marketId,
+      decoded.lastSortValue,
+      decoded.lastCanonicalMarketId,
+      params.order,
+    ) > 0);
+    if (startIndex < 0) {
+      startIndex = items.length;
+    }
   }
   const page = items.slice(startIndex, startIndex + params.limit);
   const hasNext = startIndex + params.limit < items.length;
   const nextCursor = hasNext && page.length > 0
-    ? encodeTickerCursor(page[page.length - 1], params.sort, params.order)
+    ? encodeTickerCursor({
+        item: page[page.length - 1],
+        exchange: params.exchange,
+        quoteCurrency: params.quoteCurrency,
+        sort: params.sort,
+        order: params.order,
+        query: params.query,
+        snapshotAt: params.snapshotAt,
+      })
     : null;
   return {
     page,
@@ -2510,10 +2732,13 @@ function scheduleSparklineWarmup(params: {
 
 export async function getMarketTickerList(params: TickerListParams) {
   const exchangeContract = getMarketExchangeContract(params.exchange);
-  const requestedLimit = params.limit ?? 100;
+  const requestedLimit = Math.min(params.limit ?? TICKER_LIMIT_MAX, TICKER_LIMIT_MAX);
   const startedAt = Date.now();
   const requestId = params.requestId ?? `ticker-${++tickerRequestSeq}`;
   const serverReceivedAt = new Date(startedAt).toISOString();
+  const snapshotAt = serverReceivedAt;
+  const normalizedQuery = normalizeTickerSearchQuery(params.query);
+  const displayHint = quoteDisplayHint(params.quoteCurrency);
   if (!isQuoteCurrencySupported(params.exchange, params.quoteCurrency)) {
     logger.info(
       {
@@ -2539,8 +2764,12 @@ export async function getMarketTickerList(params: TickerListParams) {
         generationHint: `${params.exchange}:${params.quoteCurrency}:unsupported`,
         requestedLimit,
         returnedCount: 0,
+        query: normalizedQuery,
+        sortKey: toPublicTickerSortKey(params.sort ?? 'volume'),
+        sortDirection: params.order ?? 'desc',
         nextCursor: null,
         hasNext: false,
+        snapshotAt,
         serverReceivedAt,
         serverRespondedAt: new Date().toISOString(),
         sparklineTargetPointCount: LIST_SPARKLINE_TARGET_POINT_COUNT,
@@ -2551,9 +2780,12 @@ export async function getMarketTickerList(params: TickerListParams) {
 	        sparklineSummary: buildTickerSparklineSummary([], 0),
 	        supportedQuotes: exchangeContract.supportedQuotes,
         defaultQuoteCurrency: exchangeContract.defaultQuoteCurrency,
+        quoteDisplayHint: displayHint,
         timing: {
           totalMs: 0,
           tickerFetchMs: 0,
+          sortMs: 0,
+          cursorMs: 0,
           sparklineAttachMs: 0,
         },
       },
@@ -2568,8 +2800,30 @@ export async function getMarketTickerList(params: TickerListParams) {
     };
   }
   const sort = params.sort ?? 'volume';
-  const order = params.order ?? 'desc';
+  const order = params.order ?? (sort === 'name' ? 'asc' : 'desc');
   const key = `tickers:${params.exchange}:${params.quoteCurrency}:${sort}:${order}:all`;
+  logger.info(
+    {
+      domain: 'market-contract',
+      exchange: params.exchange,
+      quoteCurrency: params.quoteCurrency,
+      sortKey: toPublicTickerSortKey(sort),
+      sortDirection: order,
+      queryExists: normalizedQuery !== null,
+      cursorExists: Boolean(params.cursor),
+      limit: requestedLimit,
+    },
+    `[CursorPaginationRequest] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} sortKey=${toPublicTickerSortKey(sort)} sortDirection=${order} queryExists=${normalizedQuery !== null} cursorExists=${Boolean(params.cursor)} limit=${requestedLimit}`,
+  );
+  logger.info(
+    {
+      domain: 'market-contract',
+      exchange: params.exchange,
+      quoteCurrency: params.quoteCurrency,
+      recommendedPrecision: displayHint,
+    },
+    `[QuoteDisplayHint] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} recommendedPrecision=${JSON.stringify(displayHint)}`,
+  );
   logger.info(
     {
       domain: 'market-contract',
@@ -2616,16 +2870,40 @@ export async function getMarketTickerList(params: TickerListParams) {
     return true;
   });
   const deduped = dedupeTickerItemsByCanonical(identityCheckedItems);
-  const items = deduped.items;
-  for (const item of items) {
+  const filteredItems = deduped.items.filter((item) => tickerSearchMatches(item, normalizedQuery));
+  for (const item of filteredItems) {
     appendPreparedSparklineSample(item);
   }
+  const sortStartedAt = Date.now();
+  const stableSorted = stableSortTickerItems(filteredItems, sort, order);
+  const sortMs = Date.now() - sortStartedAt;
+  const items = stableSorted.items;
+  logger.info(
+    {
+      domain: 'market-contract',
+      exchange: params.exchange,
+      quoteCurrency: params.quoteCurrency,
+      sortKey: toPublicTickerSortKey(sort),
+      sortDirection: order,
+      inputCount: filteredItems.length,
+      sortedCount: items.length,
+      nullSortValueCount: stableSorted.nullSortValueCount,
+      duplicateCanonicalDropped: deduped.duplicateCount,
+    },
+    `[TickerStableSort] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} sortKey=${toPublicTickerSortKey(sort)} sortDirection=${order} inputCount=${filteredItems.length} sortedCount=${items.length} nullSortValueCount=${stableSorted.nullSortValueCount} duplicateCanonicalDropped=${deduped.duplicateCount}`,
+  );
+  const cursorStartedAt = Date.now();
   const paginated = paginateTickerItems(items, {
     limit: requestedLimit,
     cursor: params.cursor,
     sort,
     order,
+    exchange: params.exchange,
+    quoteCurrency: params.quoteCurrency,
+    query: normalizedQuery,
+    snapshotAt,
   });
+  const cursorMs = Date.now() - cursorStartedAt;
   logger.info(
     {
       domain: 'market-contract',
@@ -2650,29 +2928,33 @@ export async function getMarketTickerList(params: TickerListParams) {
       exchange: params.exchange,
       quoteCurrency: params.quoteCurrency,
     });
+    const attachedItem = {
+      ...attached.item,
+      priceDisplayHint: displayHint,
+    };
     attachLatencies.push(attached.elapsedMs);
-    attachedItems.push(attached.item);
-    const uniquePriceCount = new Set(attached.item.sparklinePoints.map((point) => point.price)).size;
+    attachedItems.push(attachedItem);
+    const uniquePriceCount = new Set(attachedItem.sparklinePoints.map((point) => point.price)).size;
     logger.info(
       {
         domain: 'market-contract',
-        exchange: attached.item.exchange,
-        quoteCurrency: attached.item.quoteCurrency,
-        canonicalMarketId: attached.item.canonicalMarketId,
-        symbol: attached.item.symbol,
-        pointCount: attached.item.sparklinePointCount,
-        quality: attached.item.sparklineQuality,
-        source: attached.item.sparklineSource,
-        isDerived: attached.item.sparklineIsDerived,
-        lowInformationReason: attached.item.sparklineLowInformationReason ?? null,
-        unavailableReason: attached.item.sparklineUnavailableReason ?? null,
-        updatedAt: attached.item.sparklineUpdatedAt,
-        sourceVersion: attached.item.sparklineSourceVersion,
-        pointsHash: attached.item.sparklinePointsHash,
+        exchange: attachedItem.exchange,
+        quoteCurrency: attachedItem.quoteCurrency,
+        canonicalMarketId: attachedItem.canonicalMarketId,
+        symbol: attachedItem.symbol,
+        pointCount: attachedItem.sparklinePointCount,
+        quality: attachedItem.sparklineQuality,
+        source: attachedItem.sparklineSource,
+        isDerived: attachedItem.sparklineIsDerived,
+        lowInformationReason: attachedItem.sparklineLowInformationReason ?? null,
+        unavailableReason: attachedItem.sparklineUnavailableReason ?? null,
+        updatedAt: attachedItem.sparklineUpdatedAt,
+        sourceVersion: attachedItem.sparklineSourceVersion,
+        pointsHash: attachedItem.sparklinePointsHash,
         uniquePriceCount,
         elapsedMs: attached.elapsedMs,
       },
-      `[ListSparklineAttach] exchange=${attached.item.exchange} quoteCurrency=${attached.item.quoteCurrency} canonicalMarketId=${attached.item.canonicalMarketId} symbol=${attached.item.symbol} pointCount=${attached.item.sparklinePointCount} quality=${attached.item.sparklineQuality} source=${attached.item.sparklineSource} isDerived=${attached.item.sparklineIsDerived} lowInformationReason=${attached.item.sparklineLowInformationReason ?? ''} unavailableReason=${attached.item.sparklineUnavailableReason ?? ''}`,
+      `[ListSparklineAttach] exchange=${attachedItem.exchange} quoteCurrency=${attachedItem.quoteCurrency} canonicalMarketId=${attachedItem.canonicalMarketId} symbol=${attachedItem.symbol} pointCount=${attachedItem.sparklinePointCount} quality=${attachedItem.sparklineQuality} source=${attachedItem.sparklineSource} isDerived=${attachedItem.sparklineIsDerived} lowInformationReason=${attachedItem.sparklineLowInformationReason ?? ''} unavailableReason=${attachedItem.sparklineUnavailableReason ?? ''}`,
     );
     logger.info(
       {
@@ -2863,6 +3145,36 @@ export async function getMarketTickerList(params: TickerListParams) {
       domain: 'market-contract',
       exchange: params.exchange,
       quoteCurrency: params.quoteCurrency,
+      returnedCount: attachedItems.length,
+      providerCandle24: qualitySummary.providerCandle24 ?? 0,
+      listSparkline24: qualitySummary.listSparkline24 ?? 0,
+      staleListSparkline24: qualitySummary.staleListSparkline24 ?? 0,
+      lowInformation: qualitySummary.lowInformation ?? 0,
+      unavailable: qualitySummary.unavailable ?? 0,
+      avgPointCount: averagePointCount,
+    },
+    `[SparklineSummary] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} returnedCount=${attachedItems.length} providerCandle24=${qualitySummary.providerCandle24 ?? 0} listSparkline24=${qualitySummary.listSparkline24 ?? 0} staleListSparkline24=${qualitySummary.staleListSparkline24 ?? 0} lowInformation=${qualitySummary.lowInformation ?? 0} unavailable=${qualitySummary.unavailable ?? 0} avgPointCount=${averagePointCount}`,
+  );
+  logger.info(
+    {
+      domain: 'market-contract',
+      exchange: params.exchange,
+      quoteCurrency: params.quoteCurrency,
+      query: normalizedQuery,
+      returnedCount: attachedItems.length,
+      hasNext: paginated.hasNext,
+      nextCursorExists: Boolean(paginated.nextCursor),
+      firstCanonicalMarketId: attachedItems[0]?.canonicalMarketId ?? null,
+      lastCanonicalMarketId: attachedItems[attachedItems.length - 1]?.canonicalMarketId ?? null,
+      snapshotAt,
+    },
+    `[CursorPaginationResponse] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} query=${normalizedQuery ?? ''} returnedCount=${attachedItems.length} hasNext=${paginated.hasNext} nextCursorExists=${Boolean(paginated.nextCursor)} firstCanonicalMarketId=${attachedItems[0]?.canonicalMarketId ?? ''} lastCanonicalMarketId=${attachedItems[attachedItems.length - 1]?.canonicalMarketId ?? ''} snapshotAt=${snapshotAt}`,
+  );
+  logger.info(
+    {
+      domain: 'market-contract',
+      exchange: params.exchange,
+      quoteCurrency: params.quoteCurrency,
       totalMs: Date.now() - startedAt,
       sparklineAttachMs: attachMs,
     },
@@ -2883,8 +3195,12 @@ export async function getMarketTickerList(params: TickerListParams) {
       generationHint: `${params.exchange}:${params.quoteCurrency}:${sort}:${order}:${serverReceivedAt}`,
       requestedLimit,
       returnedCount: attachedItems.length,
+      query: normalizedQuery,
+      sortKey: toPublicTickerSortKey(sort),
+      sortDirection: order,
       nextCursor: paginated.nextCursor,
       hasNext: paginated.hasNext,
+      snapshotAt,
       serverReceivedAt,
       serverRespondedAt: new Date().toISOString(),
       sparklineTargetPointCount: LIST_SPARKLINE_TARGET_POINT_COUNT,
@@ -2895,9 +3211,12 @@ export async function getMarketTickerList(params: TickerListParams) {
 	      sparklineSummary,
 	      supportedQuotes: exchangeContract.supportedQuotes,
       defaultQuoteCurrency: exchangeContract.defaultQuoteCurrency,
+      quoteDisplayHint: displayHint,
       timing: {
         totalMs: Date.now() - startedAt,
         tickerFetchMs,
+        sortMs,
+        cursorMs,
         sparklineAttachMs: attachMs,
       },
     },

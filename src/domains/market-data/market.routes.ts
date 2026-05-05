@@ -766,7 +766,7 @@ export async function marketRoutes(app: FastifyInstance) {
   }));
 
   app.get('/tickers', async (request, reply) => {
-    const { exchange, symbol, marketId, limit, cursor, quoteCurrency, quote, sort, order, sortKey, sortDirection } = request.query as {
+    const { exchange, symbol, marketId, limit, cursor, quoteCurrency, quote, sort, order, sortKey, sortDirection, query } = request.query as {
       exchange?: string;
       symbol?: string;
       marketId?: string;
@@ -778,6 +778,7 @@ export async function marketRoutes(app: FastifyInstance) {
       order?: string;
       sortKey?: string;
       sortDirection?: string;
+      query?: string;
     };
     const requestedQuoteCurrency = quoteCurrency ?? quote;
     const candidateContractExchange = parseContractExchange(exchange);
@@ -798,7 +799,7 @@ export async function marketRoutes(app: FastifyInstance) {
       }
       try {
         const startedAt = Date.now();
-        const parsedLimit = limit ? parseContractLimit(limit, 100, 500) : 100;
+        const parsedLimit = limit ? Math.min(parseContractLimit(limit, 100, 500), 100) : 100;
         logger.info(
           {
             domain: 'market-contract',
@@ -820,6 +821,7 @@ export async function marketRoutes(app: FastifyInstance) {
           order: parseTickerSortOrder(requestedSort, requestedOrder),
           limit: parsedLimit,
           cursor,
+          query,
           requestId: request.id,
         });
         const sparklineSummary = summarizeTickerSparklines(response.items);
