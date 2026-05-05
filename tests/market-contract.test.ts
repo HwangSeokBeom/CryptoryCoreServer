@@ -109,6 +109,18 @@ function mockContractFetchWithTicker(item: Record<string, unknown>) {
   });
 }
 
+function buildUpbitHourlyCandles(count: number, startPrice = 100) {
+  return Array.from({ length: count }, (_, index) => ({
+    candle_date_time_utc: new Date(Date.UTC(2026, 4, 3, index)).toISOString().slice(0, 19),
+    opening_price: startPrice + index,
+    high_price: startPrice + index + 2,
+    low_price: startPrice + index - 2,
+    trade_price: startPrice + index + (index % 3),
+    candle_acc_trade_volume: 10 + index,
+    candle_acc_trade_price: (startPrice + index) * (10 + index),
+  }));
+}
+
 function mockExpandedMarketContractFetch() {
   return vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
     const url = String(input);
@@ -556,6 +568,132 @@ describe('market REST contract routes', () => {
     await app.close();
   }, 15000);
 
+  it('GET /market/tickers keeps a 4 point ticker ring buffer hidden', async () => {
+    let price = 100;
+    mockContractFetchWithTicker({
+      get trade_price() {
+        price += 1;
+        return price;
+      },
+      signed_change_rate: 0.01,
+      acc_trade_price_24h: 1000,
+      acc_trade_volume_24h: 10,
+      high_price: 110,
+      low_price: 90,
+      trade_timestamp: 1777809600000,
+    });
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    for (let index = 0; index < 4; index += 1) {
+      await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1' });
+    }
+    const response = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1' });
+    const ticker = JSON.parse(response.body).data.items[0];
+
+    expect(response.statusCode).toBe(200);
+    expect(ticker.sparklineQuality).toBe('insufficient_points');
+    expect(ticker.sparklinePointCount).toBe(0);
+    expect(ticker.graphDisplayAllowed).toBe(false);
+    expect(ticker.sparkline).toHaveLength(0);
+    expect(ticker.sparklinePoints).toHaveLength(0);
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/tickers returns stale 24 point candle sparklines as displayable', async () => {
+    vi.useFakeTimers({ now: new Date('2026-05-03T14:00:00.000Z') });
+    let candleCalls = 0;
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/v1/market/all')) {
+        return new Response(JSON.stringify([
+          { market: 'KRW-BTC', korean_name: '비트코인', english_name: 'Bitcoin' },
+        ]), { status: 200 });
+      }
+      if (url.includes('/v1/ticker')) {
+        return new Response(JSON.stringify([{
+          market: 'KRW-BTC',
+          trade_price: 100 + candleCalls,
+          signed_change_rate: 0.01,
+          acc_trade_price_24h: 1000,
+          acc_trade_volume_24h: 10,
+          high_price: 110,
+          low_price: 90,
+          trade_timestamp: Date.now(),
+        }]), { status: 200 });
+      }
+      if (url.includes('/v1/candles/minutes/60')) {
+        candleCalls += 1;
+        return new Response(JSON.stringify(buildUpbitHourlyCandles(24)), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: 'unexpected path' }), { status: 500 });
+    });
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    const first = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1' });
+    vi.setSystemTime(new Date('2026-05-03T14:01:01.000Z'));
+    const second = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1' });
+    const ticker = JSON.parse(second.body).data.items[0];
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(ticker.sparklineSource).toBe('candle_cache');
+    expect(ticker.sparklineQuality).toBe('staleListSparkline24');
+    expect(ticker.sparklinePointCount).toBe(24);
+    expect(ticker.graphDisplayAllowed).toBe(true);
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/tickers keeps stale 24 point cache ahead of short ring buffer history', async () => {
+    vi.useFakeTimers({ now: new Date('2026-05-03T14:00:00.000Z') });
+    let price = 100;
+    let candleCalls = 0;
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/v1/market/all')) {
+        return new Response(JSON.stringify([
+          { market: 'KRW-BTC', korean_name: '비트코인', english_name: 'Bitcoin' },
+        ]), { status: 200 });
+      }
+      if (url.includes('/v1/ticker')) {
+        price += 1;
+        return new Response(JSON.stringify([{
+          market: 'KRW-BTC',
+          trade_price: price,
+          signed_change_rate: 0.01,
+          acc_trade_price_24h: 1000,
+          acc_trade_volume_24h: 10,
+          high_price: 110,
+          low_price: 90,
+          trade_timestamp: Date.now(),
+        }]), { status: 200 });
+      }
+      if (url.includes('/v1/candles/minutes/60')) {
+        candleCalls += 1;
+        return new Response(JSON.stringify(buildUpbitHourlyCandles(24)), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: 'unexpected path' }), { status: 500 });
+    });
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
+
+    await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1' });
+    vi.setSystemTime(new Date('2026-05-03T14:01:01.000Z'));
+    const second = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1' });
+    const third = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1' });
+    const ticker = JSON.parse(third.body).data.items[0];
+
+    expect(second.statusCode).toBe(200);
+    expect(third.statusCode).toBe(200);
+    expect(candleCalls).toBe(1);
+    expect(ticker.sparklineQuality).toBe('staleListSparkline24');
+    expect(ticker.sparklinePointCount).toBe(24);
+    expect(ticker.graphDisplayAllowed).toBe(true);
+    expect(ticker.sparklineLowInformationReason).toBeNull();
+
+    await app.close();
+  }, 15000);
+
   it('GET /market/tickers returns cursor pagination metadata and next page sparklines', async () => {
     mockContractFetch();
     const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
@@ -699,40 +837,78 @@ describe('market REST contract routes', () => {
     await app.close();
   }, 15000);
 
-  it('GET /market/tickers does not call candles to build sparklines', async () => {
-    const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+  it('GET /market/tickers attaches visible top-volume candle sparklines with bounded concurrency and tolerates failures', async () => {
+    let activeCandleFetches = 0;
+    let maxActiveCandleFetches = 0;
+    let candleFetchCount = 0;
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
       const url = String(input);
-      if (url.includes('/v1/candles')) {
-        throw new Error('unexpected candle fetch');
-      }
       if (url.includes('/v1/market/all')) {
-        return new Response(JSON.stringify([
-          { market: 'KRW-BTC', korean_name: '비트코인', english_name: 'Bitcoin' },
-        ]), { status: 200 });
+        return new Response(JSON.stringify(Array.from({ length: 80 }, (_, index) => {
+          const symbol = `T${String(index + 1).padStart(3, '0')}`;
+          return { market: `KRW-${symbol}`, korean_name: symbol, english_name: symbol };
+        })), { status: 200 });
       }
       if (url.includes('/v1/ticker')) {
-        return new Response(JSON.stringify([{
-          market: 'KRW-BTC',
-          trade_price: 100,
+        const request = new URL(url);
+        const markets = request.searchParams.get('markets')?.split(',') ?? [];
+        return new Response(JSON.stringify(markets.map((market, index) => ({
+          market,
+          trade_price: 1000 + index,
           signed_change_rate: 0.01,
-          acc_trade_price_24h: 1000,
+          signed_change_price: 1,
+          acc_trade_price_24h: 100000 - index,
           acc_trade_volume_24h: 10,
-          high_price: 101,
-          low_price: 99,
+          high_price: 1100,
+          low_price: 900,
           trade_timestamp: 1777809600000,
-        }]), { status: 200 });
+        }))), { status: 200 });
+      }
+      if (url.includes('/v1/candles/minutes/60')) {
+        const request = new URL(url);
+        const market = request.searchParams.get('market') ?? '';
+        const numeric = Number.parseInt(market.replace('KRW-T', ''), 10);
+        activeCandleFetches += 1;
+        maxActiveCandleFetches = Math.max(maxActiveCandleFetches, activeCandleFetches);
+        candleFetchCount += 1;
+        await Promise.resolve();
+        activeCandleFetches -= 1;
+        if (numeric > 65) {
+          return new Response(JSON.stringify({ error: 'temporary failure' }), { status: 503 });
+        }
+        return new Response(JSON.stringify(buildUpbitHourlyCandles(24, 100 + numeric)), { status: 200 });
       }
       return new Response(JSON.stringify({ error: 'unexpected path' }), { status: 500 });
     });
-    const app = await createApp();
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
 
-    const response = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1' });
+    const response = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=80&sortKey=volume24h&sortDirection=desc' });
+    const body = JSON.parse(response.body).data;
+    const displayable24 = body.items.filter((item: any) => (
+      (item.sparklineQuality === 'providerCandle24' || item.sparklineQuality === 'listSparkline24')
+      && item.sparklinePointCount === 24
+      && item.graphDisplayAllowed === true
+    ));
 
     expect(response.statusCode).toBe(200);
-    expect(fetchSpy.mock.calls.some(([input]) => String(input).includes('/v1/candles'))).toBe(false);
+    expect(body.items).toHaveLength(80);
+    expect(displayable24.length).toBeGreaterThanOrEqual(60);
+    expect(candleFetchCount).toBe(80);
+    expect(maxActiveCandleFetches).toBeLessThanOrEqual(8);
+    expect(body.meta.sparklineSummary).toMatchObject({
+      targetPointCount: 24,
+      providerCandle24: expect.any(Number),
+      listSparkline24: expect.any(Number),
+      staleListSparkline24: expect.any(Number),
+      lowInformation: expect.any(Number),
+      unavailable: expect.any(Number),
+      avgPointCount: expect.any(Number),
+      attachMs: expect.any(Number),
+      warmup: expect.any(Boolean),
+    });
 
     await app.close();
-  }, 15000);
+  }, 30000);
 
   it('GET /market/sparkline returns visible symbol batch rows', async () => {
     mockContractFetch();
