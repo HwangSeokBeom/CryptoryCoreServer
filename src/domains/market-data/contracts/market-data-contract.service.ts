@@ -180,6 +180,8 @@ const SPARKLINE_PROVIDER_TIMEOUT_MS = 1_000;
 const SPARKLINE_TOP_RESPONSE_TIMEOUT_MS = 1_200;
 const SPARKLINE_TOP_PROVIDER_TIMEOUT_MS = 850;
 const SPARKLINE_WARMUP_TOP_LIMIT = 100;
+const LIST_SPARKLINE_ATTACH_CONCURRENCY = 8;
+const LIST_SPARKLINE_PROVIDER_TIMEOUT_MS = 1_200;
 const SPARKLINE_WILDCARDS = new Set(['all', '*', 'null', 'undefined']);
 const TICKER_CURSOR_VERSION = 1;
 const TICKER_CURSOR_TTL_MS = 5 * 60_000;
@@ -1190,6 +1192,245 @@ function attachListSparkline(item: MarketTickerItem, params: {
   );
 }
 
+type ListSparklineAttachResult = ReturnType<typeof attachListSparkline>;
+
+function shouldFetchProviderListSparkline(item: MarketTickerItem) {
+  if (item.currentPrice === null || item.currentPrice <= 0) {
+    return false;
+  }
+  if (
+    item.graphDisplayAllowed
+    && !item.sparklineIsDerived
+    && item.sparklinePointCount >= LIST_SPARKLINE_TARGET_POINT_COUNT
+    && (
+      item.sparklineQuality === 'providerCandle24'
+      || item.sparklineQuality === 'listSparkline24'
+      || item.sparklineQuality === 'staleListSparkline24'
+    )
+  ) {
+    return false;
+  }
+  return item.sparklineQuality === 'lowInformation'
+    || item.sparklineQuality === 'unavailable'
+    || item.sparklineQuality === 'insufficient_points'
+    || item.sparklineQuality === 'fallbackListSparkline'
+    || item.sparklinePointCount < LIST_SPARKLINE_TARGET_POINT_COUNT;
+}
+
+function extractProviderFailureStatus(error: unknown) {
+  if (error instanceof AppError) {
+    const upstreamStatus = error.details?.statusCode;
+    return typeof upstreamStatus === 'number' ? upstreamStatus : error.statusCode;
+  }
+  if (error && typeof error === 'object' && 'statusCode' in error) {
+    const statusCode = (error as { statusCode?: unknown }).statusCode;
+    return typeof statusCode === 'number' ? statusCode : null;
+  }
+  return null;
+}
+
+function extractProviderFailureReason(error: unknown) {
+  if (error instanceof AppError) {
+    return error.code ?? error.message;
+  }
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return 'provider_candle_unavailable';
+}
+
+function logProviderCandleFetchDropped(params: {
+  exchange: ContractExchange;
+  quoteCurrency: ContractQuoteCurrency;
+  marketId: string;
+  timeframe: ContractTimeframe;
+  statusCode: number | null;
+  error: string;
+  droppedReason: string;
+  latencyMs: number;
+  route: '/market/tickers' | 'warmup';
+}) {
+  logger.warn(
+    {
+      domain: 'market-contract',
+      route: params.route,
+      exchange: params.exchange,
+      quoteCurrency: params.quoteCurrency,
+      marketId: params.marketId,
+      timeframe: params.timeframe,
+      httpStatus: params.statusCode,
+      error: params.error,
+      droppedReason: params.droppedReason,
+      retryable: true,
+      latencyMs: params.latencyMs,
+    },
+    `[ProviderCandleFetchDropped] route=${params.route} exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} marketId=${params.marketId} timeframe=${params.timeframe} httpStatus=${params.statusCode ?? ''} error=${params.error} droppedReason=${params.droppedReason} retryable=true latencyMs=${params.latencyMs}`,
+  );
+}
+
+async function fetchProviderListSparklineAttach(item: MarketTickerItem, params: {
+  exchange: ContractExchange;
+  quoteCurrency: ContractQuoteCurrency;
+  timeoutMs: number;
+}): Promise<ListSparklineAttachResult | null> {
+  const startedAt = Date.now();
+  const key = preparedSparklineKey(params.exchange, params.quoteCurrency, item.marketId);
+  const timeframe = LIST_SPARKLINE_DEFAULT_TIMEFRAME;
+  const providerMarket = resolveProviderMarket(params.exchange, item.symbol, params.quoteCurrency);
+  const timeoutSentinel = { timeout: true as const };
+  try {
+    const candleLoad = getAdapter(params.exchange).getCandles({
+      exchange: params.exchange,
+      symbol: item.symbol,
+      quoteCurrency: params.quoteCurrency,
+      timeframe,
+      limit: LIST_SPARKLINE_TARGET_POINT_COUNT,
+    });
+    void candleLoad.catch(() => undefined);
+    const result = await Promise.race([
+      candleLoad.then((candles) => ({ timeout: false as const, candles })),
+      timeoutAfter(params.timeoutMs, timeoutSentinel),
+    ]);
+    if (result.timeout) {
+      throw new Error('provider_timeout');
+    }
+
+    const points = result.candles
+      .map((candle) => ({
+        price: candle.close,
+        timestamp: Date.parse(candle.timestamp),
+      }))
+      .filter((point) => Number.isFinite(point.price) && point.price > 0 && Number.isFinite(point.timestamp))
+      .sort((left, right) => left.timestamp - right.timestamp)
+      .slice(-LIST_SPARKLINE_TARGET_POINT_COUNT);
+    if (points.length < LIST_SPARKLINE_TARGET_POINT_COUNT) {
+      logProviderCandleFetchDropped({
+        exchange: params.exchange,
+        quoteCurrency: params.quoteCurrency,
+        marketId: item.marketId,
+        timeframe,
+        statusCode: null,
+        error: `insufficient_provider_points:${points.length}`,
+        droppedReason: 'insufficient_provider_points',
+        latencyMs: Date.now() - startedAt,
+        route: '/market/tickers',
+      });
+      return null;
+    }
+
+    const providerItem = buildProviderCandleSparklineItem({
+      item,
+      candles: result.candles,
+      limit: LIST_SPARKLINE_TARGET_POINT_COUNT,
+      interval: timeframe,
+    });
+    if (providerItem) {
+      const normalizedProvider = withProviderDiagnostics(providerItem, {
+        providerLatencyMs: Date.now() - startedAt,
+        partialReason: null,
+        fallbackReason: 'list_provider_candle_attach',
+      });
+      if (isDisplayableRealSparkline(normalizedProvider)) {
+        writeRealSparklineCache(key, normalizedProvider);
+      }
+    }
+
+    const attachedItem = withListSparklineFields({
+      item,
+      points,
+      quality: 'providerCandle24',
+      source: 'provider_candle',
+      isDerived: false,
+      reason: null,
+    });
+    logger.info(
+      {
+        domain: 'market-contract',
+        route: '/market/tickers',
+        exchange: params.exchange,
+        quoteCurrency: params.quoteCurrency,
+        marketId: item.marketId,
+        providerMarket,
+        timeframe,
+        pointCount: attachedItem.sparklinePointCount,
+        quality: attachedItem.sparklineQuality,
+        graphDisplayAllowed: attachedItem.graphDisplayAllowed,
+        latencyMs: Date.now() - startedAt,
+      },
+      `[ProviderCandleListAttach] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} marketId=${item.marketId} providerMarket=${providerMarket} timeframe=${timeframe} pointCount=${attachedItem.sparklinePointCount} quality=${attachedItem.sparklineQuality} graphDisplayAllowed=${attachedItem.graphDisplayAllowed} latencyMs=${Date.now() - startedAt}`,
+    );
+    return {
+      item: attachedItem,
+      elapsedMs: Date.now() - startedAt,
+      cacheKey: key,
+      rawPointCount: points.length,
+      source: 'provider_candle',
+      reason: attachedItem.sparklineLowInformationReason ?? attachedItem.sparklineUnavailableReason ?? null,
+      candleCacheHit: false,
+      ringBufferCount: preparedSparklineCache.get(key)?.length ?? 0,
+    };
+  } catch (error) {
+    const reason = extractProviderFailureReason(error);
+    logProviderCandleFetchDropped({
+      exchange: params.exchange,
+      quoteCurrency: params.quoteCurrency,
+      marketId: item.marketId,
+      timeframe,
+      statusCode: extractProviderFailureStatus(error),
+      error: reason,
+      droppedReason: reason === 'provider_timeout' ? 'provider_timeout' : 'provider_candle_fetch_failed',
+      latencyMs: Date.now() - startedAt,
+      route: '/market/tickers',
+    });
+    return null;
+  }
+}
+
+async function attachProviderListSparklinesForVisibleItems(
+  attached: ListSparklineAttachResult[],
+  params: {
+    exchange: ContractExchange;
+    quoteCurrency: ContractQuoteCurrency;
+  },
+) {
+  const fetchTargets = attached
+    .map((result, index) => ({ result, index }))
+    .filter(({ result }) => shouldFetchProviderListSparkline(result.item));
+  if (fetchTargets.length === 0) {
+    return attached;
+  }
+
+  logger.info(
+    {
+      domain: 'market-contract',
+      route: '/market/tickers',
+      exchange: params.exchange,
+      quoteCurrency: params.quoteCurrency,
+      targetCount: fetchTargets.length,
+      concurrency: LIST_SPARKLINE_ATTACH_CONCURRENCY,
+      timeoutMs: LIST_SPARKLINE_PROVIDER_TIMEOUT_MS,
+    },
+    `[ProviderCandleListAttachBatch] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} targetCount=${fetchTargets.length} concurrency=${LIST_SPARKLINE_ATTACH_CONCURRENCY} timeoutMs=${LIST_SPARKLINE_PROVIDER_TIMEOUT_MS}`,
+  );
+
+  const replacements = await mapBounded(
+    fetchTargets,
+    LIST_SPARKLINE_ATTACH_CONCURRENCY,
+    ({ result }) => fetchProviderListSparklineAttach(result.item, {
+      exchange: params.exchange,
+      quoteCurrency: params.quoteCurrency,
+      timeoutMs: LIST_SPARKLINE_PROVIDER_TIMEOUT_MS,
+    }),
+  );
+  const next = [...attached];
+  replacements.forEach((replacement, replacementIndex) => {
+    if (replacement) {
+      next[fetchTargets[replacementIndex].index] = replacement;
+    }
+  });
+  return next;
+}
+
 function preparedSparklineKey(
   exchange: ContractExchange,
   quoteCurrency: ContractQuoteCurrency,
@@ -1430,6 +1671,24 @@ function timeoutAfter<T>(ms: number, value: T): Promise<T> {
   return new Promise((resolve) => {
     setTimeout(() => resolve(value), ms);
   });
+}
+
+async function mapBounded<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(concurrency, 1), items.length);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }));
+  return results;
 }
 
 function appendPreparedSparklineSample(item: MarketTickerItem) {
@@ -2635,7 +2894,7 @@ function scheduleSparklineWarmup(params: {
     return;
   }
   const timer = setTimeout(() => {
-    void Promise.allSettled(needsWarm.map(async (item) => {
+    void mapBounded(needsWarm, LIST_SPARKLINE_ATTACH_CONCURRENCY, async (item) => {
       const startedAt = Date.now();
       const key = preparedSparklineKey(params.exchange, params.quoteCurrency, item.marketId);
       try {
@@ -2736,6 +2995,18 @@ function scheduleSparklineWarmup(params: {
           `[SparklineWarmupResult] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} marketId=${item.marketId} success=${Boolean(normalized?.realSeries)} pointCount=${normalized?.pointCount ?? 0} quality=${normalized?.quality ?? 'unavailable'} realSeries=${normalized?.realSeries ?? false} graphDisplayAllowed=${normalized?.graphDisplayAllowed ?? false} elapsedMs=${Date.now() - startedAt} reason=${params.reason}`,
         );
       } catch (error) {
+        const reason = extractProviderFailureReason(error);
+        logProviderCandleFetchDropped({
+          exchange: params.exchange,
+          quoteCurrency: params.quoteCurrency,
+          marketId: item.marketId,
+          timeframe: '1M',
+          statusCode: extractProviderFailureStatus(error),
+          error: reason,
+          droppedReason: reason === 'provider_timeout' ? 'provider_timeout' : 'warmup_provider_candle_fetch_failed',
+          latencyMs: Date.now() - startedAt,
+          route: 'warmup',
+        });
         logger.info(
           {
             domain: 'market-contract',
@@ -2748,14 +3019,14 @@ function scheduleSparklineWarmup(params: {
             realSeries: false,
             graphDisplayAllowed: false,
             elapsedMs: Date.now() - startedAt,
-            reason: error instanceof Error ? error.message : params.reason,
+            reason,
           },
-          `[SparklineWarmupResult] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} marketId=${item.marketId} success=false pointCount=0 quality=unavailable realSeries=false graphDisplayAllowed=false elapsedMs=${Date.now() - startedAt} reason=${error instanceof Error ? error.message : params.reason}`,
+          `[SparklineWarmupResult] exchange=${params.exchange} quoteCurrency=${params.quoteCurrency} marketId=${item.marketId} success=false pointCount=0 quality=unavailable realSeries=false graphDisplayAllowed=false elapsedMs=${Date.now() - startedAt} reason=${reason}`,
         );
       } finally {
         sparklineWarmupInFlight.delete(key);
       }
-    }));
+    });
   }, 10);
   timer.unref?.();
 }
@@ -2953,11 +3224,15 @@ export async function getMarketTickerList(params: TickerListParams) {
   const attachStartedAt = Date.now();
   const attachLatencies: number[] = [];
   const attachedItems: MarketTickerItem[] = [];
-  for (const item of paginated.page) {
-    const attached = attachListSparkline(item, {
-      exchange: params.exchange,
-      quoteCurrency: params.quoteCurrency,
-    });
+  const initialAttached = paginated.page.map((item) => attachListSparkline(item, {
+    exchange: params.exchange,
+    quoteCurrency: params.quoteCurrency,
+  }));
+  const providerAttached = await attachProviderListSparklinesForVisibleItems(initialAttached, {
+    exchange: params.exchange,
+    quoteCurrency: params.quoteCurrency,
+  });
+  for (const attached of providerAttached) {
     const attachedItem = {
       ...attached.item,
       priceDisplayHint: displayHint,
