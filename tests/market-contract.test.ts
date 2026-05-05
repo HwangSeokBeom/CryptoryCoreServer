@@ -694,6 +694,105 @@ describe('market REST contract routes', () => {
     await app.close();
   }, 15000);
 
+  it('GET /market/tickers bounds provider candle attach and queues remaining visible rows', async () => {
+    const markets = Array.from({ length: 12 }, (_, index) => `KRW-T${index + 1}`);
+    let candleCalls = 0;
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/v1/market/all')) {
+        return new Response(JSON.stringify(markets.map((market) => ({
+          market,
+          korean_name: market,
+          english_name: market,
+        }))), { status: 200 });
+      }
+      if (url.includes('/v1/ticker')) {
+        const request = new URL(url);
+        const requested = request.searchParams.get('markets')?.split(',') ?? [];
+        return new Response(JSON.stringify(requested.map((market, index) => ({
+          market,
+          trade_price: 1000 + index,
+          signed_change_rate: 0.01,
+          signed_change_price: 10,
+          acc_trade_price_24h: 10000 - index,
+          acc_trade_volume_24h: 10,
+          high_price: 1100,
+          low_price: 900,
+          trade_timestamp: Date.now(),
+        }))), { status: 200 });
+      }
+      if (url.includes('/v1/candles/minutes/60')) {
+        candleCalls += 1;
+        return new Response(JSON.stringify(buildUpbitHourlyCandles(24, 100 + candleCalls)), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: 'unexpected path' }), { status: 500 });
+    });
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0', SPARKLINE_WARMUP_ENABLED: 'false' });
+
+    const response = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=12' });
+    const body = JSON.parse(response.body);
+
+    expect(response.statusCode).toBe(200);
+    expect(body.data.items).toHaveLength(12);
+    expect(candleCalls).toBeLessThanOrEqual(8);
+    expect(body.data.meta.sparklineSummary.requestProviderFetches).toBeLessThanOrEqual(8);
+    expect(body.data.meta.sparklineSummary.warmupQueued).toBeGreaterThanOrEqual(4);
+    expect(body.data.meta.sparklineSummary.attachBudgetExhausted).toBe(true);
+
+    await app.close();
+  }, 15000);
+
+  it('GET /market/tickers keeps 429 provider candle failures transient', async () => {
+    vi.useFakeTimers({ now: new Date('2026-05-03T14:00:00.000Z') });
+    let candleCalls = 0;
+    vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/v1/market/all')) {
+        return new Response(JSON.stringify([
+          { market: 'KRW-BTC', korean_name: '비트코인', english_name: 'Bitcoin' },
+        ]), { status: 200 });
+      }
+      if (url.includes('/v1/ticker')) {
+        return new Response(JSON.stringify([{
+          market: 'KRW-BTC',
+          trade_price: 100,
+          signed_change_rate: 0.01,
+          signed_change_price: 1,
+          acc_trade_price_24h: 1000,
+          acc_trade_volume_24h: 10,
+          high_price: 110,
+          low_price: 90,
+          trade_timestamp: Date.now(),
+        }]), { status: 200 });
+      }
+      if (url.includes('/v1/candles/minutes/60')) {
+        candleCalls += 1;
+        if (candleCalls === 1) {
+          return new Response(JSON.stringify({ error: 'rate limited' }), { status: 429 });
+        }
+        return new Response(JSON.stringify(buildUpbitHourlyCandles(24)), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: 'unexpected path' }), { status: 500 });
+    });
+    const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0', SPARKLINE_WARMUP_ENABLED: 'false' });
+
+    const first = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1' });
+    vi.setSystemTime(new Date('2026-05-03T14:00:25.000Z'));
+    const second = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=1' });
+    const firstBody = JSON.parse(first.body);
+    const secondBody = JSON.parse(second.body);
+
+    expect(first.statusCode).toBe(200);
+    expect(firstBody.data.meta.sparklineSummary.providerFetchHttp429).toBe(1);
+    expect(firstBody.data.items[0].graphDisplayAllowed).toBe(false);
+    expect(second.statusCode).toBe(200);
+    expect(secondBody.data.items[0].sparklineQuality).toBe('providerCandle24');
+    expect(secondBody.data.items[0].sparklinePointCount).toBe(24);
+    expect(secondBody.data.items[0].graphDisplayAllowed).toBe(true);
+
+    await app.close();
+  }, 15000);
+
   it('GET /market/tickers returns cursor pagination metadata and next page sparklines', async () => {
     mockContractFetch();
     const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0' });
@@ -892,9 +991,12 @@ describe('market REST contract routes', () => {
 
     expect(response.statusCode).toBe(200);
     expect(body.items).toHaveLength(80);
-    expect(displayable24.length).toBeGreaterThanOrEqual(60);
-    expect(candleFetchCount).toBe(80);
-    expect(maxActiveCandleFetches).toBeLessThanOrEqual(8);
+    expect(displayable24.length).toBeGreaterThan(0);
+    expect(displayable24.length).toBeLessThanOrEqual(8);
+    expect(candleFetchCount).toBeLessThanOrEqual(8);
+    expect(maxActiveCandleFetches).toBeLessThanOrEqual(2);
+    expect(body.meta.sparklineSummary.warmupQueued).toBeGreaterThanOrEqual(72);
+    expect(body.meta.sparklineSummary.attachBudgetExhausted).toBe(true);
     expect(body.meta.sparklineSummary).toMatchObject({
       targetPointCount: 24,
       providerCandle24: expect.any(Number),
@@ -1617,13 +1719,14 @@ describe('market REST contract routes', () => {
     const app = await createApp({ TICKER_CACHE_TTL_SECONDS: '0', SPARKLINE_WARMUP_ENABLED: 'true' });
     const { logger } = await import('../src/utils/logger');
     const logSpy = vi.spyOn(logger, 'info');
+    const debugSpy = vi.spyOn(logger, 'debug');
 
     const response = await app.inject({ method: 'GET', url: '/market/tickers?exchange=upbit&quoteCurrency=KRW&limit=2' });
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     expect(response.statusCode).toBe(200);
     expect(logSpy.mock.calls.some((call) => String(call[1] ?? '').includes('[SparklineWarmupQueued]'))).toBe(true);
-    expect(logSpy.mock.calls.some((call) => String(call[1] ?? '').includes('[SparklineWarmupStored]'))).toBe(true);
+    expect(debugSpy.mock.calls.some((call) => String(call[1] ?? '').includes('[SparklineWarmupStored]'))).toBe(true);
 
     await app.close();
   }, 15000);
