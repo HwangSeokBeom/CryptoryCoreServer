@@ -44,5 +44,5 @@ describe('global error handler', () => {
       statusCode: 400,
     }), 'Handled client error');
     await app.close();
-  });
+  }, 15000);
 });

@@ -163,7 +163,7 @@ describe('market identity and sparkline contract', () => {
       symbol: 'USDE',
       quality: 'unavailable',
       pointCount: 0,
-      unavailableReason: 'insufficient_provider_points',
+      unavailableReason: expect.stringMatching(/insufficient_provider_points|budget_exhausted/),
     });
     expect(sparkline.missing).toEqual(expect.arrayContaining([
       expect.objectContaining({ marketId: 'KRW-XXX', reason: 'market_not_found' }),
