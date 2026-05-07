@@ -2,6 +2,8 @@ import bcrypt from 'bcrypt';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../config/database';
+import { anonymizeCommunityDataForDeletedUser } from '../../domains/coins/coin-community.service';
+import { removeUserRelationshipState } from '../../domains/users/user-relationship.service';
 import { env } from '../../config/env';
 import { AppError } from '../../utils/errors';
 import { logger } from '../../utils/logger';
@@ -14,6 +16,7 @@ const APPLE_AUTH_PROVIDER = 'apple';
 const EMAIL_ALREADY_EXISTS = 'EMAIL_ALREADY_EXISTS';
 const AUTH_REGISTER_FAILED = 'AUTH_REGISTER_FAILED';
 const REFRESH_TOKEN_INVALID = 'REFRESH_TOKEN_INVALID';
+const USER_NOT_FOUND = 'USER_NOT_FOUND';
 
 const userProfileSelect = {
   id: true,
@@ -43,6 +46,13 @@ function createSocialPlaceholderEmail(provider: string, providerAccountId: strin
 
 function isPrivateRelayEmail(email: string | undefined) {
   return Boolean(email?.toLowerCase().endsWith('@privaterelay.appleid.com'));
+}
+
+function maskUserId(userId?: string | null) {
+  if (!userId) {
+    return null;
+  }
+  return userId.length <= 4 ? '****' : `${userId.slice(0, 2)}***${userId.slice(-2)}`;
 }
 
 function parseDurationMs(input: string) {
@@ -838,28 +848,69 @@ export async function loginWithApple(input: AppleLoginInputType) {
 }
 
 export async function deleteUserAccount(userId: string) {
-  const result = await prisma.$transaction(async (tx) => {
-    const sessionResult = await tx.authSession.deleteMany({ where: { userId } });
+  const deleted = await prisma.$transaction(async (tx) => {
+    const user = await tx.user.findUnique({
+      where: { id: userId },
+      select: { id: true },
+    });
+    if (!user) {
+      throw new AppError(404, 'User not found.', undefined, USER_NOT_FOUND);
+    }
+
+    const sessions = await tx.authSession.deleteMany({ where: { userId } });
     await tx.authIdentity.deleteMany({ where: { userId } });
+
+    await tx.alertDeliveryLog.deleteMany({ where: { userId } });
+    await tx.priceAlert.deleteMany({ where: { userId } });
+    await tx.fcmToken.deleteMany({ where: { userId } });
+
+    await tx.communityReport.deleteMany({
+      where: {
+        OR: [
+          { reporterUserId: userId },
+          { targetType: 'user', targetId: userId },
+        ],
+      },
+    });
+    await tx.userBlock.deleteMany({
+      where: {
+        OR: [
+          { blockerUserId: userId },
+          { blockedUserId: userId },
+        ],
+      },
+    });
+    await tx.userFollow.deleteMany({
+      where: {
+        OR: [
+          { followerUserId: userId },
+          { followingUserId: userId },
+        ],
+      },
+    });
+
     await tx.orderRequest.deleteMany({ where: { userId } });
     await tx.exchangeConnectionVerification.deleteMany({ where: { userId } });
     await tx.exchangeConnection.deleteMany({ where: { userId } });
     await tx.order.deleteMany({ where: { userId } });
     await tx.holding.deleteMany({ where: { userId } });
     await tx.favorite.deleteMany({ where: { userId } });
-    await tx.user.delete({ where: { id: userId } });
-    return sessionResult.count;
+    await tx.user.deleteMany({ where: { id: userId } });
+
+    return {
+      sessions: sessions.count,
+    };
   });
 
+  anonymizeCommunityDataForDeletedUser(userId);
+  removeUserRelationshipState(userId);
+
   logger.info(
-    { domain: 'auth', action: 'delete_account', userId, sessionCount: result },
-    `[AccountLifecycleDebug] action=delete_account userId=${userId} sessionCount=${result}`,
+    { domain: 'auth', action: 'delete_account', userIdMasked: maskUserId(userId), sessionCount: deleted.sessions },
+    `[AccountLifecycleDebug] action=delete_account userIdMasked=${maskUserId(userId)} sessionCount=${deleted.sessions}`,
   );
 
   return {
-    deletedAt: new Date().toISOString(),
-    revokedSessionCount: result,
-    canRejoin: true,
-    socialRelinkingPolicy: 'provider subject mappings are deleted with the account; the same social account may create or link a new Cryptory account on next login',
+    deleted: true,
   };
 }

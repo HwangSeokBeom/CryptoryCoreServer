@@ -68,6 +68,17 @@ export function getBlockedUserIdsSync(viewerId?: string | null) {
   return viewerId ? [...(blocksByUserId.get(viewerId) ?? [])] : [];
 }
 
+export function removeUserRelationshipState(userId: string) {
+  followsByUserId.delete(userId);
+  blocksByUserId.delete(userId);
+  for (const targets of followsByUserId.values()) {
+    targets.delete(userId);
+  }
+  for (const targets of blocksByUserId.values()) {
+    targets.delete(userId);
+  }
+}
+
 async function readRelationshipsFromDb(viewerId: string, targetUserIds: string[]) {
   const uniqueTargetIds = [...new Set(targetUserIds.filter(Boolean))];
   if (uniqueTargetIds.length === 0) {

@@ -114,6 +114,18 @@ const sentimentUpdatedAtByScope = new Map<string, string>();
 const likesByItemId = new Map<string, Set<string>>();
 const commentsByItemId = new Map<string, CommunityComment[]>();
 
+const deletedCommunityAuthor: CommunityAuthor = {
+  id: null,
+  nickname: null,
+  displayName: '탈퇴한 사용자',
+  emailMasked: null,
+  isPrivateRelay: false,
+  avatarUrl: null,
+  isFollowing: false,
+  followable: false,
+  isMe: false,
+};
+
 function parseLimit(limit?: number) {
   if (!Number.isFinite(limit) || !limit) {
     return 20;
@@ -241,7 +253,7 @@ function upsertSentimentVote(params: {
 }
 
 function participantCountForPosts(symbol: string) {
-  const authorIds = new Set((postsBySymbol.get(symbol) ?? []).map((item) => item.authorId));
+  const authorIds = new Set((postsBySymbol.get(symbol) ?? []).map((item) => item.authorId).filter(Boolean));
   return authorIds.size;
 }
 
@@ -809,4 +821,54 @@ export function getMarketPoll(userId?: string | null) {
     participantCount: sentiment.totalParticipants,
     myVote: sentiment.myVote,
   };
+}
+
+export function anonymizeCommunityDataForDeletedUser(userId: string) {
+  for (const [symbol, posts] of postsBySymbol.entries()) {
+    postsBySymbol.set(symbol, posts.map((item) => {
+      if (item.authorId !== userId && item.author.id !== userId) {
+        return item;
+      }
+      return {
+        ...item,
+        authorId: '',
+        authorEmail: null,
+        authorName: deletedCommunityAuthor.displayName,
+        author: deletedCommunityAuthor,
+        authorRelationship: getRelationshipSync(null, ''),
+        avatarUrl: null,
+        updatedAt: new Date().toISOString(),
+        reportable: false,
+        blockable: false,
+      };
+    }));
+  }
+
+  for (const [itemId, likes] of likesByItemId.entries()) {
+    likes.delete(userId);
+    likesByItemId.set(itemId, likes);
+  }
+
+  for (const [itemId, comments] of commentsByItemId.entries()) {
+    commentsByItemId.set(itemId, comments.map((comment) => {
+      if (comment.author.id !== userId) {
+        return comment;
+      }
+      return {
+        ...comment,
+        author: deletedCommunityAuthor,
+        authorRelationship: getRelationshipSync(null, ''),
+        updatedAt: new Date().toISOString(),
+        reportable: false,
+        blockable: false,
+      };
+    }));
+  }
+
+  for (const votes of votesBySymbol.values()) {
+    votes.delete(userId);
+  }
+  for (const votes of sentimentVotesByScope.values()) {
+    votes.delete(userId);
+  }
 }

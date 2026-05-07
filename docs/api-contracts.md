@@ -61,8 +61,53 @@ Session responses keep the legacy `token` field as an alias of `accessToken`.
 - `POST /api/v1/auth/logout` and `POST /auth/logout`: accepts `{ "refreshToken": "..." }` without requiring a valid access token and revokes that session. `{ "logoutAll": true }` requires access auth and revokes all user sessions.
 - `GET /api/v1/auth/me`: access-token protected profile endpoint.
 - `GET /api/v1/auth/session`: access-token protected session restore check. If the access token has a session id, the session must still exist, not be expired, and not be revoked.
-- `DELETE /api/v1/auth/account`: access-token protected account deletion. It deletes refresh sessions, social identity links, exchange connections, orders, holdings, favorites, and the user row, allowing later re-registration/re-linking.
+- `DELETE /account`: canonical access-token protected account deletion endpoint. Compatibility aliases: `DELETE /api/v1/account` and `DELETE /api/v1/auth/account`.
 - `GET /api/v1/openapi.json`: OpenAPI 3.0 contract for the social login routes and response schemas. This server does not bundle Swagger UI, but the JSON can be loaded into Swagger UI, Postman, or Xcode tooling.
+
+### `DELETE /account`
+
+Authenticated users can delete their account directly in the app without contacting support, visiting an external website, or creating additional credentials. This endpoint is the App Review Guideline 5.1.1(v) canonical account deletion contract.
+
+Request headers:
+
+```http
+Authorization: Bearer {accessToken}
+```
+
+Request body: none. The server deletes only the authenticated user from the access token; it does not accept `userId` in the body or path.
+
+Success response: `200 OK`
+
+```json
+{
+  "success": true,
+  "data": {
+    "deleted": true
+  }
+}
+```
+
+Error responses use the standard envelope:
+
+```json
+{
+  "success": false,
+  "message": "Failed to delete account.",
+  "error": "Failed to delete account.",
+  "code": "ACCOUNT_DELETE_FAILED"
+}
+```
+
+Unauthenticated requests return `401` with the existing access-token error codes such as `ACCESS_TOKEN_REQUIRED`, `ACCESS_TOKEN_INVALID`, or `ACCESS_TOKEN_EXPIRED`. If the authenticated user row no longer exists, the route returns `404 USER_NOT_FOUND`.
+
+Deletion scope:
+
+- Deletes user row and profile fields including email, nickname, auth provider mapping, provider account id, password hash, and cash balance.
+- Deletes refresh sessions and social identity links, so old refresh tokens cannot mint a new access token.
+- Deletes FCM tokens, price alerts, and alert delivery logs.
+- Deletes portfolio simulation data, orders, favorites/watchlist entries, exchange connection records, read-only exchange keys, connection verification rows, and order request payloads.
+- Deletes community reports, blocks, and follows where the deleted user is the actor or target.
+- Anonymizes in-memory community posts/comments authored by the deleted user as `탈퇴한 사용자` and removes that user from community likes and sentiment votes.
 
 Access token failures and refresh token failures are intentionally separate. Expired access tokens return `ACCESS_TOKEN_EXPIRED` so the client can try `/auth/refresh`; refresh failures such as `REFRESH_TOKEN_EXPIRED`, `REFRESH_TOKEN_REVOKED`, or `REFRESH_TOKEN_INVALID` are the point where the app should move to logged-out state.
 
@@ -3026,8 +3071,10 @@ Example `POST /exchange-connections/test` response:
 - `POST /api/v1/auth/social/google`
 - `POST /api/v1/auth/social/apple`
 - `GET /api/v1/auth/me`
+- `DELETE /account`
 
 `/api/v1/auth/register` is the existing server path. `/auth/register` is a compatibility alias for the iOS client and uses the same handler and response contract.
+`/account` is the canonical account deletion path. `/api/v1/account` and `/api/v1/auth/account` are compatibility aliases for older clients.
 
 Swagger/OpenAPI-compatible JSON is exposed at `GET /api/v1/openapi.json`.
 

@@ -2,6 +2,7 @@ import { afterEach, describe, it, expect, vi } from 'vitest';
 import { buildApp } from '../src/app';
 import {
   createSessionForUser,
+  deleteUserAccount,
   loginWithApple,
   loginWithGoogle,
   refreshSession,
@@ -32,6 +33,7 @@ const refreshSessionMock = vi.mocked(refreshSession);
 const loginWithGoogleMock = vi.mocked(loginWithGoogle);
 const loginWithAppleMock = vi.mocked(loginWithApple);
 const revokeSessionByRefreshTokenMock = vi.mocked(revokeSessionByRefreshToken);
+const deleteUserAccountMock = vi.mocked(deleteUserAccount);
 
 const authUser = {
   id: 'user-1',
@@ -58,11 +60,65 @@ describe('Auth API', () => {
     expect(routes).toContain('/api/v1/auth/social/apple');
     expect(routes).toContain('/api/v1/auth/logout');
     expect(routes).toContain('/api/v1/auth/session');
+    expect(routes).toContain('/account');
+    expect(routes).toContain('/api/v1/account');
     expect(routes).toContain('/api/v1/auth/account');
     expect(routes).toContain('/api/v1/app/config');
     expect(routes).toContain('/api/v1/openapi.json');
     expect(app.hasRoute({ method: 'POST', url: '/auth/register' })).toBe(true);
     expect(app.hasRoute({ method: 'POST', url: '/api/v1/auth/register' })).toBe(true);
+    await app.close();
+  });
+
+  it('DELETE /account - requires access token auth', async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'DELETE',
+      url: '/account',
+    });
+
+    expect(res.statusCode).toBe(401);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(false);
+    expect(body.code).toBe('ACCESS_TOKEN_REQUIRED');
+    expect(deleteUserAccountMock).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('DELETE /account - deletes the authenticated account with canonical response', async () => {
+    deleteUserAccountMock.mockResolvedValueOnce({ deleted: true });
+    const app = await buildApp();
+    const token = app.jwt.sign({ id: 'user-1', email: 'user@example.com' });
+    const res = await app.inject({
+      method: 'DELETE',
+      url: '/account',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({
+      success: true,
+      data: { deleted: true },
+    });
+    expect(deleteUserAccountMock).toHaveBeenCalledWith('user-1');
+    await app.close();
+  });
+
+  it('DELETE /account - maps unexpected failures to ACCOUNT_DELETE_FAILED', async () => {
+    deleteUserAccountMock.mockRejectedValueOnce(new Error('database write failed'));
+    const app = await buildApp();
+    const token = app.jwt.sign({ id: 'user-1', email: 'user@example.com' });
+    const res = await app.inject({
+      method: 'DELETE',
+      url: '/account',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.statusCode).toBe(500);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(false);
+    expect(body.code).toBe('ACCOUNT_DELETE_FAILED');
+    expect(body.error).toBe('Failed to delete account.');
     await app.close();
   });
 

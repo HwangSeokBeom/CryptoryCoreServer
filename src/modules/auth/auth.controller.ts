@@ -31,6 +31,7 @@ import { inspectAppleIdentityTokenForLogging } from './social-token.verifier';
 const registerRoutes = ['/api/v1/auth/register', '/auth/register'] as const;
 const refreshRoutes = ['/api/v1/auth/refresh', '/auth/refresh'] as const;
 const logoutRoutes = ['/api/v1/auth/logout', '/auth/logout'] as const;
+const accountDeletionRoutes = ['/account', '/api/v1/account', '/api/v1/auth/account'] as const;
 
 const validationMessages: Record<string, string> = {
   INVALID_EMAIL_FORMAT: '이메일 형식이 올바르지 않습니다.',
@@ -79,6 +80,13 @@ function getRequestMetadata(request: FastifyRequest) {
 function getSessionIdFromRequest(request: FastifyRequest) {
   const user = request.user as { sid?: string; sessionId?: string } | undefined;
   return user?.sid ?? user?.sessionId;
+}
+
+function maskUserId(userId?: string | null) {
+  if (!userId) {
+    return null;
+  }
+  return userId.length <= 4 ? '****' : `${userId.slice(0, 2)}***${userId.slice(-2)}`;
 }
 
 function getAppleLoginTrace(body: unknown) {
@@ -429,14 +437,22 @@ export async function authRoutes(app: FastifyInstance) {
     }
   });
 
-  app.delete('/api/v1/auth/account', { preHandler: app.authenticate }, async (request, reply) => {
-    try {
-      return createSuccessResponse(await deleteUserAccount(request.user.id));
-    } catch (err) {
-      if (err instanceof AppError) {
-        return reply.status(err.statusCode).send(createErrorResponse(err.message, err.details, err.code));
+  for (const route of accountDeletionRoutes) {
+    app.delete(route, { preHandler: app.authenticate }, async (request, reply) => {
+      try {
+        return createSuccessResponse(await deleteUserAccount(request.user.id));
+      } catch (err) {
+        if (err instanceof AppError) {
+          return reply.status(err.statusCode).send(createErrorResponse(err.message, err.details, err.code));
+        }
+        logger.error(
+          { domain: 'auth', action: 'delete_account_failed', userIdMasked: maskUserId(request.user.id), err },
+          '[AccountLifecycleDebug] action=delete_account_failed',
+        );
+        return reply
+          .status(500)
+          .send(createErrorResponse('Failed to delete account.', undefined, 'ACCOUNT_DELETE_FAILED'));
       }
-      throw err;
-    }
-  });
+    });
+  }
 }

@@ -35,8 +35,8 @@ function buildAppConfig() {
       logoutUrl: '/api/v1/auth/logout',
       sessionUrl: '/api/v1/auth/session',
       profileUrl: '/api/v1/auth/me',
-      deleteAccountUrl: '/api/v1/auth/account',
-      deletionPolicy: 'Account deletion revokes all Cryptory sessions, deletes stored social identity links, and allows later re-registration/re-linking.',
+      deleteAccountUrl: '/account',
+      deletionPolicy: 'Authenticated users can delete their account directly in the app. Deletion removes Cryptory sessions, social identity links, FCM tokens, alerts, exchange connections, portfolio data, favorites, and the user account row.',
     },
     socialLogin: {
       google: {
