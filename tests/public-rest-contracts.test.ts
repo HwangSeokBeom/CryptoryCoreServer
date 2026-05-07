@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/modules/public-market/public-market.service', () => ({
   listPublicMarkets: vi.fn(() => []),
@@ -118,13 +118,22 @@ async function createApp() {
   return buildApp();
 }
 
+let app: Awaited<ReturnType<typeof createApp>>;
+
+beforeAll(async () => {
+  app = await createApp();
+}, 20000);
+
 afterEach(() => {
   vi.clearAllMocks();
 });
 
+afterAll(async () => {
+  await app.close();
+});
+
 describe('Public REST Contracts', () => {
   it('GET /api/v1/public/tickers returns the fixed ticker schema', async () => {
-    const app = await createApp();
     const res = await app.inject({
       method: 'GET',
       url: '/api/v1/public/tickers?exchange=upbit&symbol=BTC',
@@ -144,11 +153,9 @@ describe('Public REST Contracts', () => {
     expect(body.data.items[0].fallbackKey).toBe('symbol:BTC');
     expect(body.data.items[0].imageLookupKey).toBe('symbol:BTC');
     expect(body.data.total).toBe(1);
-    await app.close();
   }, 20000);
 
   it('GET /api/v1/public/tickers accepts image provenance fields on debug requests', async () => {
-    const app = await createApp();
     const res = await app.inject({
       method: 'GET',
       url: '/api/v1/public/tickers?exchange=upbit&symbol=BTC&debug=1',
@@ -162,11 +169,9 @@ describe('Public REST Contracts', () => {
       preferredImageSlug: 'bitcoin',
       imageResolutionSource: 'direct_slug',
     });
-    await app.close();
   }, 15000);
 
   it('GET /api/v1/public/orderbook returns the fixed orderbook schema', async () => {
-    const app = await createApp();
     const res = await app.inject({
       method: 'GET',
       url: '/api/v1/public/orderbook?exchange=upbit&symbol=BTC',
@@ -179,11 +184,9 @@ describe('Public REST Contracts', () => {
     expect(body.data.displaySymbol).toBe('BTC/KRW');
     expect(body.data.bestAsk).toBe(100010000);
     expect(body.data.asks[0].quantity).toBe(0.2);
-    await app.close();
   });
 
   it('GET /api/v1/public/trades returns the fixed trades schema', async () => {
-    const app = await createApp();
     const res = await app.inject({
       method: 'GET',
       url: '/api/v1/public/trades?exchange=upbit&symbol=BTC',
@@ -196,11 +199,9 @@ describe('Public REST Contracts', () => {
     expect(body.data.displaySymbol).toBe('BTC/KRW');
     expect(body.data.items[0].notional).toBe(1000000);
     expect(body.data.market).toBe('BTC/KRW');
-    await app.close();
   });
 
   it('GET /api/v1/public/candles returns the fixed candles schema', async () => {
-    const app = await createApp();
     const res = await app.inject({
       method: 'GET',
       url: '/api/v1/public/candles?exchange=upbit&symbol=BTC&period=1h&limit=1',
@@ -216,11 +217,9 @@ describe('Public REST Contracts', () => {
     expect(body.data.items[0].close).toBe(100000000);
     expect(body.data.meta.freshnessState).toBe('live');
     expect(body.data.meta.recommendedClientBehavior).toBe('first_paint_ok');
-    await app.close();
   });
 
   it('GET /api/v1/public/kimchi-premium returns the fixed kimchi premium schema', async () => {
-    const app = await createApp();
     const res = await app.inject({
       method: 'GET',
       url: '/api/v1/public/kimchi-premium?symbols=BTC',
@@ -233,6 +232,5 @@ describe('Public REST Contracts', () => {
     expect(body.data.items[0].canonicalAssetKey).toBe('BTC');
     expect(body.data.items[0].assetImageUrl).toBe('https://assets.example.com/btc.png');
     expect(body.data.items[0].domestic[0].priceKrw).toBe(100000000);
-    await app.close();
   });
 });

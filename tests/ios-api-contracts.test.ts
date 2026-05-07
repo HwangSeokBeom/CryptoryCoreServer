@@ -1066,7 +1066,7 @@ describe('iOS API contracts', () => {
     await app.close();
   }, 20000);
 
-  it('returns translation provider errors, successful translations, cache hits, and length validation', async () => {
+  it('returns translation provider errors when translation is not configured', async () => {
     const missingProvider = await createApp();
     const unavailable = await missingProvider.app.inject({
       method: 'POST',
@@ -1085,7 +1085,9 @@ describe('iOS API contracts', () => {
       code: 'TRANSLATION_PROVIDER_NOT_CONFIGURED',
     });
     await missingProvider.app.close();
+  }, 20000);
 
+  it('returns successful translations, cache hits, and length validation', async () => {
     const configured = await createApp({
       TRANSLATION_PROVIDER: 'openai',
       OPENAI_API_KEY: 'test-openai-key',

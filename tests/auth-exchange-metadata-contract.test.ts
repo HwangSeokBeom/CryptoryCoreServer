@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/modules/auth/auth.service', () => ({
   registerUser: vi.fn(),
@@ -30,13 +30,25 @@ async function createAppWithToken() {
   return { app, token };
 }
 
+let app: Awaited<ReturnType<typeof createAppWithToken>>['app'];
+let token: string;
+
+beforeAll(async () => {
+  const built = await createAppWithToken();
+  app = built.app;
+  token = built.token;
+}, 15000);
+
 afterEach(() => {
   vi.clearAllMocks();
 });
 
+afterAll(async () => {
+  await app.close();
+});
+
 describe('Auth me and exchange metadata contracts', () => {
   it('GET /api/v1/auth/me returns authenticated user profile', async () => {
-    const { app, token } = await createAppWithToken();
     const res = await app.inject({
       method: 'GET',
       url: '/api/v1/auth/me',
@@ -48,11 +60,9 @@ describe('Auth me and exchange metadata contracts', () => {
     expect(body.success).toBe(true);
     expect(body.data.email).toBe('user@example.com');
     expect(body.data.authProvider).toBe('email');
-    await app.close();
   });
 
   it('GET /exchange-metadata returns exchange guides with credential fields', async () => {
-    const { app } = await createAppWithToken();
     const res = await app.inject({
       method: 'GET',
       url: '/exchange-metadata',
@@ -63,6 +73,5 @@ describe('Auth me and exchange metadata contracts', () => {
     expect(body.success).toBe(true);
     expect(body.data.some((item: any) => item.exchange === 'upbit')).toBe(true);
     expect(body.data[0].credentialFields.length).toBeGreaterThan(0);
-    await app.close();
   });
 });

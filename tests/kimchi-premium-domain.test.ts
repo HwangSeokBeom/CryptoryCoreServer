@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DomesticExchangeId } from '../src/core/exchange/exchange.types';
+import { getKimchiPremium, resetKimchiPremiumCachesForTest } from '../src/domains/kimchi-premium/kimchi-premium.service';
 
 const domesticPriceByExchange: Record<DomesticExchangeId, number> = {
   upbit: 100000000,
@@ -84,13 +85,12 @@ vi.mock('../src/core/exchange/registry.bootstrap', () => ({
 
 describe('Kimchi Premium Domain', () => {
   afterEach(() => {
+    resetKimchiPremiumCachesForTest();
     vi.restoreAllMocks();
-    vi.resetModules();
   });
 
   it('computes Binance reference KRW and domestic premium', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(1712345680000);
-    const { getKimchiPremium } = await import('../src/domains/kimchi-premium/kimchi-premium.service');
     const [entry] = await getKimchiPremium(['BTC']);
 
     expect(entry.binanceUsdtPrice).toBe(70000);
@@ -110,7 +110,6 @@ describe('Kimchi Premium Domain', () => {
 
   it('selects the requested domestic venue for upbit, bithumb, coinone, and korbit', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(1712345680000);
-    const { getKimchiPremium } = await import('../src/domains/kimchi-premium/kimchi-premium.service');
 
     for (const venue of Object.keys(domesticPriceByExchange) as DomesticExchangeId[]) {
       const [entry] = await getKimchiPremium(['BTC'], { venues: [venue] });
@@ -126,7 +125,6 @@ describe('Kimchi Premium Domain', () => {
 
   it('keeps unsupported symbols as partial failures without rejecting the whole response', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(1712345680000);
-    const { getKimchiPremium } = await import('../src/domains/kimchi-premium/kimchi-premium.service');
     const entries = await getKimchiPremium(['BTC', 'NOTREAL']);
 
     expect(entries).toHaveLength(2);
