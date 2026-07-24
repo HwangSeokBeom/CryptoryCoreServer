@@ -1,6 +1,8 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
+import helmet from '@fastify/helmet';
 import jwt from '@fastify/jwt';
+import rateLimit from '@fastify/rate-limit';
 import { env } from './config/env';
 import { logger } from './utils/logger';
 import { AppError, createErrorResponse, mapInfrastructureError } from './utils/errors';
@@ -62,10 +64,32 @@ function classifyAccessTokenFailure(error: unknown, authorization: string | unde
 export async function buildApp() {
   const app = Fastify({
     logger: false, // We use our own Pino logger
+    bodyLimit: 1_048_576,
   });
 
   // Plugins
-  await app.register(cors, { origin: true });
+  await app.register(helmet, {
+    contentSecurityPolicy: false,
+  });
+  await app.register(rateLimit, {
+    max: 300,
+    timeWindow: '1 minute',
+  });
+  await app.register(cors, {
+    origin: env.NODE_ENV !== 'production'
+      ? true
+      : (origin, callback) => {
+          if (!origin) {
+            callback(null, true);
+            return;
+          }
+
+          const allowedOrigin = env.APP_HOMEPAGE_URL
+            ? new URL(env.APP_HOMEPAGE_URL).origin
+            : null;
+          callback(null, origin === allowedOrigin);
+        },
+  });
   await app.register(jwt, { secret: env.JWT_SECRET });
 
   // Decorate JWT types
@@ -157,7 +181,14 @@ export async function buildApp() {
       logger.error({ err: error }, 'Unhandled error');
     }
 
-    const statusCode = responseError?.statusCode || error.statusCode || 500;
+    const infrastructureStatusCode =
+      typeof error === 'object'
+      && error
+      && 'statusCode' in error
+      && typeof error.statusCode === 'number'
+        ? error.statusCode
+        : null;
+    const statusCode = responseError?.statusCode ?? infrastructureStatusCode ?? 500;
     const message = responseError?.message || 'Internal Server Error';
     reply
       .status(statusCode)

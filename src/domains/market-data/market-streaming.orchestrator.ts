@@ -16,6 +16,7 @@ import type {
   StreamSubscription,
 } from '../../core/exchange/exchange.types';
 import { getExchangeConfig } from '../../config/exchange.config';
+import { env } from '../../config/env';
 import { publicMarketDataStore } from '../../modules/public-market/market.data.store';
 import { marketEventBus } from '../../modules/public-market/market.event-bus';
 import {
@@ -411,7 +412,8 @@ class MarketStreamingOrchestrator {
       }),
     );
     this.publicSubscriptions = subscriptionResults.flatMap(({ exchange, symbols }) => {
-      const representativeSymbols = getRepresentativeSymbolsForExchange(symbols, exchange).slice(0, 4);
+      const representativeSymbols = getRepresentativeSymbolsForExchange(symbols, exchange)
+        .slice(0, env.PUBLIC_STREAM_SYMBOL_LIMIT);
       const subscriptions: StreamSubscription[] = [
         {
           exchange,
@@ -531,7 +533,9 @@ class MarketStreamingOrchestrator {
         const provider = exchangeProviderRegistry.getMarketDataProvider(exchange);
         const tickerSymbols = this.getSubscribedSymbols(exchange, 'tickers');
         const orderbookSymbols = this.getSubscribedSymbols(exchange, 'orderbook');
-        const tradeSymbols = this.includeTrades ? this.getSubscribedSymbols(exchange, 'trades').slice(0, 4) : [];
+        const tradeSymbols = this.includeTrades
+          ? this.getSubscribedSymbols(exchange, 'trades').slice(0, env.PUBLIC_STREAM_SYMBOL_LIMIT)
+          : [];
         this.setMode(exchange, 'polling', false, null);
 
         if (tickerSymbols.length > 0 && !this.isCapabilitySuppressed(exchange, 'ticker')) {

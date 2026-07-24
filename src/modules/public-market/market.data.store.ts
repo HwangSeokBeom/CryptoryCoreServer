@@ -13,6 +13,12 @@ import type {
 
 const TRADE_CACHE_LIMIT = 100;
 const TICKER_HISTORY_LIMIT = 120;
+const REDIS_PERSIST_BATCH_WINDOW_MS = 100;
+
+type PendingPersist = {
+  serialized: string;
+  ttlSeconds: number;
+};
 
 function marketKey(exchange: string, symbol: string, interval?: string): string {
   return interval ? `${exchange}:${symbol}:${interval}` : `${exchange}:${symbol}`;
@@ -25,6 +31,8 @@ class PublicMarketDataStore {
   private readonly trades = new Map<string, NormalizedMarketTrade[]>();
   private readonly candles = new Map<string, NormalizedMarketCandle>();
   private readonly collectorStatuses = new Map<string, PublicMarketCollectorStatus>();
+  private readonly pendingPersists = new Map<string, PendingPersist>();
+  private persistTimer: NodeJS.Timeout | null = null;
 
   upsertTicker(ticker: NormalizedMarketTicker) {
     const key = marketKey(ticker.exchange, ticker.symbol);
@@ -32,13 +40,13 @@ class PublicMarketDataStore {
     this.appendTickerHistory(key, ticker.price, ticker.timestamp);
     marketIngestHealth.noteTickerReceived(ticker.exchange as ExchangeId, ticker.timestamp);
     marketTrendProjectionStore.recordTicker(ticker);
-    void this.persist(`market:ticker:${key}`, ticker, 120);
+    this.schedulePersist(`market:ticker:${key}`, ticker, 120);
   }
 
   upsertOrderbook(orderbook: NormalizedMarketOrderbook) {
     const key = marketKey(orderbook.exchange, orderbook.symbol);
     this.orderbooks.set(key, orderbook);
-    void this.persist(`market:orderbook:${key}`, orderbook, 60);
+    this.schedulePersist(`market:orderbook:${key}`, orderbook, 60);
   }
 
   appendTrade(trade: NormalizedMarketTrade) {
@@ -52,18 +60,18 @@ class PublicMarketDataStore {
     this.refreshTickerFromTrade(trade);
     marketIngestHealth.noteTradeReceived(trade.exchange as ExchangeId, trade.timestamp);
     marketTrendProjectionStore.recordTrade(trade);
-    void this.persist(`market:trades:${key}`, existing, 60);
+    this.schedulePersist(`market:trades:${key}`, existing, 60);
   }
 
   upsertCandle(candle: NormalizedMarketCandle) {
     const key = marketKey(candle.exchange, candle.symbol, candle.interval);
     this.candles.set(key, candle);
-    void this.persist(`market:candle:${key}`, candle, 120);
+    this.schedulePersist(`market:candle:${key}`, candle, 120);
   }
 
   setCollectorStatus(status: PublicMarketCollectorStatus) {
     this.collectorStatuses.set(status.exchange, status);
-    void this.persist(`market:status:${status.exchange}`, status, 120);
+    this.schedulePersist(`market:status:${status.exchange}`, status, 120);
   }
 
   getTicker(exchange: string, symbol: string): NormalizedMarketTicker | null {
@@ -102,11 +110,46 @@ class PublicMarketDataStore {
     );
   }
 
-  private async persist(key: string, value: unknown, ttlSeconds: number) {
+  private schedulePersist(key: string, value: unknown, ttlSeconds: number) {
     try {
-      await redis.set(key, JSON.stringify(value), 'EX', ttlSeconds);
+      this.pendingPersists.set(key, {
+        serialized: JSON.stringify(value),
+        ttlSeconds,
+      });
     } catch (err) {
-      logger.debug({ err, key }, 'Failed to persist public market cache to redis');
+      logger.debug({ err, key }, 'Failed to serialize public market cache value');
+      return;
+    }
+
+    if (this.persistTimer) {
+      return;
+    }
+
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      void this.flushPendingPersists();
+    }, REDIS_PERSIST_BATCH_WINDOW_MS);
+    this.persistTimer.unref();
+  }
+
+  private async flushPendingPersists() {
+    const batch = Array.from(this.pendingPersists.entries());
+    this.pendingPersists.clear();
+    if (batch.length === 0) {
+      return;
+    }
+
+    try {
+      const pipeline = redis.pipeline();
+      batch.forEach(([key, pending]) => {
+        pipeline.set(key, pending.serialized, 'EX', pending.ttlSeconds);
+      });
+      await pipeline.exec();
+    } catch (err) {
+      logger.debug(
+        { err, keyCount: batch.length },
+        'Failed to persist public market cache batch to redis',
+      );
     }
   }
 
@@ -140,7 +183,7 @@ class PublicMarketDataStore {
 
     this.tickers.set(key, updatedTicker);
     this.appendTickerHistory(key, updatedTicker.price, updatedTicker.timestamp);
-    void this.persist(`market:ticker:${key}`, updatedTicker, 120);
+    this.schedulePersist(`market:ticker:${key}`, updatedTicker, 120);
   }
 }
 
