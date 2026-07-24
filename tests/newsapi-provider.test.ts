@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { listNews, toNewsApiNewsItems } from '../src/domains/news/news.service';
 
 describe('NewsAPI provider mapping', () => {
-  it('maps NewsAPI articles to internal news items and drops removed or incomplete articles', () => {
+  it('maps NewsAPI articles to internal news items and drops removed or incomplete articles', async () => {
+    const { toNewsApiNewsItems } = await import('../src/domains/news/news.service');
     const items = toNewsApiNewsItems({
       articles: [
         {
@@ -61,13 +61,29 @@ describe('NewsAPI provider mapping', () => {
 
 describe('NewsAPI selected provider', () => {
   const fetchMock = vi.fn();
+  const originalNewsProvider = process.env.NEWS_PROVIDER;
+  const originalNewsApiKey = process.env.NEWSAPI_API_KEY;
 
   afterEach(() => {
+    if (originalNewsProvider === undefined) {
+      delete process.env.NEWS_PROVIDER;
+    } else {
+      process.env.NEWS_PROVIDER = originalNewsProvider;
+    }
+    if (originalNewsApiKey === undefined) {
+      delete process.env.NEWSAPI_API_KEY;
+    } else {
+      process.env.NEWSAPI_API_KEY = originalNewsApiKey;
+    }
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+    vi.resetModules();
   });
 
   it('uses NewsAPI as the primary provider when NEWS_PROVIDER=newsapi', async () => {
+    process.env.NEWS_PROVIDER = 'newsapi';
+    process.env.NEWSAPI_API_KEY = 'test-newsapi-key';
+    vi.resetModules();
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
       status: 'ok',
       articles: [{
@@ -83,6 +99,7 @@ describe('NewsAPI selected provider', () => {
       headers: { 'content-type': 'application/json' },
     }));
     vi.stubGlobal('fetch', fetchMock);
+    const { listNews } = await import('../src/domains/news/news.service');
 
     const response = await listNews({ date: '2026-05-03', limit: 10 });
 

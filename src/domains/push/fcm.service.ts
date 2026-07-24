@@ -1,5 +1,6 @@
 import crypto from 'crypto';
-import admin from 'firebase-admin';
+import { cert, getApps, initializeApp } from 'firebase-admin/app';
+import { getMessaging } from 'firebase-admin/messaging';
 import { env } from '../../config/env';
 import { prisma } from '../../config/database';
 import { logger } from '../../utils/logger';
@@ -62,9 +63,9 @@ export function initializeFcm() {
     return;
   }
 
-  if (admin.apps.length === 0) {
-    admin.initializeApp({
-      credential: admin.credential.cert({
+  if (getApps().length === 0) {
+    initializeApp({
+      credential: cert({
         projectId: env.FIREBASE_PROJECT_ID,
         clientEmail: env.FIREBASE_CLIENT_EMAIL,
         privateKey: env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
@@ -103,10 +104,10 @@ export async function sendPriceAlertPush(token: string, payload: PriceAlertPushP
     return { status: 'SKIPPED', errorCode: 'FCM_DISABLED', errorMessage: 'FCM is disabled' };
   }
 
-  if (admin.apps.length === 0) {
+  if (getApps().length === 0) {
     initializeFcm();
   }
-  if (admin.apps.length === 0) {
+  if (getApps().length === 0) {
     return { status: 'SKIPPED', errorCode: 'FCM_NOT_INITIALIZED', errorMessage: 'Firebase Admin SDK is not initialized' };
   }
 
@@ -130,7 +131,7 @@ export async function sendPriceAlertPush(token: string, payload: PriceAlertPushP
   };
 
   try {
-    const providerMessageId = await admin.messaging().send(message, env.FCM_DRY_RUN);
+    const providerMessageId = await getMessaging().send(message, env.FCM_DRY_RUN);
     logger.info({ domain: 'fcm', alertId: payload.alertId, tokenHash }, '[FCM] send success alertId=' + payload.alertId + ' tokenHash=' + tokenHash);
     return { status: 'SUCCESS', providerMessageId };
   } catch (error) {

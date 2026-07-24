@@ -1,4 +1,4 @@
-import cron from 'node-cron';
+import cron, { type ScheduledTask } from 'node-cron';
 import { env } from '../config/env';
 import { exchangeProviderRegistry } from '../core/exchange/registry.bootstrap';
 import { assetMetadataService } from '../domains/assets/asset-metadata.service';
@@ -7,7 +7,7 @@ import { startMarketSnapshotCache, stopMarketSnapshotCache } from '../domains/ma
 import { marketStreamingOrchestrator } from '../domains/market-data/market-streaming.orchestrator';
 import { logger } from '../utils/logger';
 
-let rateTask: cron.ScheduledTask | null = null;
+let rateTask: ScheduledTask | null = null;
 let collectorStartTimer: NodeJS.Timeout | null = null;
 let collectorStarted = false;
 
@@ -92,7 +92,7 @@ export async function stopTickerCollector() {
   stopChartLiveService();
   assetMetadataService.stop();
   rateTask?.stop();
-  const destroyTask = (rateTask as cron.ScheduledTask & { destroy?: () => void } | null)?.destroy;
+  const destroyTask = (rateTask as ScheduledTask & { destroy?: () => void } | null)?.destroy;
   destroyTask?.call(rateTask);
   rateTask = null;
   logger.info({ domain: 'market-streaming' }, 'Public market orchestrator stopped');

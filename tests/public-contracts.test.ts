@@ -262,4 +262,24 @@ describe('Public Market Contracts', () => {
     expect(welcome.channels).toContain('candles');
     expect(candleEvent.data.interval).toBe('1m');
   });
+
+  it('rejects missing and oversized websocket subscription filters', () => {
+    expect(wsMarketRequestSchema.safeParse({
+      action: 'subscribe',
+      channel: 'tickers',
+      exchanges: ['upbit'],
+    }).success).toBe(false);
+
+    expect(wsMarketRequestSchema.safeParse({
+      action: 'subscribe',
+      channel: 'tickers',
+      exchanges: ['upbit'],
+      symbols: Array.from({ length: 65 }, (_, index) => `ASSET${index}`),
+    }).success).toBe(false);
+
+    expect(wsMarketRequestSchema.safeParse({
+      requestId: 'x'.repeat(129),
+      action: 'ping',
+    }).success).toBe(false);
+  });
 });
