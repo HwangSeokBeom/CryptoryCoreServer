@@ -9,9 +9,11 @@ import type {
   NormalizedMarketTrade,
 } from './market.types';
 
-export const MARKET_WS_PROTOCOL_VERSION = '2026-04-15';
+export const MARKET_WS_PROTOCOL_VERSION = '2026-07-24';
 
 const exchangeIdSchema = z.enum(['upbit', 'bithumb', 'coinone', 'korbit', 'binance']);
+const wsRequestIdSchema = z.string().trim().min(1).max(128).optional();
+const wsSymbolSchema = z.string().trim().min(1).max(64);
 
 const marketCapabilitiesDtoSchema = z.object({
   supportsCandles: z.boolean(),
@@ -273,31 +275,31 @@ export const kimchiPremiumResponseDtoSchema = z.object({
 
 export const wsMarketRequestSchema = z.union([
   z.object({
-    requestId: z.string().optional(),
+    requestId: wsRequestIdSchema,
     action: z.literal('ping'),
-  }),
+  }).strict(),
   z.object({
-    requestId: z.string().optional(),
+    requestId: wsRequestIdSchema,
     action: z.enum(['subscribe', 'unsubscribe']),
     channel: z.literal('tickers'),
-    exchanges: z.array(exchangeIdSchema).optional(),
-    symbols: z.array(z.string()).optional(),
-  }),
+    exchanges: z.array(exchangeIdSchema).min(1).max(5),
+    symbols: z.array(wsSymbolSchema).min(1).max(64),
+  }).strict(),
   z.object({
-    requestId: z.string().optional(),
+    requestId: wsRequestIdSchema,
     action: z.enum(['subscribe', 'unsubscribe']),
     channel: z.enum(['orderbook', 'trades']),
     exchange: exchangeIdSchema,
-    symbols: z.array(z.string()).min(1),
-  }),
+    symbols: z.array(wsSymbolSchema).min(1).max(64),
+  }).strict(),
   z.object({
-    requestId: z.string().optional(),
+    requestId: wsRequestIdSchema,
     action: z.enum(['subscribe', 'unsubscribe']),
     channel: z.literal('candles'),
     exchange: exchangeIdSchema,
-    symbols: z.array(z.string()).min(1),
-    interval: z.string().optional(),
-  }),
+    symbols: z.array(wsSymbolSchema).min(1).max(8),
+    interval: z.string().trim().min(1).max(16).optional(),
+  }).strict(),
 ]);
 
 export const wsMarketWelcomeSchema = z.object({

@@ -336,9 +336,17 @@ export class RestClient {
             responseSnippet: buildResponseSnippet(data),
           },
         };
-      } catch (error) {
+      } catch (caughtError) {
         clearTimeout(timeout);
-        if (isAbortError(error)) {
+        const error = isAbortError(caughtError)
+          ? new ExchangeRequestError(
+              this.owner,
+              504,
+              logUrl,
+              `${this.owner} request timed out`,
+            )
+          : caughtError;
+        if (isAbortError(caughtError)) {
           logger.warn(
             {
               domain: 'exchange-rest',
@@ -349,12 +357,6 @@ export class RestClient {
               attempt,
             },
             'Exchange REST request timed out',
-          );
-          error = new ExchangeRequestError(
-            this.owner,
-            504,
-            logUrl,
-            `${this.owner} request timed out`,
           );
         }
         if (isExchangeRequestError(error) && !policy.retryableStatusCodes.includes(error.statusCode)) {

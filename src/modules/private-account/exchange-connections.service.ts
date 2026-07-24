@@ -44,7 +44,6 @@ const READ_ONLY_API_KEY_MESSAGE =
   'Only read-only API keys are allowed. API keys with trading or withdrawal permissions cannot be registered.';
 
 type ExchangeConnectionRecord = Awaited<ReturnType<typeof prisma.exchangeConnection.findFirst>>;
-const inFlightExchangeConnectionReads = new Map<string, Promise<unknown>>();
 
 function assertSupportedExchange(exchange: string): ExchangeId {
   const exchangeInfo = EXCHANGE_MAP.get(exchange);
@@ -78,20 +77,6 @@ async function findConnectionByIdentifier(userId: string, identifier: string) {
       userId,
     },
   });
-}
-
-function withSingleFlight<T>(key: string, operation: () => Promise<T>) {
-  const existing = inFlightExchangeConnectionReads.get(key);
-  if (existing) {
-    logger.debug({ domain: 'exchange-connection', event: 'singleflight_join', key }, 'Joined in-flight exchange connection request');
-    return existing as Promise<T>;
-  }
-
-  const promise = operation().finally(() => {
-    inFlightExchangeConnectionReads.delete(key);
-  });
-  inFlightExchangeConnectionReads.set(key, promise);
-  return promise;
 }
 
 function toConnectionPurpose(permission: ExchangeConnectionPermission): ExchangeConnectionPurpose {

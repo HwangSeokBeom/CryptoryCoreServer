@@ -15,7 +15,6 @@ import {
   getExchangeQuoteCurrency,
   getSupportedSymbols,
   isSupportedSymbol,
-  toExchangeMarketSymbol,
   toUnifiedSymbol,
 } from './market.normalization';
 import type {

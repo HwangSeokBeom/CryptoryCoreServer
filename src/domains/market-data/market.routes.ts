@@ -35,7 +35,6 @@ import {
   parseContractLimit,
   parseContractQuoteCurrency,
   parseContractTimeframe,
-  parseSortOrder,
   parseTickerSort,
   parseTickerSortOrder,
   summarizeTickerSparklines,
@@ -547,9 +546,9 @@ export async function marketRoutes(app: FastifyInstance) {
       }
       const requestedSymbols = (symbols ?? '').split(',').map((value) => value.trim()).filter(Boolean);
       const requestedMarketIds = (marketIds ?? '').split(',').map((value) => value.trim()).filter(Boolean);
-      let parsedLimit = 24;
+      let requestedLimit: number;
       try {
-        parsedLimit = parseContractLimit(limit, 24, 60);
+        requestedLimit = parseContractLimit(limit, 24, 60);
       } catch (error) {
         if (error instanceof AppError) {
           return reply.status(error.statusCode).send(createErrorResponse(error.message, error.details, error.code));
@@ -559,7 +558,7 @@ export async function marketRoutes(app: FastifyInstance) {
       const profile = normalizeSparklineRequestProfile({
         timeframe,
         interval,
-        limit: parsedLimit,
+        limit: requestedLimit,
         requestedCount: (requestedMarketIds.length > 0 ? requestedMarketIds : requestedSymbols).length,
       });
       const parsedInterval = profile.interval;
@@ -569,7 +568,7 @@ export async function marketRoutes(app: FastifyInstance) {
           acceptedValues: ['1M', '5M', '15M', '1H', '4H', '1D', '1W'],
         }, 'INVALID_TIMEFRAME'));
       }
-      parsedLimit = profile.limit;
+      const parsedLimit = profile.limit;
       const parsedPriority = priority?.trim().toLowerCase();
       if (parsedPriority && !['top', 'interactive'].includes(parsedPriority)) {
         return reply.status(400).send(createErrorResponse('priority must be top or interactive', {

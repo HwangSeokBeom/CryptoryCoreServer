@@ -67,6 +67,7 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   USE_LIVE_DATA: envBoolean(false),
   PUBLIC_STREAMING_ENABLED: envBoolean(true),
+  PUBLIC_STREAM_SYMBOL_LIMIT: z.coerce.number().int().min(4).max(200).default(50),
   PRIVATE_STREAMING_ENABLED: envBoolean(true),
   ENABLE_PRIVATE_WS: optionalEnvBoolean(),
   ENABLE_POLLING_FALLBACK: envBoolean(true),
@@ -251,6 +252,7 @@ export interface Env {
   NODE_ENV: 'development' | 'production' | 'test';
   USE_LIVE_DATA: boolean;
   PUBLIC_STREAMING_ENABLED: boolean;
+  PUBLIC_STREAM_SYMBOL_LIMIT: number;
   PRIVATE_STREAMING_ENABLED: boolean;
   ENABLE_PRIVATE_WS: boolean;
   ENABLE_POLLING_FALLBACK: boolean;
@@ -423,6 +425,7 @@ function loadEnv(): Env {
     NODE_ENV: parsed.data.NODE_ENV,
     USE_LIVE_DATA: parsed.data.USE_LIVE_DATA,
     PUBLIC_STREAMING_ENABLED: parsed.data.PUBLIC_STREAMING_ENABLED,
+    PUBLIC_STREAM_SYMBOL_LIMIT: parsed.data.PUBLIC_STREAM_SYMBOL_LIMIT,
     PRIVATE_STREAMING_ENABLED: parsed.data.ENABLE_PRIVATE_WS ?? parsed.data.PRIVATE_STREAMING_ENABLED,
     ENABLE_PRIVATE_WS: parsed.data.ENABLE_PRIVATE_WS ?? parsed.data.PRIVATE_STREAMING_ENABLED,
     ENABLE_POLLING_FALLBACK: parsed.data.ENABLE_POLLING_FALLBACK,

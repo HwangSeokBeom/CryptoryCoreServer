@@ -12,6 +12,7 @@ import { closeWebSocketServer, setupWebSocket } from './websocket/wsServer';
 import { startTickerCollector, stopTickerCollector } from './jobs/tickerCollector';
 import { initializeFcm } from './domains/push/fcm.service';
 import { startPriceAlertWorker, stopPriceAlertWorker } from './domains/alerts/price-alert.worker';
+import { validateAccessSession } from './modules/auth/auth.service';
 
 function lookupPortOccupant(port: number) {
   if (env.NODE_ENV !== 'development') {
@@ -116,7 +117,19 @@ async function main() {
   const httpServer = app.server;
   setupWebSocket(httpServer, {
     privateStreamingEnabled: env.ENABLE_PRIVATE_WS,
-    verifyJwt: async (token) => app.jwt.verify(token),
+    verifyJwt: async (token) => {
+      const payload = await app.jwt.verify<{
+        id?: string;
+        sid?: string;
+        sessionId?: string;
+      }>(token);
+      const userId = payload.id?.trim();
+      const sessionId = (payload.sid ?? payload.sessionId)?.trim();
+      if (!userId || !sessionId || !(await validateAccessSession(userId, sessionId))) {
+        throw new Error('Private websocket session is inactive.');
+      }
+      return payload;
+    },
   });
   logger.info(
     {

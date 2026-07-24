@@ -46,9 +46,7 @@ import { logger } from '../utils/logger';
 
 interface ClientSubscriptionState {
   tickers: {
-    active: boolean;
-    exchanges: Set<string>;
-    symbols: Set<string>;
+    keys: Set<string>;
   };
   orderbook: Set<string>;
   trades: Set<string>;
@@ -58,6 +56,8 @@ interface ClientSubscriptionState {
 
 interface ClientSocket extends WebSocket {
   isAlive?: boolean;
+  messageWindowStartedAt?: number;
+  messageCountInWindow?: number;
 }
 
 interface PrivateClientSocket extends ClientSocket {
@@ -71,6 +71,7 @@ type PrivateSubscriptionState = {
   fills: Map<string, Set<string>>;
   portfolio: Set<string>;
   pollTimer: NodeJS.Timeout | null;
+  pollInFlight: boolean;
   orderDigests: Map<string, string>;
   portfolioDigests: Map<string, string>;
   sentFillIds: Set<string>;
@@ -109,12 +110,55 @@ const clientSubscriptions = new Map<ClientSocket, ClientSubscriptionState>();
 const privateClientSubscriptions = new Map<PrivateClientSocket, PrivateSubscriptionState>();
 let heartbeatInterval: NodeJS.Timeout | null = null;
 let marketCandlePollInterval: NodeJS.Timeout | null = null;
+let marketCandlePollInFlight = false;
 const contractLiveCandles = new Map<string, MarketCandle>();
 const MAX_CONTRACT_CANDLE_SUBSCRIPTIONS_PER_CLIENT = 8;
+const MAX_PUBLIC_SUBSCRIPTIONS_PER_CLIENT = 64;
+const MAX_PRIVATE_SUBSCRIPTIONS_PER_CLIENT = 64;
+const MAX_WS_MESSAGE_BYTES = 64 * 1024;
+const MAX_WS_BUFFERED_BYTES = 1024 * 1024;
+const MAX_WS_MESSAGES_PER_WINDOW = 120;
+const WS_MESSAGE_WINDOW_MS = 10_000;
+const MAX_PRIVATE_DIGEST_ENTRIES = 2_048;
 
 function sendJson(ws: WebSocket, payload: unknown) {
   if (ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify(payload));
+  if (ws.bufferedAmount > MAX_WS_BUFFERED_BYTES) {
+    logger.warn(
+      { domain: 'websocket', event: 'slow_consumer', bufferedAmount: ws.bufferedAmount },
+      'Closing websocket slow consumer',
+    );
+    ws.close(1013, 'slow_consumer');
+    setTimeout(() => ws.terminate(), 500).unref();
+    return;
+  }
+
+  const serialized = JSON.stringify(payload);
+  ws.send(serialized, (error) => {
+    if (error) {
+      logger.warn({ domain: 'websocket', event: 'send_failed', err: error }, 'Websocket send failed');
+    }
+  });
+}
+
+function consumeInboundBudget(ws: ClientSocket, raw: RawData) {
+  if (Buffer.byteLength(raw.toString()) > MAX_WS_MESSAGE_BYTES) {
+    ws.close(1009, 'message_too_large');
+    return false;
+  }
+
+  const now = Date.now();
+  if (!ws.messageWindowStartedAt || now - ws.messageWindowStartedAt >= WS_MESSAGE_WINDOW_MS) {
+    ws.messageWindowStartedAt = now;
+    ws.messageCountInWindow = 0;
+  }
+  ws.messageCountInWindow = (ws.messageCountInWindow ?? 0) + 1;
+  if (ws.messageCountInWindow > MAX_WS_MESSAGES_PER_WINDOW) {
+    logger.warn({ domain: 'websocket', event: 'message_rate_limited' }, 'Closing websocket message flood');
+    ws.close(1008, 'message_rate_limited');
+    return false;
+  }
+  return true;
 }
 
 function buildKey(exchange: string, symbol: string) {
@@ -178,9 +222,7 @@ function parseContractCandleKey(key: string) {
 function createSubscriptionState(): ClientSubscriptionState {
   return {
     tickers: {
-      active: false,
-      exchanges: new Set<string>(),
-      symbols: new Set<string>(),
+      keys: new Set<string>(),
     },
     orderbook: new Set<string>(),
     trades: new Set<string>(),
@@ -196,6 +238,7 @@ function createPrivateSubscriptionState(userId: string): PrivateSubscriptionStat
     fills: new Map<string, Set<string>>(),
     portfolio: new Set<string>(),
     pollTimer: null,
+    pollInFlight: false,
     orderDigests: new Map<string, string>(),
     portfolioDigests: new Map<string, string>(),
     sentFillIds: new Set<string>(),
@@ -203,16 +246,7 @@ function createPrivateSubscriptionState(userId: string): PrivateSubscriptionStat
 }
 
 function matchesTicker(subscriptions: ClientSubscriptionState, ticker: NormalizedMarketTicker) {
-  if (!subscriptions.tickers.active) {
-    return false;
-  }
-
-  const exchangeMatch =
-    subscriptions.tickers.exchanges.size === 0 || subscriptions.tickers.exchanges.has(ticker.exchange);
-  const symbolMatch =
-    subscriptions.tickers.symbols.size === 0 || subscriptions.tickers.symbols.has(ticker.symbol);
-
-  return exchangeMatch && symbolMatch;
+  return subscriptions.tickers.keys.has(buildKey(ticker.exchange, ticker.symbol));
 }
 
 function matchesKeySubscription(subscriptions: Set<string>, exchange: string, symbol: string) {
@@ -290,6 +324,10 @@ function ensureMarketCandlePolling() {
 }
 
 async function pollContractCandles() {
+  if (marketCandlePollInFlight) {
+    return;
+  }
+
   const keys = Array.from(new Set(
     Array.from(clientSubscriptions.values()).flatMap((state) => Array.from(state.contractCandles)),
   ));
@@ -306,6 +344,7 @@ async function pollContractCandles() {
       quoteCurrency: ContractQuoteCurrency;
       timeframe: ContractTimeframe;
     } => Boolean(value));
+  marketCandlePollInFlight = true;
   try {
     const prices = await getCurrentPriceSnapshots(requests);
     const priceByMarket = new Map(prices.map((price) => [
@@ -351,6 +390,8 @@ async function pollContractCandles() {
     }
   } catch (error) {
     logger.warn({ domain: 'market-ws', err: error }, 'Contract market candle polling failed');
+  } finally {
+    marketCandlePollInFlight = false;
   }
 }
 
@@ -362,7 +403,14 @@ function handleContractCandleSubscription(ws: ClientSocket, payload: Record<stri
   const requestedSymbol = typeof payload.symbol === 'string' ? payload.symbol.trim() : '';
   const subscriptions = clientSubscriptions.get(ws);
 
-  if (!subscriptions || !parsedExchange || !parsedQuote || !parsedTimeframe || !requestedSymbol) {
+  if (
+    !subscriptions
+    || !parsedExchange
+    || !parsedQuote
+    || !parsedTimeframe
+    || !requestedSymbol
+    || requestedSymbol.length > 64
+  ) {
     sendJson(ws, { type: 'error', code: 'INVALID_MARKET_CANDLE_SUBSCRIPTION', message: 'exchange, symbol, quoteCurrency, and timeframe are required.' });
     return true;
   }
@@ -441,38 +489,36 @@ function handleTickerSubscription(
   subscriptions: ClientSubscriptionState,
   message: Extract<WsMarketRequest, { channel: 'tickers' }>,
 ) {
-  const exchanges = (message.exchanges ?? []).map((exchange) => exchange.toLowerCase());
-  const symbols = (message.symbols ?? []).map((symbol) => normalizeTickerSubscriptionSymbol(symbol));
+  const exchanges = message.exchanges.map((exchange) => exchange.toLowerCase());
+  const symbols = message.symbols.map((symbol) => normalizeTickerSubscriptionSymbol(symbol));
+  const requestedKeys = new Set(
+    exchanges.flatMap((exchange) => symbols.map((symbol) => buildKey(exchange, symbol))),
+  );
 
   if (message.action === 'subscribe') {
-    subscriptions.tickers.active = true;
-    exchanges.forEach((exchange) => subscriptions.tickers.exchanges.add(exchange));
-    symbols.forEach((symbol) => subscriptions.tickers.symbols.add(symbol));
+    const nextKeys = new Set([...subscriptions.tickers.keys, ...requestedKeys]);
+    if (nextKeys.size > MAX_PUBLIC_SUBSCRIPTIONS_PER_CLIENT) {
+      sendJson(
+        ws,
+        serializeWsErrorPayload({
+          requestId: message.requestId,
+          code: 'subscription_limit',
+          message: `A client may subscribe to at most ${MAX_PUBLIC_SUBSCRIPTIONS_PER_CLIENT} ticker markets.`,
+        }),
+      );
+      return;
+    }
+    requestedKeys.forEach((key) => subscriptions.tickers.keys.add(key));
     logger.info(
       { domain: 'market-ws', event: 'subscribe', channel: 'ticker', exchanges, symbols },
       `[MarketWS] subscribe channel=ticker exchanges=${exchanges.join(',')} symbols=${symbols.join(',')}`,
     );
-  } else if (exchanges.length === 0 && symbols.length === 0) {
-    subscriptions.tickers.active = false;
-    subscriptions.tickers.exchanges.clear();
-    subscriptions.tickers.symbols.clear();
-    logger.info(
-      { domain: 'market-ws', event: 'unsubscribe', channel: 'ticker', scope: 'all' },
-      '[MarketWS] unsubscribe channel=ticker scope=all',
-    );
   } else {
-    exchanges.forEach((exchange) => subscriptions.tickers.exchanges.delete(exchange));
-    symbols.forEach((symbol) => subscriptions.tickers.symbols.delete(symbol));
+    requestedKeys.forEach((key) => subscriptions.tickers.keys.delete(key));
     logger.info(
       { domain: 'market-ws', event: 'unsubscribe', channel: 'ticker', exchanges, symbols },
       `[MarketWS] unsubscribe channel=ticker exchanges=${exchanges.join(',')} symbols=${symbols.join(',')}`,
     );
-    if (
-      subscriptions.tickers.exchanges.size === 0 &&
-      subscriptions.tickers.symbols.size === 0
-    ) {
-      subscriptions.tickers.active = false;
-    }
   }
 
   sendJson(
@@ -482,9 +528,10 @@ function handleTickerSubscription(
       action: message.action,
       channel: 'tickers',
       filters: {
-        active: subscriptions.tickers.active,
-        exchanges: Array.from(subscriptions.tickers.exchanges),
-        symbols: Array.from(subscriptions.tickers.symbols),
+        active: subscriptions.tickers.keys.size > 0,
+        exchanges,
+        symbols,
+        markets: Array.from(subscriptions.tickers.keys),
       },
       snapshotSent: message.action === 'subscribe',
     }),
@@ -494,7 +541,7 @@ function handleTickerSubscription(
 
   const snapshots = publicMarketDataStore
     .getTickers()
-    .filter((ticker) => matchesTicker(subscriptions, ticker));
+    .filter((ticker) => requestedKeys.has(buildKey(ticker.exchange, ticker.symbol)));
 
   snapshots.forEach((ticker) => sendJson(ws, serializeWsTickerEvent(ticker)));
 }
@@ -510,6 +557,18 @@ function handleKeyedSubscription(
   const keys = symbols.map((symbol) => buildKey(exchange, symbol));
 
   if (message.action === 'subscribe') {
+    const nextKeys = new Set([...subscriptions, ...keys]);
+    if (nextKeys.size > MAX_PUBLIC_SUBSCRIPTIONS_PER_CLIENT) {
+      sendJson(
+        ws,
+        serializeWsErrorPayload({
+          requestId: message.requestId,
+          code: 'subscription_limit',
+          message: `A client may subscribe to at most ${MAX_PUBLIC_SUBSCRIPTIONS_PER_CLIENT} ${channel} markets.`,
+        }),
+      );
+      return;
+    }
     keys.forEach((key) => subscriptions.add(key));
     logger.info(
       { domain: 'market-ws', event: 'subscribe', channel, exchange, symbols },
@@ -564,6 +623,18 @@ async function handleCandleSubscription(
   const keys = symbols.map((symbol) => buildCandleKey(exchange, symbol, interval));
 
   if (message.action === 'subscribe') {
+    const nextKeys = new Set([...subscriptions, ...keys]);
+    if (nextKeys.size > MAX_PUBLIC_SUBSCRIPTIONS_PER_CLIENT) {
+      sendJson(
+        ws,
+        serializeWsErrorPayload({
+          requestId: message.requestId,
+          code: 'subscription_limit',
+          message: `A client may subscribe to at most ${MAX_PUBLIC_SUBSCRIPTIONS_PER_CLIENT} candle markets.`,
+        }),
+      );
+      return;
+    }
     keys.forEach((key) => subscriptions.add(key));
     logger.info(
       { domain: 'market-ws', event: 'subscribe', channel: 'candles', exchange, symbols, interval },
@@ -618,6 +689,10 @@ async function handleCandleSubscription(
 }
 
 function handleClientMessage(ws: ClientSocket, raw: RawData) {
+  if (!consumeInboundBudget(ws, raw)) {
+    return;
+  }
+
   let payload: unknown;
 
   try {
@@ -709,25 +784,39 @@ function normalizeWsMarketPayload(payload: unknown) {
 
   const candidate = payload as Record<string, unknown>;
   const channel = typeof candidate.channel === 'string' ? candidate.channel.trim().toLowerCase() : undefined;
-  if (channel !== 'ticker') {
+  const normalizedChannel = channel === 'ticker' ? 'tickers' : channel;
+  if (!normalizedChannel || !['tickers', 'orderbook', 'trades', 'candles'].includes(normalizedChannel)) {
     return payload;
   }
 
   const symbols = Array.isArray(candidate.symbols)
     ? candidate.symbols
     : [candidate.symbol, candidate.marketId].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
-  const exchanges = Array.isArray(candidate.exchanges)
-    ? candidate.exchanges
-    : typeof candidate.exchange === 'string'
-      ? [candidate.exchange]
-      : undefined;
+  const action = candidate.action ?? candidate.type;
+  const requestId = candidate.requestId;
 
-  return {
-    ...candidate,
-    channel: 'tickers',
-    exchanges,
-    symbols,
-  };
+  if (normalizedChannel === 'tickers') {
+    const exchanges = Array.isArray(candidate.exchanges)
+      ? candidate.exchanges
+      : typeof candidate.exchange === 'string'
+        ? [candidate.exchange]
+        : undefined;
+    return { requestId, action, channel: normalizedChannel, exchanges, symbols };
+  }
+
+  const exchange = candidate.exchange;
+  if (normalizedChannel === 'candles') {
+    return {
+      requestId,
+      action,
+      channel: normalizedChannel,
+      exchange,
+      symbols,
+      interval: candidate.interval,
+    };
+  }
+
+  return { requestId, action, channel: normalizedChannel, exchange, symbols };
 }
 
 function cleanupClient(ws: ClientSocket) {
@@ -748,36 +837,11 @@ function extractBearerToken(value?: string | string[] | null) {
   const raw = Array.isArray(value) ? value[0] : value;
   if (!raw) return null;
   const match = raw.match(/^Bearer\s+(.+)$/i);
-  return match?.[1]?.trim() ?? raw.trim() ?? null;
-}
-
-function parseCookieHeader(header?: string) {
-  if (!header) return new Map<string, string>();
-  return new Map(
-    header
-      .split(';')
-      .map((part) => part.trim())
-      .filter(Boolean)
-      .map((part) => {
-        const separatorIndex = part.indexOf('=');
-        if (separatorIndex === -1) {
-          return [part, ''] as const;
-        }
-        return [part.slice(0, separatorIndex), decodeURIComponent(part.slice(separatorIndex + 1))] as const;
-      }),
-  );
+  return match?.[1]?.trim() || null;
 }
 
 function resolvePrivateAuthToken(request: IncomingMessage) {
-  const parsedUrl = new URL(request.url ?? '/', 'http://127.0.0.1');
-  const cookies = parseCookieHeader(typeof request.headers.cookie === 'string' ? request.headers.cookie : undefined);
-  return extractBearerToken(request.headers.authorization)
-    ?? parsedUrl.searchParams.get('token')
-    ?? parsedUrl.searchParams.get('accessToken')
-    ?? parsedUrl.searchParams.get('authorization')
-    ?? cookies.get('accessToken')
-    ?? cookies.get('authToken')
-    ?? null;
+  return extractBearerToken(request.headers.authorization);
 }
 
 function toPrivateUserContext(payload: unknown) {
@@ -837,7 +901,7 @@ function rejectPrivateUpgrade(
       domain: 'private-ws',
       event: 'websocket_upgrade_rejected',
       route: '/ws/trading',
-      path: request.url,
+      path: getUpgradeRoute(request),
       authResult: rejection.statusCode === 401 || rejection.code.startsWith('WS_AUTH') ? 'rejected' : 'not_applicable',
       exchangeContext: getPrivateExchangeContext(request),
       handshakeRejectReason: rejection.code,
@@ -891,6 +955,36 @@ function anyPrivateSubscriptionActive(state: PrivateSubscriptionState) {
   return state.orders.size > 0 || state.fills.size > 0 || state.portfolio.size > 0;
 }
 
+function privateSubscriptionCount(state: PrivateSubscriptionState) {
+  const keyedCount = (store: Map<string, Set<string>>) =>
+    Array.from(store.values()).reduce((total, symbols) => total + symbols.size, 0);
+  return keyedCount(state.orders) + keyedCount(state.fills) + state.portfolio.size;
+}
+
+function setBoundedMapValue(
+  map: Map<string, string>,
+  key: string,
+  value: string,
+) {
+  if (!map.has(key) && map.size >= MAX_PRIVATE_DIGEST_ENTRIES) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey !== undefined) {
+      map.delete(oldestKey);
+    }
+  }
+  map.set(key, value);
+}
+
+function addBoundedSetValue(set: Set<string>, value: string) {
+  if (!set.has(value) && set.size >= MAX_PRIVATE_DIGEST_ENTRIES) {
+    const oldestValue = set.values().next().value;
+    if (oldestValue !== undefined) {
+      set.delete(oldestValue);
+    }
+  }
+  set.add(value);
+}
+
 async function pollPrivateOrders(ws: PrivateClientSocket, state: PrivateSubscriptionState) {
   for (const [exchange, symbols] of state.orders.entries()) {
     const queries = symbols.has('*') || symbols.size === 0 ? [undefined] : Array.from(symbols);
@@ -903,7 +997,7 @@ async function pollPrivateOrders(ws: PrivateClientSocket, state: PrivateSubscrip
           if (state.orderDigests.get(digestKey) === digest) {
             continue;
           }
-          state.orderDigests.set(digestKey, digest);
+          setBoundedMapValue(state.orderDigests, digestKey, digest);
           sendJson(ws, {
             type: 'order',
             channel: 'orders',
@@ -940,7 +1034,7 @@ async function pollPrivateFills(ws: PrivateClientSocket, state: PrivateSubscript
           if (state.sentFillIds.has(fillId)) {
             continue;
           }
-          state.sentFillIds.add(fillId);
+          addBoundedSetValue(state.sentFillIds, fillId);
           sendJson(ws, {
             type: 'fill',
             channel: 'fills',
@@ -974,7 +1068,7 @@ async function pollPrivatePortfolio(ws: PrivateClientSocket, state: PrivateSubsc
       if (state.portfolioDigests.get(exchange) === digest) {
         continue;
       }
-      state.portfolioDigests.set(exchange, digest);
+      setBoundedMapValue(state.portfolioDigests, exchange, digest);
       sendJson(ws, {
         type: 'portfolio',
         channel: 'portfolio',
@@ -999,15 +1093,20 @@ async function pollPrivatePortfolio(ws: PrivateClientSocket, state: PrivateSubsc
 
 async function pollPrivateClient(ws: PrivateClientSocket) {
   const state = privateClientSubscriptions.get(ws);
-  if (!state || ws.readyState !== WebSocket.OPEN) {
+  if (!state || ws.readyState !== WebSocket.OPEN || state.pollInFlight) {
     return;
   }
 
-  await Promise.allSettled([
-    pollPrivateOrders(ws, state),
-    pollPrivateFills(ws, state),
-    pollPrivatePortfolio(ws, state),
-  ]);
+  state.pollInFlight = true;
+  try {
+    await Promise.allSettled([
+      pollPrivateOrders(ws, state),
+      pollPrivateFills(ws, state),
+      pollPrivatePortfolio(ws, state),
+    ]);
+  } finally {
+    state.pollInFlight = false;
+  }
 }
 
 function ensurePrivatePolling(ws: PrivateClientSocket) {
@@ -1032,9 +1131,14 @@ function ensurePrivatePolling(ws: PrivateClientSocket) {
   state.pollTimer = setInterval(() => {
     void pollPrivateClient(ws);
   }, 5_000);
+  state.pollTimer.unref();
 }
 
 function handlePrivateClientMessage(ws: PrivateClientSocket, raw: RawData) {
+  if (!consumeInboundBudget(ws, raw)) {
+    return;
+  }
+
   const state = privateClientSubscriptions.get(ws);
   if (!state) {
     return;
@@ -1051,16 +1155,26 @@ function handlePrivateClientMessage(ws: PrivateClientSocket, raw: RawData) {
   const rawAction = typeof payload.action === 'string' ? payload.action.toLowerCase() : null;
   const channel = typeof payload.channel === 'string' ? payload.channel.toLowerCase() : null;
   const exchange = typeof payload.exchange === 'string' ? payload.exchange.toLowerCase() : null;
-  const symbol = normalizePrivateSymbol(typeof payload.symbol === 'string' ? payload.symbol : null);
+  const rawSymbol = typeof payload.symbol === 'string' ? payload.symbol : null;
+  const symbol = normalizePrivateSymbol(rawSymbol);
 
   if (channel === 'ping' || rawAction === 'ping') {
     sendJson(ws, { type: 'pong' });
     return;
   }
 
-  const action = rawAction === 'unsubscribe' ? 'unsubscribe' : 'subscribe';
+  if (rawAction !== 'subscribe' && rawAction !== 'unsubscribe') {
+    sendJson(ws, { type: 'error', code: 'INVALID_ACTION', message: 'action must be subscribe or unsubscribe.' });
+    return;
+  }
+  const action = rawAction;
 
-  if (!channel || !['orders', 'fills', 'portfolio'].includes(channel) || !exchange) {
+  if (
+    !channel
+    || !['orders', 'fills', 'portfolio'].includes(channel)
+    || !exchange
+    || (rawSymbol?.trim().length ?? 0) > 64
+  ) {
     sendJson(ws, { type: 'error', code: 'INVALID_REQUEST', message: 'channel and exchange are required.' });
     return;
   }
@@ -1071,6 +1185,24 @@ function handlePrivateClientMessage(ws: PrivateClientSocket, raw: RawData) {
       code: 'INVALID_EXCHANGE',
       message: 'Unsupported exchange for private websocket subscription.',
       exchange,
+    });
+    return;
+  }
+
+  const isAlreadySubscribed = channel === 'orders'
+    ? state.orders.get(exchange)?.has(symbol) === true
+    : channel === 'fills'
+      ? state.fills.get(exchange)?.has(symbol) === true
+      : state.portfolio.has(exchange);
+  if (
+    action === 'subscribe'
+    && !isAlreadySubscribed
+    && privateSubscriptionCount(state) >= MAX_PRIVATE_SUBSCRIPTIONS_PER_CLIENT
+  ) {
+    sendJson(ws, {
+      type: 'error',
+      code: 'SUBSCRIPTION_LIMIT',
+      message: `A client may subscribe to at most ${MAX_PRIVATE_SUBSCRIPTIONS_PER_CLIENT} private streams.`,
     });
     return;
   }
@@ -1138,7 +1270,7 @@ async function verifyPrivateUpgradeRequest(request: IncomingMessage): Promise<Pr
         domain: 'private-ws',
         event: 'websocket_upgrade_auth_missing',
         route: '/ws/trading',
-        path: request.url,
+        path: getUpgradeRoute(request),
         authResult: 'missing_token',
         exchangeContext: getPrivateExchangeContext(request),
         handshakeRejectReason: 'WS_AUTH_REQUIRED',
@@ -1149,7 +1281,7 @@ async function verifyPrivateUpgradeRequest(request: IncomingMessage): Promise<Pr
       rejection: {
         statusCode: 401,
         code: 'WS_AUTH_REQUIRED',
-        message: 'Private websocket requires a bearer token in Authorization header, query, or cookie.',
+        message: 'Private websocket requires a bearer token in the Authorization header.',
         details: {
           status: 'auth_required',
           pollingFallbackRecommended: true,
@@ -1181,7 +1313,7 @@ async function verifyPrivateUpgradeRequest(request: IncomingMessage): Promise<Pr
           domain: 'private-ws',
           event: 'websocket_upgrade_auth_invalid_payload',
           route: '/ws/trading',
-          path: request.url,
+          path: getUpgradeRoute(request),
           authResult: 'invalid_payload',
           exchangeContext: getPrivateExchangeContext(request),
           handshakeRejectReason: 'WS_AUTH_INVALID',
@@ -1208,7 +1340,7 @@ async function verifyPrivateUpgradeRequest(request: IncomingMessage): Promise<Pr
         domain: 'private-ws',
         event: 'ws_auth_failure',
         route: '/ws/trading',
-        path: request.url,
+        path: getUpgradeRoute(request),
         authResult: 'verification_failed',
         exchangeContext: getPrivateExchangeContext(request),
         handshakeRejectReason: 'WS_AUTH_INVALID',
@@ -1253,6 +1385,7 @@ function startHeartbeat() {
       });
     }
   }, 30_000);
+  heartbeatInterval.unref();
 }
 
 marketEventBus.onTicker(publishTicker);
@@ -1267,12 +1400,22 @@ export function setupWebSocket(server: HttpServer, options: SetupWebSocketOption
 
   attachedServer = server;
   setupOptions = options;
-  wss = new WebSocketServer({ noServer: true });
-  privateWss = new WebSocketServer({ noServer: true });
+  wss = new WebSocketServer({
+    noServer: true,
+    maxPayload: MAX_WS_MESSAGE_BYTES,
+    perMessageDeflate: false,
+  });
+  privateWss = new WebSocketServer({
+    noServer: true,
+    maxPayload: MAX_WS_MESSAGE_BYTES,
+    perMessageDeflate: false,
+  });
 
   wss.on('connection', (socket) => {
     const ws = socket as ClientSocket;
     ws.isAlive = true;
+    ws.messageWindowStartedAt = Date.now();
+    ws.messageCountInWindow = 0;
     clientSubscriptions.set(ws, createSubscriptionState());
 
     logger.info({ domain: 'public-market', transport: 'ws' }, 'Public market websocket client connected');
@@ -1297,6 +1440,8 @@ export function setupWebSocket(server: HttpServer, options: SetupWebSocketOption
   privateWss.on('connection', (socket: WebSocket, request: IncomingMessage, context: PrivateUserContext) => {
     const ws = socket as PrivateClientSocket;
     ws.isAlive = true;
+    ws.messageWindowStartedAt = Date.now();
+    ws.messageCountInWindow = 0;
     ws.userId = context.userId;
     ws.userEmail = context.userEmail;
     privateClientSubscriptions.set(ws, createPrivateSubscriptionState(context.userId));
@@ -1306,7 +1451,7 @@ export function setupWebSocket(server: HttpServer, options: SetupWebSocketOption
         domain: 'private-ws',
         event: 'websocket_upgrade_accepted',
         route: '/ws/trading',
-        path: request.url,
+        path: getUpgradeRoute(request),
         authResult: 'accepted',
         exchangeContext: getPrivateExchangeContext(request),
         handshakeRejectReason: null,
@@ -1340,7 +1485,7 @@ export function setupWebSocket(server: HttpServer, options: SetupWebSocketOption
       const route = getUpgradeRoute(request);
       if (route === '/ws/market') {
         logger.info(
-          { domain: 'market-ws', event: 'websocket_upgrade', route, path: request.url },
+          { domain: 'market-ws', event: 'websocket_upgrade', route, path: route },
           '[MarketWS] websocket_upgrade route=/ws/market',
         );
         wss?.handleUpgrade(request, socket, head, (ws) => {
@@ -1361,7 +1506,7 @@ export function setupWebSocket(server: HttpServer, options: SetupWebSocketOption
             domain: 'websocket',
             event: 'websocket_upgrade_unknown_route',
             route,
-            path: request.url,
+            path: route,
             handshakeRejectReason: 'route_not_found',
           },
           'Websocket upgrade route not found',
@@ -1392,7 +1537,10 @@ export function setupWebSocket(server: HttpServer, options: SetupWebSocketOption
         privateWss?.emit('connection', ws, request, verification.context);
       });
     })().catch((error) => {
-      logger.error({ domain: 'private-ws', event: 'websocket_upgrade_failed', path: request.url, err: error }, 'Private websocket upgrade failed unexpectedly');
+      logger.error(
+        { domain: 'private-ws', event: 'websocket_upgrade_failed', path: getUpgradeRoute(request), err: error },
+        'Private websocket upgrade failed unexpectedly',
+      );
       rejectPrivateUpgrade(request, socket, {
         statusCode: 503,
         code: 'WS_UPGRADE_FAILED',
