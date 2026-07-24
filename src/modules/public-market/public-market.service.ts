@@ -17,7 +17,6 @@ import { publicMarketDataStore } from './market.data.store';
 import {
   buildUnifiedMarketName,
   getMarketCatalog,
-  isDomesticExchange,
   isSupportedSymbol,
   searchMarketCatalog,
   toExchangeMarketSymbol,

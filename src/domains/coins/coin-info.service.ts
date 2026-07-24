@@ -218,7 +218,6 @@ async function buildDescription(params: {
   const available = Boolean(plainTextKo || plainTextEn);
   const hasProviderKorean = Boolean(plainTextKo);
   let translationAttempted = false;
-  let translatedByServer = false;
   let reason: string | null = available ? null : 'DESCRIPTION_NOT_AVAILABLE';
   if (!hasProviderKorean && plainTextEn) {
     translationAttempted = true;
@@ -230,7 +229,6 @@ async function buildDescription(params: {
         context: 'coin_description',
         symbol: params.symbol,
       });
-      translatedByServer = true;
       reason = null;
       logger.info(
         {
@@ -239,10 +237,10 @@ async function buildDescription(params: {
           hasKo: hasProviderKorean,
           hasEn: Boolean(plainTextEn),
           translationAttempted,
-          translated: translatedByServer,
+          translated: true,
           reason,
         },
-        `[CoinInfoTranslation] symbol=${params.symbol ?? ''} hasKo=${hasProviderKorean} hasEn=${Boolean(plainTextEn)} translationAttempted=${translationAttempted} translated=${translatedByServer} reason=${reason ?? ''}`,
+        `[CoinInfoTranslation] symbol=${params.symbol ?? ''} hasKo=${hasProviderKorean} hasEn=${Boolean(plainTextEn)} translationAttempted=${translationAttempted} translated=true reason=${reason ?? ''}`,
       );
       return {
         available,

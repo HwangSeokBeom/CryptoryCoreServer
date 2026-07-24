@@ -1671,5 +1671,5 @@ export function getAssetRegistryMetadata(canonicalAssetKey?: string | null, orig
 }
 
 export function containsNonAsciiAssetText(value?: string | null) {
-  return Boolean(value && /[^\x00-\x7F]/.test(value));
+  return Boolean(value && /[^\p{ASCII}]/u.test(value));
 }

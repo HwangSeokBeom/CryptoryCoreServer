@@ -8,7 +8,6 @@ import {
 import { DEFAULT_COIN_PLACEHOLDER_ICON_URL, resolveIconUrl } from '../../core/exchange/icon.resolver';
 import { buildResolvedMarketCapabilityFlags } from '../../core/exchange/market.contract';
 import { exchangeProviderRegistry } from '../../core/exchange/registry.bootstrap';
-import { resolveExchangeInterval } from '../../core/exchange/interval.mapper';
 import { resolveCanonicalAssetKey as resolveCanonicalAssetImageKey, toCanonicalMarket, toCanonicalSymbol } from '../../core/exchange/symbol.mapper';
 import { ExchangeRequestError } from '../../core/exchange/errors';
 import { EXCHANGE_IDS } from '../../core/exchange/exchange.types';
@@ -54,7 +53,6 @@ import {
 import { resolveCandleSnapshot, type CandleResponseMeta } from '../charts/candle.snapshot';
 import { marketIngestHealth } from './market.ingest-health';
 import {
-  compareRepresentativeSymbols,
   DEFAULT_COMPARABLE_KIMCHI_SYMBOL_LIMIT,
   DEFAULT_MARKET_LIST_LIMIT,
   DEFAULT_MARKET_OVERVIEW_LIMIT,
@@ -440,21 +438,6 @@ async function resolveMarketForRequest(
     matchSource: resolved.matchSource,
     identitySpecialCase: resolved.identitySpecialCase,
   };
-}
-
-function extractUpstreamStatus(error: unknown) {
-  if (error instanceof Error) {
-    const match = error.message.match(/\bHTTP\s+(\d{3})\b/i);
-    if (match) {
-      return Number.parseInt(match[1], 10);
-    }
-  }
-
-  return undefined;
-}
-
-function isRateLimitError(error: unknown) {
-  return error instanceof Error && /\b429\b|too[_\s-]?many[_\s-]?requests|rate limit/i.test(error.message);
 }
 
 function toSortedUniqueSymbols(symbols: Iterable<string>) {
@@ -1614,21 +1597,6 @@ async function buildProviderMarketUniverse(
     registryMappedCount,
     registryUnmappedCount: Math.max(items.length - registryMappedCount, 0),
   };
-}
-
-function mapTickerLoadSourceToSnapshotSource(
-  source: 'public_store_cache' | 'public_store_stale' | 'public_store_expired' | 'provider_snapshot',
-): Exclude<SnapshotSource, 'mixed'> {
-  switch (source) {
-    case 'provider_snapshot':
-      return 'snapshot';
-    case 'public_store_cache':
-      return 'cache';
-    case 'public_store_stale':
-    case 'public_store_expired':
-    default:
-      return 'fallback';
-  }
 }
 
 function toMarketSnapshotFailure(params: {

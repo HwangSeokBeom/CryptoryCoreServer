@@ -348,7 +348,7 @@ export async function translateText(params: {
     return result;
   }
 
-  let translatedText: string | null = null;
+  let translatedText: string | null;
   try {
     if (provider === 'openai') {
       translatedText = await translateWithOpenAi({ text, sourceLanguage, targetLanguage, context });

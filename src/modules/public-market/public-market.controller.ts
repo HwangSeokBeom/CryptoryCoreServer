@@ -12,7 +12,6 @@ import {
   serializeTradesResponse,
 } from './public-market.contract';
 import {
-  getPublicCandles,
   getPublicCandlesWithMeta,
   getPublicKimchiPremium,
   getPublicOrderbook,

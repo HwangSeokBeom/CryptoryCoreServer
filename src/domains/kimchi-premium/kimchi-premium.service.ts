@@ -17,7 +17,6 @@ import type {
   KimchiPremiumStatusReason,
   MarketDataMode,
   SnapshotErrorCode,
-  SnapshotItemStatus,
   SnapshotOverallStatus,
   SnapshotPartialFailure,
   SnapshotSource,

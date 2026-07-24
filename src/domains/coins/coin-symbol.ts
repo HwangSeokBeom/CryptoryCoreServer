@@ -1,7 +1,7 @@
 const QUOTE_PREFIXES = ['KRW', 'USD', 'USDT', 'USDC', 'BTC', 'ETH'];
 
 export function normalizeCoinSymbol(value: string) {
-  let decoded = value;
+  let decoded: string;
   try {
     decoded = decodeURIComponent(value);
   } catch {

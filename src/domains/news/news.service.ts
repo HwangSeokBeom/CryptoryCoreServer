@@ -521,22 +521,6 @@ function textMentionsSymbol(item: NewsItem, symbol: string) {
     .some((value) => new RegExp(`(^|[^A-Z0-9])${keyword}([^A-Z0-9]|$)`, 'i').test(value));
 }
 
-function isDirectCoinMatch(item: NewsItem, symbol: string, coinName?: string | null) {
-  if (!symbol) {
-    return true;
-  }
-  if (normalizeSymbolSet(item.symbols).includes(symbol)) {
-    return true;
-  }
-  if (normalizeSymbolSet(item.tags).includes(symbol)) {
-    return true;
-  }
-  if (textMentionsSymbol(item, symbol)) {
-    return true;
-  }
-  return Boolean(coinName && textMentionsKeyword(item, coinName));
-}
-
 function isRelatedCoinMatch(item: NewsItem, symbol: string) {
   const keywords = ECOSYSTEM_KEYWORDS[symbol] ?? [];
   return keywords.some((keyword) => textMentionsKeyword(item, keyword));

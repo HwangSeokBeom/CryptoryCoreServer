@@ -163,14 +163,12 @@ type CacheLoad<T> = {
   promise: Promise<T>;
 };
 
-const SPARKLINE_SYMBOL_CAP = 50;
 const SPARKLINE_REQUEST_PATH_LIMIT = 12;
 const LIST_SPARKLINE_TARGET_POINT_COUNT = 24;
 const LIST_SPARKLINE_DEFAULT_TIMEFRAME: ContractTimeframe = '1H';
 const SPARKLINE_DEFAULT_INTERVAL: ContractTimeframe = '1H';
 const SPARKLINE_DEFAULT_LIMIT = 24;
 const SPARKLINE_LIMIT_MAX = 60;
-const PREPARED_SPARKLINE_MAX_POINTS = 60;
 const TICKER_RING_BUFFER_MAX_POINTS = 240;
 const PREPARED_SPARKLINE_REFINED_MIN_POINTS = 8;
 const PREPARED_SPARKLINE_STALE_MS = 90_000;
@@ -182,8 +180,6 @@ const SPARKLINE_BATCH_REQUEST_BUDGET_MS = 900;
 const SPARKLINE_TOP_RESPONSE_TIMEOUT_MS = 1_200;
 const SPARKLINE_TOP_PROVIDER_TIMEOUT_MS = 850;
 const SPARKLINE_WARMUP_TOP_LIMIT = 100;
-const LIST_SPARKLINE_ATTACH_CONCURRENCY = 8;
-const LIST_SPARKLINE_PROVIDER_TIMEOUT_MS = 1_200;
 const DEFAULT_LIST_SPARKLINE_ATTACH_BUDGET_MS = 650;
 const SPARKLINE_WILDCARDS = new Set(['all', '*', 'null', 'undefined']);
 const TICKER_CURSOR_VERSION = 1;
@@ -963,12 +959,9 @@ function compareTickerSortTuple(
 }
 
 function stableSortTickerItems(items: MarketTickerItem[], sort: TickerSort, order: SortOrder) {
-  let nullSortValueCount = 0;
   const sorted = [...items].sort((left, right) => {
     const leftValue = tickerSortValue(left, sort);
     const rightValue = tickerSortValue(right, sort);
-    if (leftValue === null) nullSortValueCount += 1;
-    if (rightValue === null) nullSortValueCount += 1;
     return compareTickerSortTuple(
       leftValue,
       left.canonicalMarketId ?? left.marketId,
@@ -4021,30 +4014,6 @@ export function summarizeTickerSparklines(items: Array<{
   );
 }
 
-function normalizeSparklineSymbols(params: {
-  exchange: ContractExchange;
-  quoteCurrency: ContractQuoteCurrency;
-  symbols: string[];
-}) {
-  const normalized: string[] = [];
-  for (const input of params.symbols) {
-    const raw = input.trim();
-    const wildcard = raw.toLowerCase();
-    if (SPARKLINE_WILDCARDS.has(wildcard)) {
-      throw new AppError(400, 'wildcard symbols are not supported for /market/sparkline', {
-        field: 'symbols',
-        rejectedValue: raw,
-        acceptedFormat: 'comma-separated base symbols or market ids',
-      }, 'WILDCARD_SYMBOLS_UNSUPPORTED');
-    }
-    if (!raw) {
-      continue;
-    }
-    normalized.push(normalizeContractSymbolInput(params.exchange, raw, params.quoteCurrency));
-  }
-  return Array.from(new Set(normalized));
-}
-
 function verboseSparklineSymbolLogsEnabled() {
   return process.env.MARKET_PROVIDER_VERBOSE_SYMBOL_LOGS === 'true';
 }
@@ -4677,7 +4646,7 @@ export async function getMarketSparklineBatch(params: {
         partialFallback = decidedPrepared;
       }
 
-      let providerFailureReason: string | null = null;
+      let providerFailureReason: string | null;
       if (Date.now() >= requestDeadlineAt) {
         providerFailureReason = 'budget_exhausted';
         providerTimeoutCount += 1;

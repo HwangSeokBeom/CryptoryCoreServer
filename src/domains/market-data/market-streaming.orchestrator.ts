@@ -28,8 +28,7 @@ import { logger } from '../../utils/logger';
 import type { PublicMarketCapabilityState, PublicMarketCollectorStatus } from '../../modules/public-market/market.types';
 
 const STREAM_EXCHANGES: ExchangeId[] = ['upbit', 'bithumb', 'coinone', 'korbit', 'binance'];
-const CAPABILITIES = ['stream', 'ticker', 'orderbook', 'trades'] as const;
-type PublicCapability = (typeof CAPABILITIES)[number];
+type PublicCapability = 'stream' | 'ticker' | 'orderbook' | 'trades';
 
 type CapabilityFailureKind =
   | 'active'

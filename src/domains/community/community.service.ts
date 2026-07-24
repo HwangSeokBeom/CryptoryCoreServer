@@ -31,6 +31,7 @@ function sanitizeDescription(value?: string | null) {
     ?.replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
     .replace(/<[^>]*>/g, ' ')
+    // eslint-disable-next-line no-control-regex -- remove unrenderable control characters from provider content.
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
     .replace(/\s+/g, ' ')
     .trim() || null;
