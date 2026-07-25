@@ -24,6 +24,12 @@ required_environment=(
   ACCOUNT_DELETION_URL
   INVESTMENT_DISCLAIMER_URL
   COMMUNITY_POLICY_URL
+  FIREBASE_PROJECT_ID
+  FIREBASE_CLIENT_EMAIL
+  FIREBASE_PRIVATE_KEY
+  FCM_ENABLED
+  FCM_DRY_RUN
+  PRICE_ALERT_WORKER_ENABLED
 )
 
 echo "== Cryptory pre-cutover check =="
@@ -73,6 +79,16 @@ fi
 
 if [[ "${APP_STORE_REVIEW_MODE:-}" != "true" ]]; then
   echo "APP_STORE_REVIEW_MODE_NOT_ENABLED" >&2
+  exit 1
+fi
+
+if [[ "${FCM_DRY_RUN:-}" != "true" ]]; then
+  echo "FCM_DRY_RUN_NOT_ENABLED" >&2
+  exit 1
+fi
+
+if [[ "${PRICE_ALERT_WORKER_ENABLED:-}" != "false" ]]; then
+  echo "PRICE_ALERT_WORKER_MUST_START_DISABLED" >&2
   exit 1
 fi
 
