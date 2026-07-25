@@ -42,4 +42,18 @@ describe('FCM token service', () => {
       data: { isActive: false },
     });
   });
+
+  it('accepts shipped lowercase iOS platform values and canonicalizes storage', async () => {
+    const { parseFcmTokenRegistrationBody } = await import('../src/domains/push/push.routes');
+    const result = parseFcmTokenRegistrationBody({
+      token: 'fcm-token',
+      platform: 'ios',
+      environment: 'prod',
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.platform).toBe('IOS');
+    }
+  });
 });

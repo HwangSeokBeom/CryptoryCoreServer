@@ -8,6 +8,7 @@ import { logger } from './utils/logger';
 import { AppError, createErrorResponse, mapInfrastructureError } from './utils/errors';
 import { validateAccessSession } from './modules/auth/auth.service';
 import { complianceMiddleware } from './middleware/compliance.middleware';
+import { getReadinessSnapshot, type ReadinessSnapshot } from './health/readiness';
 
 // Route imports
 import { authRoutes } from './modules/auth/auth.controller';
@@ -61,7 +62,11 @@ function classifyAccessTokenFailure(error: unknown, authorization: string | unde
   };
 }
 
-export async function buildApp() {
+type BuildAppOptions = {
+  readinessProbe?: () => Promise<ReadinessSnapshot>;
+};
+
+export async function buildApp(options: BuildAppOptions = {}) {
   const app = Fastify({
     logger: false, // We use our own Pino logger
     bodyLimit: 1_048_576,
@@ -147,7 +152,7 @@ export async function buildApp() {
           domain: 'http',
           event: 'client_cancelled_request',
           method: request.method,
-          url: request.url,
+          path: request.url.split('?', 1)[0],
           requestId: request.id,
           elapsedMs: Date.now() - startedAt,
           signal: event,
@@ -220,6 +225,13 @@ export async function buildApp() {
         coinmarketcap: env.COINMARKETCAP_API_KEY ? 'configured' : 'degraded',
       },
     };
+  });
+
+  app.get('/ready', async (_request, reply) => {
+    const readiness = await (options.readinessProbe ?? getReadinessSnapshot)();
+    return reply
+      .status(readiness.status === 'ready' ? 200 : 503)
+      .send(readiness);
   });
 
   // Register routes
