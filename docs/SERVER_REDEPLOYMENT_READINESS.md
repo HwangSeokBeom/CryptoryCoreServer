@@ -3,6 +3,11 @@
 검증 기준일: 2026-07-26
 상태: `PUBLIC_RUNTIME_READY_WITH_BLOCKERS`
 
+## 운영 문서
+
+SSM 접속, 상태 확인, PM2/Nginx/Redis 로그, 안전한 재시작, 장애 대응 및
+후속 배포 절차는 [OPERATIONS_RUNBOOK.md](./OPERATIONS_RUNBOOK.md)에 정리했다.
+
 ## 배치된 런타임
 
 - AWS region: `ap-northeast-2`
