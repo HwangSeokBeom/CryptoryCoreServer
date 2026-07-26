@@ -64,9 +64,10 @@ PM2, Nginx의 canonical upstream은 모두 `127.0.0.1:3000`이다.
 1. Firebase Admin 자격증명이 없어 실제 FCM 전달은 미검증이다.
 2. 가격 알림 worker는 안전을 위해 비활성 상태다.
 3. 현재 배치 artifact의 Firebase/Google 의존성 트리에 production advisory가
-   남아 있다. 이 후속 브랜치는 Firebase Admin SDK를 최소 FCM HTTP v1
-   transport로 교체하고 production audit을 0건으로 만들었지만 아직
-   병합·배치되지 않았고 실제 Firebase 서비스 계정 dry-run으로 검증되지 않았다.
+   남아 있다. Draft PR #1
+   (`fix/fcm-http-v1-dependency-security`)은 Firebase Admin SDK를 FCM HTTP v1
+   구현으로 교체하고 production audit을 0건으로 만들었지만 아직 병합·배치되지
+   않았고 실제 Firebase 자격증명으로 검증되지 않았다.
 4. shared RDS는 `db.t4g.micro`, single-AZ, backup retention 1일이므로 리뷰 및
    초기 검증용이다. Free Tier 계정이 retention 7일 변경을 거부했으므로 운영
    cutover 전 유료 플랜과 용량·보존·가용성 정책을 승인해야 한다.
