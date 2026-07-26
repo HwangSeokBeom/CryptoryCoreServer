@@ -7,6 +7,8 @@
 
 SSM 접속, 상태 확인, PM2/Nginx/Redis 로그, 안전한 재시작, 장애 대응 및
 후속 배포 절차는 [OPERATIONS_RUNBOOK.md](./OPERATIONS_RUNBOOK.md)에 정리했다.
+RDS 단계별 내구성 결정은
+[RDS_DURABILITY_DECISION.md](./RDS_DURABILITY_DECISION.md)에 정리했다.
 
 ## 배치된 런타임
 
@@ -71,11 +73,11 @@ PM2, Nginx의 canonical upstream은 모두 `127.0.0.1:3000`이다.
 
 1. 실제 APNs/FCM 기기 토큰으로 전달과 가격 알림 deep link를 검증하지 않았다.
    서버 초기화와 synthetic token 등록·삭제는 실제 기기 전달의 증거가 아니다.
-2. 현재 배치 artifact의 Firebase/Google 의존성 트리에 production advisory가
-   남아 있다. Draft PR #1
-   (`fix/fcm-http-v1-dependency-security`)은 Firebase Admin SDK를 FCM HTTP v1
-   구현으로 교체하고 production audit을 0건으로 만들었지만 아직 병합·배치되지
-   않았고 실제 Firebase 자격증명으로 검증되지 않았다.
+2. FCM HTTP v1 전환과 dependency-security 수정은 readiness 브랜치에 병합됐다.
+   production audit 0건, tests 378/378이 통과했고 실제 운영 Firebase
+   자격증명으로 OAuth와 validate-only 요청이 Firebase API까지 도달했다.
+   synthetic invalid token을 사용해 실제 알림은 전달하지 않았으며, 이 코드는
+   현재 공개 EC2에 아직 배치하지 않았다.
 3. shared RDS는 `db.t4g.micro`, single-AZ, backup retention 1일이므로 리뷰 및
    초기 검증용이다. Free Tier 계정이 retention 7일 변경을 거부했으므로 운영
    cutover 전 유료 플랜과 용량·보존·가용성 정책을 승인해야 한다.
@@ -84,6 +86,6 @@ PM2, Nginx의 canonical upstream은 모두 `127.0.0.1:3000`이다.
    subscription ARN을 반환하므로 실제 알림 전달 경로가 활성 상태다.
 
 현재 서버는 공개 REST/WSS, App Review 차단, Firebase 초기화와 가격 알림
-worker까지 동작하지만, 실제 기기 push 전달과 운영 내구성 게이트가 남아
-있으므로 전체 재배포 상태는
-`CONDITIONAL_GO`이다.
+worker까지 동작한다. 보안 수정은 배포 준비가 됐지만 실제 기기 push 전달과
+운영 내구성 게이트가 남아 있으므로 전체 재배포 상태는
+`CONDITIONAL_GO_AFTER_SECURITY_ARTIFACT_DEPLOYMENT`이다.
