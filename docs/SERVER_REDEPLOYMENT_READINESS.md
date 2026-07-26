@@ -58,7 +58,9 @@ PM2, Nginx의 canonical upstream은 모두 `127.0.0.1:3000`이다.
 
 1. Firebase Admin 자격증명이 없어 실제 FCM 전달은 미검증이다.
 2. 가격 알림 worker는 안전을 위해 비활성 상태다.
-3. 설치된 Firebase/Google 의존성 트리에 production advisory가 남아 있다.
+3. 이 후속 브랜치는 Firebase Admin SDK 대신 최소 FCM HTTP v1 transport를
+   사용해 해당 Google/Firebase 의존성 advisory를 제거한다. 실제 서비스 계정
+   dry-run을 통과하기 전에는 운영 서버에 배포하지 않는다.
 4. shared RDS는 `db.t4g.micro`, single-AZ, backup retention 1일이므로 리뷰 및
    초기 검증용이다. 운영 cutover 전 용량·보존·가용성 정책을 승인해야 한다.
 5. legacy 오타 호스트 `crytory.duckdns.org`는 현재 DNS/TLS 호환이 없다.
