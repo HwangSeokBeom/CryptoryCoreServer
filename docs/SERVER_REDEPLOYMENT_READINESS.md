@@ -30,12 +30,15 @@ PM2, Nginx의 canonical upstream은 모두 `127.0.0.1:3000`이다.
 - WSS `/ws/market` handshake
 - 리뷰 계정 회원가입·로그인
 - FCM token 등록·삭제 persistence
+- 2026-07-26 외부 HTTPS에서 리뷰 계정 로그인, FCM token 등록·삭제 재검증
 - App Review configuration
-- 주문·거래·송금·입출금·지갑 endpoint 차단
+- 신규/legacy 주문 및 거래 endpoint가 외부 HTTPS에서 모두 `403`으로 차단
 - 외부에 3000, 3002, 5432, 6379가 노출되지 않음
 - 서비스 IAM role이 자기 서비스 secret만 읽고 다른 서비스 secret은 거부
 - CloudWatch Agent가 PM2/Nginx 로그와 memory/root-disk 지표를 수집
 - EC2 status/CPU와 shared RDS CPU/storage/connection alarm 생성
+- 15개 공통 alarm의 `ALARM`/`OK` action을 SNS topic
+  `project-services-ops-alerts`에 연결
 
 ## 데이터와 백업
 
@@ -60,12 +63,18 @@ PM2, Nginx의 canonical upstream은 모두 `127.0.0.1:3000`이다.
 
 1. Firebase Admin 자격증명이 없어 실제 FCM 전달은 미검증이다.
 2. 가격 알림 worker는 안전을 위해 비활성 상태다.
-3. 설치된 Firebase/Google 의존성 트리에 production advisory가 남아 있다.
+3. 현재 배치 artifact의 Firebase/Google 의존성 트리에 production advisory가
+   남아 있다. Draft PR #1
+   (`fix/fcm-http-v1-dependency-security`)은 Firebase Admin SDK를 FCM HTTP v1
+   구현으로 교체하고 production audit을 0건으로 만들었지만 아직 병합·배치되지
+   않았고 실제 Firebase 자격증명으로 검증되지 않았다.
 4. shared RDS는 `db.t4g.micro`, single-AZ, backup retention 1일이므로 리뷰 및
    초기 검증용이다. Free Tier 계정이 retention 7일 변경을 거부했으므로 운영
    cutover 전 유료 플랜과 용량·보존·가용성 정책을 승인해야 한다.
 5. legacy 오타 호스트 `crytory.duckdns.org`는 현재 DNS/TLS 호환이 없다.
-6. CloudWatch alarm에는 아직 통지 대상이 연결되지 않았다.
+6. CloudWatch alarm은 SNS topic에 연결됐지만 구독자가 0명이다. 운영 담당자가
+   받을 이메일 또는 다른 승인된 endpoint를 구독하고 확인해야 실제 통지가
+   전달된다.
 
 현재 서버는 공개 REST/WSS와 App Review 차단 계약까지 동작하지만, 실제 push
 전달과 운영 내구성 게이트가 남아 있으므로 전체 재배포 상태는
