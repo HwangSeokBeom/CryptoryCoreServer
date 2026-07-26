@@ -65,7 +65,7 @@ function buildOpenApiDocument() {
       version: '1.0.0',
     },
     servers: [
-      { url: 'http://crytory.duckdns.org', description: 'Production' },
+      { url: 'https://cryptory.duckdns.org', description: 'Production' },
       { url: 'http://localhost:3000', description: 'Local development' },
     ],
     tags: [

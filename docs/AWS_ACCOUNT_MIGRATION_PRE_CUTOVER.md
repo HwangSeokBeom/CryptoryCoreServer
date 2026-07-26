@@ -8,10 +8,17 @@
 - 애플리케이션 포트: 3000
 - PM2 앱 이름: `cryptory-core-server`
 - 기본 설치 경로: `/home/ec2-user/CryptoryCoreServer`
+- canonical production host: `cryptory.duckdns.org`
+- legacy client compatibility host: `crytory.duckdns.org`
 - liveness: `/health`
 - readiness: `/ready`
 - public WebSocket: `/ws/market`
 - private WebSocket: `/ws/trading`
+
+이미 배포된 iOS 클라이언트가 과거 오타 호스트 `crytory.duckdns.org`를
+참조하므로, 새 canonical 호스트로 클라이언트를 갱신한 뒤에도 해당 호스트를
+같은 서버의 TLS 인증서와 Nginx `server_name`에 유지한다. 두 호스트가 모두
+새 Elastic IP를 가리키는 것이 확인되기 전에는 HTTPS cutover를 진행하지 않는다.
 
 ## 기존 계정에서 읽기 전용으로 확보할 목록
 

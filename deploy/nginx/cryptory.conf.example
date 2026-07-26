@@ -10,7 +10,9 @@ upstream cryptory_api {
 
 server {
     listen 80;
-    server_name crytory.duckdns.org;
+    # cryptory.duckdns.org is canonical. Keep the historical misspelled
+    # crytory.duckdns.org alias so already-released clients continue to work.
+    server_name cryptory.duckdns.org crytory.duckdns.org;
 
     location = /health {
         proxy_pass http://cryptory_api;
