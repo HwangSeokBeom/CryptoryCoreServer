@@ -134,14 +134,6 @@ describe('runtime env validation', () => {
       FIREBASE_CLIENT_EMAIL: 'firebase-adminsdk@example.iam.gserviceaccount.com',
       FIREBASE_PRIVATE_KEY: '-----BEGIN PRIVATE KEY-----\\nsecret-test-key\\n-----END PRIVATE KEY-----\\n',
     };
-    vi.doMock('firebase-admin/app', () => ({
-      getApps: vi.fn(() => []),
-      cert: vi.fn(() => ({ projectId: 'cryptory-test' })),
-      initializeApp: vi.fn(),
-    }));
-    vi.doMock('firebase-admin/messaging', () => ({
-      getMessaging: vi.fn(() => ({ send: vi.fn() })),
-    }));
     const { logger } = await import('../src/utils/logger');
     const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => logger);
     const { initializeFcm } = await import('../src/domains/push/fcm.service');
@@ -149,7 +141,7 @@ describe('runtime env validation', () => {
     initializeFcm();
 
     const serializedLogs = JSON.stringify(infoSpy.mock.calls);
-    expect(serializedLogs).toContain('[FCM] initialized enabled=true dryRun=false');
+    expect(serializedLogs).toContain('[FCM] initialized enabled=true transport=http-v1 dryRun=false');
     expect(serializedLogs).not.toContain('secret-test-key');
     expect(serializedLogs).not.toContain('BEGIN PRIVATE KEY');
   });

@@ -31,7 +31,6 @@
     "bcrypt": "^6.0.0",
     "dotenv": "^17.4.2",
     "fastify": "^5.10.0",
-    "firebase-admin": "^14.2.0",
     "ioredis": "^5.4.1",
     "node-cron": "^4.6.0",
     "pino": "^9.5.0",

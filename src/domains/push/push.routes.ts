@@ -3,9 +3,14 @@ import { z } from 'zod';
 import { createErrorResponse, createSuccessResponse } from '../../utils/errors';
 import { deleteFcmToken, upsertFcmToken } from './push-token.service';
 
+const fcmPlatformSchema = z.preprocess(
+  (value) => typeof value === 'string' ? value.trim().toUpperCase() : value,
+  z.enum(['IOS', 'ANDROID', 'WEB']),
+);
+
 const upsertTokenSchema = z.object({
   token: z.string().min(1),
-  platform: z.enum(['IOS', 'ANDROID', 'WEB']),
+  platform: fcmPlatformSchema,
   deviceId: z.string().optional(),
   appVersion: z.string().optional(),
   environment: z.enum(['dev', 'prod']).default('prod'),
@@ -14,6 +19,10 @@ const upsertTokenSchema = z.object({
 const deleteTokenSchema = z.object({
   token: z.string().min(1),
 });
+
+export function parseFcmTokenRegistrationBody(body: unknown) {
+  return upsertTokenSchema.safeParse(body);
+}
 
 async function requireAuth(app: FastifyInstance, request: FastifyRequest, reply: FastifyReply) {
   await app.authenticate(request, reply);
@@ -25,7 +34,7 @@ export async function pushRoutes(app: FastifyInstance) {
     if (!(await requireAuth(app, request, reply))) {
       return;
     }
-    const parsed = upsertTokenSchema.safeParse(request.body);
+    const parsed = parseFcmTokenRegistrationBody(request.body);
     if (!parsed.success) {
       return reply.status(400).send(createErrorResponse(parsed.error.errors[0].message, undefined, 'INVALID_FCM_TOKEN_REQUEST'));
     }
