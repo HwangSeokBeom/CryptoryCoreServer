@@ -34,6 +34,8 @@ PM2, Nginx의 canonical upstream은 모두 `127.0.0.1:3000`이다.
 - 주문·거래·송금·입출금·지갑 endpoint 차단
 - 외부에 3000, 3002, 5432, 6379가 노출되지 않음
 - 서비스 IAM role이 자기 서비스 secret만 읽고 다른 서비스 secret은 거부
+- CloudWatch Agent가 PM2/Nginx 로그와 memory/root-disk 지표를 수집
+- EC2 status/CPU와 shared RDS CPU/storage/connection alarm 생성
 
 ## 데이터와 백업
 
@@ -60,8 +62,10 @@ PM2, Nginx의 canonical upstream은 모두 `127.0.0.1:3000`이다.
 2. 가격 알림 worker는 안전을 위해 비활성 상태다.
 3. 설치된 Firebase/Google 의존성 트리에 production advisory가 남아 있다.
 4. shared RDS는 `db.t4g.micro`, single-AZ, backup retention 1일이므로 리뷰 및
-   초기 검증용이다. 운영 cutover 전 용량·보존·가용성 정책을 승인해야 한다.
+   초기 검증용이다. Free Tier 계정이 retention 7일 변경을 거부했으므로 운영
+   cutover 전 유료 플랜과 용량·보존·가용성 정책을 승인해야 한다.
 5. legacy 오타 호스트 `crytory.duckdns.org`는 현재 DNS/TLS 호환이 없다.
+6. CloudWatch alarm에는 아직 통지 대상이 연결되지 않았다.
 
 현재 서버는 공개 REST/WSS와 App Review 차단 계약까지 동작하지만, 실제 push
 전달과 운영 내구성 게이트가 남아 있으므로 전체 재배포 상태는
