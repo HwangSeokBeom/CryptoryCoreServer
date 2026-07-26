@@ -9,19 +9,19 @@
 5. App Review mode 및 거래성 endpoint 차단 검증
 6. 리뷰 계정 생성과 REST 로그인 검증
 7. 초기화 직후 암호화 RDS snapshot 생성
+8. Firebase Admin project `cryptory-342cf` 운영 초기화
+9. 가격 알림 worker 활성화와 synthetic FCM token 등록·삭제 검증
 
 ## 남은 순서
 
-1. Firebase Admin 자격증명을 `production/cryptory/runtime`에 안전하게 주입
-2. FCM dry-run 해제 전 테스트 token 한 개로 실제 전달 검증
-3. price alert worker를 제한적으로 활성화하고 생성·전달·삭제 확인
-4. 앱의 legal/support placeholder 제거
-5. 서명된 iOS Release archive와 production push entitlement 검증
-6. TestFlight에서 리뷰 계정 로그인, token refresh, WSS reconnect, 가격 알림
+1. 실제 TestFlight 기기 token으로 FCM 전달과 가격 알림 deep link 검증
+2. 앱의 legal/support URL이 공개 200 페이지와 일치하는지 Release에서 검증
+3. 서명된 iOS Release archive와 production push entitlement 검증
+4. TestFlight에서 리뷰 계정 로그인, token refresh, WSS reconnect, 가격 알림
    deep link 회귀 검증
-7. 최소 24시간 health/readiness, PM2 restart count, DB connection, Redis,
+5. 최소 24시간 health/readiness, PM2 restart count, DB connection, Redis,
    WebSocket reconnect, FCM 오류를 관찰
-8. 별도 승인 후 App Store 제출
+6. 별도 승인 후 App Store 제출
 
 ## 운영 cutover 게이트
 
