@@ -80,8 +80,8 @@ PM2, Nginx의 canonical upstream은 모두 `127.0.0.1:3000`이다.
    초기 검증용이다. Free Tier 계정이 retention 7일 변경을 거부했으므로 운영
    cutover 전 유료 플랜과 용량·보존·가용성 정책을 승인해야 한다.
 4. legacy 오타 호스트 `crytory.duckdns.org`는 현재 DNS/TLS 호환이 없다.
-5. CloudWatch alarm 이메일 구독은 `PendingConfirmation`이다. 운영 담당자가
-   AWS 확인 이메일의 링크를 눌러야 실제 통지가 전달된다.
+5. CloudWatch alarm 이메일 구독은 2026-07-26 확인 완료됐다. AWS가 구체적인
+   subscription ARN을 반환하므로 실제 알림 전달 경로가 활성 상태다.
 
 현재 서버는 공개 REST/WSS, App Review 차단, Firebase 초기화와 가격 알림
 worker까지 동작하지만, 실제 기기 push 전달과 운영 내구성 게이트가 남아
