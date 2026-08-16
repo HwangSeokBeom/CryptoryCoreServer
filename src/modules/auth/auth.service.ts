@@ -2,13 +2,18 @@ import bcrypt from 'bcrypt';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../config/database';
-import { anonymizeCommunityDataForDeletedUser } from '../../domains/coins/coin-community.service';
+import { deleteCommunityDataForDeletedUser } from '../../domains/coins/coin-community.service';
 import { removeUserRelationshipState } from '../../domains/users/user-relationship.service';
 import { env } from '../../config/env';
 import { AppError } from '../../utils/errors';
 import { logger } from '../../utils/logger';
 import type { AppleLoginInputType, GoogleLoginInputType, LoginInputType, RegisterInputType } from './auth.schema';
 import { verifyAppleIdentityToken, verifyGoogleIdToken, type VerifiedSocialToken } from './social-token.verifier';
+import {
+  captureAppleRefreshToken,
+  prepareAppleRevocationForUser,
+  revokePreparedAppleAuthorization,
+} from './apple-oauth.service';
 
 const EMAIL_AUTH_PROVIDER = 'email';
 const GOOGLE_AUTH_PROVIDER = 'google';
@@ -840,14 +845,21 @@ export async function loginWithGoogle(input: GoogleLoginInputType) {
 export async function loginWithApple(input: AppleLoginInputType) {
   const token = await verifyAppleIdentityToken(input.identityToken ?? input.idToken ?? '');
   const fullName = input.fullName ?? [input.givenName, input.familyName].filter(Boolean).join(' ');
-  return findOrCreateSocialUser({
+  const user = await findOrCreateSocialUser({
     provider: APPLE_AUTH_PROVIDER,
     token,
     requestedName: fullName || undefined,
   });
+  await captureAppleRefreshToken({
+    userId: user.id,
+    authorizationCode: input.authorizationCode,
+    tokenAudience: token.aud,
+  });
+  return user;
 }
 
 export async function deleteUserAccount(userId: string) {
+  const appleRevocation = await prepareAppleRevocationForUser(userId);
   const deleted = await prisma.$transaction(async (tx) => {
     const user = await tx.user.findUnique({
       where: { id: userId },
@@ -902,15 +914,24 @@ export async function deleteUserAccount(userId: string) {
     };
   });
 
-  anonymizeCommunityDataForDeletedUser(userId);
+  const communityDeletion = deleteCommunityDataForDeletedUser(userId);
   removeUserRelationshipState(userId);
+  const appleRevocationResult = await revokePreparedAppleAuthorization(appleRevocation);
 
   logger.info(
-    { domain: 'auth', action: 'delete_account', userIdMasked: maskUserId(userId), sessionCount: deleted.sessions },
-    `[AccountLifecycleDebug] action=delete_account userIdMasked=${maskUserId(userId)} sessionCount=${deleted.sessions}`,
+    {
+      domain: 'auth',
+      action: 'delete_account',
+      userIdMasked: maskUserId(userId),
+      sessionCount: deleted.sessions,
+      communityDeletion,
+      appleRevocationStatus: appleRevocationResult.appleRevocationStatus,
+    },
+    `[AccountLifecycleDebug] action=delete_account userIdMasked=${maskUserId(userId)} sessionCount=${deleted.sessions} appleRevocationStatus=${appleRevocationResult.appleRevocationStatus}`,
   );
 
   return {
     deleted: true,
+    ...appleRevocationResult,
   };
 }

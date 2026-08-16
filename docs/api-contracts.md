@@ -56,7 +56,7 @@ Session responses keep the legacy `token` field as an alias of `accessToken`.
 - `POST /api/v1/auth/register` and `POST /auth/register`: creates an email account and returns a Cryptory access/refresh session.
 - `POST /api/v1/auth/login`: verifies email/password and returns a Cryptory access/refresh session.
 - `POST /api/v1/auth/social/google`: accepts `{ "idToken": "..." }` or `{ "idToken": "...", "accessToken": "..." }`; the server verifies Google RS256 ID token signature, `iss`, `aud`, `exp`, `sub`, and verified email, then maps `provider=google + sub` to a Cryptory user/session.
-- `POST /api/v1/auth/social/apple`: accepts `{ "identityToken": "...", "authorizationCode": "...", "fullName": "...", "email": "..." }`; the server verifies Apple RS256 identity token signature, `iss`, `aud`, `exp`, and `sub`, then maps `provider=apple + sub` to a Cryptory user/session. Apple email may only be present on first login, so existing `provider+sub` identity is the primary re-login key.
+- `POST /api/v1/auth/social/apple`: accepts `{ "identityToken": "...", "authorizationCode": "...", "fullName": "...", "email": "..." }`; the server verifies Apple RS256 identity token signature, `iss`, `aud`, `exp`, and `sub`, then maps `provider=apple + sub` to a Cryptory user/session. It exchanges the one-time authorization code and stores the Apple refresh token encrypted so account deletion can revoke the Apple grant. Apple email may only be present on first login, so existing `provider+sub` identity is the primary re-login key.
 - `POST /api/v1/auth/refresh` and `POST /auth/refresh`: accepts `{ "refreshToken": "..." }`, checks the DB-stored SHA-256 hash for the session, rejects expired/revoked/tampered tokens with explicit 401 codes, rotates the refresh token, and returns a fresh access token.
 - `POST /api/v1/auth/logout` and `POST /auth/logout`: accepts `{ "refreshToken": "..." }` without requiring a valid access token and revokes that session. `{ "logoutAll": true }` requires access auth and revokes all user sessions.
 - `GET /api/v1/auth/me`: access-token protected profile endpoint.
@@ -82,7 +82,8 @@ Success response: `200 OK`
 {
   "success": true,
   "data": {
-    "deleted": true
+    "deleted": true,
+    "appleRevocationStatus": "revoked"
   }
 }
 ```
@@ -107,7 +108,8 @@ Deletion scope:
 - Deletes FCM tokens, price alerts, and alert delivery logs.
 - Deletes portfolio simulation data, orders, favorites/watchlist entries, exchange connection records, read-only exchange keys, connection verification rows, and order request payloads.
 - Deletes community reports, blocks, and follows where the deleted user is the actor or target.
-- Anonymizes in-memory community posts/comments authored by the deleted user as `탈퇴한 사용자` and removes that user from community likes and sentiment votes.
+- Permanently removes in-memory community posts/comments authored by the deleted user, including replies attached to a deleted post, and removes that user from community likes and sentiment votes.
+- For Apple identities, revokes the stored Apple refresh token after the Cryptory account is deleted. Fresh Apple logins return `appleRevocationStatus=revoked`; legacy identities without a stored token return `manual_required` plus Apple's authorization-management help URL without blocking account deletion. Non-Apple accounts return `not_applicable`.
 
 Access token failures and refresh token failures are intentionally separate. Expired access tokens return `ACCESS_TOKEN_EXPIRED` so the client can try `/auth/refresh`; refresh failures such as `REFRESH_TOKEN_EXPIRED`, `REFRESH_TOKEN_REVOKED`, or `REFRESH_TOKEN_INVALID` are the point where the app should move to logged-out state.
 
@@ -123,7 +125,7 @@ Social login provider configuration:
 - `GOOGLE_IOS_CLIENT_ID=142113558371-t5s22ri6gjl5aur76s81910gf2hb8p09.apps.googleusercontent.com`
 - `APPLE_CLIENT_ID=com.hwb.Cryptory`
 - Optional legacy/multi-audience envs: `GOOGLE_CLIENT_IDS`, `GOOGLE_WEB_CLIENT_ID`, `APPLE_CLIENT_IDS`
-- `APPLE_TEAM_ID`, `APPLE_KEY_ID`, and `APPLE_PRIVATE_KEY` are only needed if the server later exchanges Apple authorization codes with a generated client secret. Current identityToken verification does not require them.
+- `APPLE_TEAM_ID`, `APPLE_KEY_ID`, and `APPLE_PRIVATE_KEY` are required for authorization-code exchange and account-deletion token revocation. `APPLE_PRIVATE_KEY` accepts a PEM value with literal `\\n` separators in environment storage.
 
 Social login error codes:
 
@@ -3104,7 +3106,7 @@ Request:
 }
 ```
 
-`identityToken` is required. Expected audience/client_id: `com.hwb.Cryptory`. The server verifies the token against Apple's JWKS and does not need `APPLE_TEAM_ID`, `APPLE_KEY_ID`, or `APPLE_PRIVATE_KEY` unless authorization-code exchange is added later.
+`identityToken` is required. Expected audience/client_id: `com.hwb.Cryptory`. The server verifies the token against Apple's JWKS, exchanges `authorizationCode` with an ES256 client secret, and encrypts the returned refresh token for Apple grant revocation during account deletion. Production requires `APPLE_TEAM_ID`, `APPLE_KEY_ID`, and `APPLE_PRIVATE_KEY`.
 
 ### `POST /auth/register`
 

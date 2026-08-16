@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { prismaMock, txMock, bcryptMock, verifyAppleIdentityTokenMock } = vi.hoisted(() => ({
+const {
+  prismaMock,
+  txMock,
+  bcryptMock,
+  verifyAppleIdentityTokenMock,
+  captureAppleRefreshTokenMock,
+} = vi.hoisted(() => ({
   prismaMock: {
     authIdentity: {
       findUnique: vi.fn(),
@@ -29,6 +35,7 @@ const { prismaMock, txMock, bcryptMock, verifyAppleIdentityTokenMock } = vi.hois
     compare: vi.fn(),
   },
   verifyAppleIdentityTokenMock: vi.fn(),
+  captureAppleRefreshTokenMock: vi.fn(),
 }));
 
 vi.mock('../src/config/database', () => ({
@@ -41,6 +48,12 @@ vi.mock('bcrypt', () => ({
 
 vi.mock('../src/modules/auth/social-token.verifier', () => ({
   verifyAppleIdentityToken: verifyAppleIdentityTokenMock,
+}));
+
+vi.mock('../src/modules/auth/apple-oauth.service', () => ({
+  captureAppleRefreshToken: captureAppleRefreshTokenMock,
+  prepareAppleRevocationForUser: vi.fn(),
+  revokePreparedAppleAuthorization: vi.fn(),
 }));
 
 import { loginWithApple } from '../src/modules/auth/auth.service';
@@ -62,6 +75,7 @@ describe('loginWithApple', () => {
       updatedAt: new Date('2026-04-28T00:00:00.000Z'),
     }));
     txMock.holding.create.mockResolvedValue(undefined);
+    captureAppleRefreshTokenMock.mockResolvedValue({ captured: false, reason: 'authorization_code_unavailable' });
   });
 
   it('creates a new Apple user by sub when email and fullName are absent', async () => {
@@ -94,6 +108,11 @@ describe('loginWithApple', () => {
       }),
     }));
     expect(txMock.holding.create).toHaveBeenCalledTimes(5);
+    expect(captureAppleRefreshTokenMock).toHaveBeenCalledWith({
+      userId: 'user-apple-1',
+      authorizationCode: undefined,
+      tokenAudience: 'com.hwb.Cryptory',
+    });
   });
 
   it('accepts Apple Private Relay email as the user email', async () => {
@@ -183,5 +202,26 @@ describe('loginWithApple', () => {
     expect(user.id).toBe('user-apple-3');
     expect(prismaMock.authIdentity.update).not.toHaveBeenCalled();
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('passes the one-time authorization code to encrypted refresh-token capture', async () => {
+    verifyAppleIdentityTokenMock.mockResolvedValueOnce({
+      provider: 'apple',
+      sub: 'apple-review-sub-4',
+      aud: 'com.hwb.Cryptory',
+      emailVerified: false,
+    });
+    captureAppleRefreshTokenMock.mockResolvedValueOnce({ captured: true });
+
+    await loginWithApple({
+      identityToken: 'header.payload.signature.long-enough',
+      authorizationCode: 'one-time-authorization-code',
+    });
+
+    expect(captureAppleRefreshTokenMock).toHaveBeenCalledWith({
+      userId: 'user-apple-1',
+      authorizationCode: 'one-time-authorization-code',
+      tokenAudience: 'com.hwb.Cryptory',
+    });
   });
 });

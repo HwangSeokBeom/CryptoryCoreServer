@@ -86,7 +86,10 @@ describe('Auth API', () => {
   });
 
   it('DELETE /account - deletes the authenticated account with canonical response', async () => {
-    deleteUserAccountMock.mockResolvedValueOnce({ deleted: true });
+    deleteUserAccountMock.mockResolvedValueOnce({
+      deleted: true,
+      appleRevocationStatus: 'not_applicable',
+    });
     const app = await buildApp();
     const token = app.jwt.sign({ id: 'user-1', email: 'user@example.com' });
     const res = await app.inject({
@@ -98,7 +101,10 @@ describe('Auth API', () => {
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body)).toEqual({
       success: true,
-      data: { deleted: true },
+      data: {
+        deleted: true,
+        appleRevocationStatus: 'not_applicable',
+      },
     });
     expect(deleteUserAccountMock).toHaveBeenCalledWith('user-1');
     await app.close();

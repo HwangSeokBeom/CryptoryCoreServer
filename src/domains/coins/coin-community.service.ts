@@ -114,18 +114,6 @@ const sentimentUpdatedAtByScope = new Map<string, string>();
 const likesByItemId = new Map<string, Set<string>>();
 const commentsByItemId = new Map<string, CommunityComment[]>();
 
-const deletedCommunityAuthor: CommunityAuthor = {
-  id: null,
-  nickname: null,
-  displayName: '탈퇴한 사용자',
-  emailMasked: null,
-  isPrivateRelay: false,
-  avatarUrl: null,
-  isFollowing: false,
-  followable: false,
-  isMe: false,
-};
-
 function parseLimit(limit?: number) {
   if (!Number.isFinite(limit) || !limit) {
     return 20;
@@ -399,6 +387,16 @@ function findCommunityItem(symbolInput: string, itemId: string) {
   const symbol = normalizeCoinSymbol(symbolInput);
   const item = (postsBySymbol.get(symbol) ?? []).find((candidate) => candidate.id === itemId);
   return item ? { symbol, item } : null;
+}
+
+function findCommunityItemById(itemId: string) {
+  for (const [symbol, posts] of postsBySymbol.entries()) {
+    const item = posts.find((candidate) => candidate.id === itemId);
+    if (item) {
+      return { symbol, item };
+    }
+  }
+  return null;
 }
 
 function getLikeCount(itemId: string) {
@@ -824,52 +822,72 @@ export function getMarketPoll(userId?: string | null) {
   };
 }
 
-export function anonymizeCommunityDataForDeletedUser(userId: string) {
+export function deleteCommunityDataForDeletedUser(userId: string) {
+  const deletedPostIds = new Set<string>();
+  let postsDeleted = 0;
+  let commentsDeleted = 0;
+  let likesRemoved = 0;
+  let votesRemoved = 0;
+
   for (const [symbol, posts] of postsBySymbol.entries()) {
-    postsBySymbol.set(symbol, posts.map((item) => {
-      if (item.authorId !== userId && item.author.id !== userId) {
-        return item;
+    const remainingPosts = posts.filter((item) => {
+      const shouldDelete = item.authorId === userId || item.author.id === userId;
+      if (shouldDelete) {
+        deletedPostIds.add(item.id);
+        postsDeleted += 1;
       }
-      return {
-        ...item,
-        authorId: '',
-        authorEmail: null,
-        authorName: deletedCommunityAuthor.displayName,
-        author: deletedCommunityAuthor,
-        authorRelationship: getRelationshipSync(null, ''),
-        avatarUrl: null,
-        updatedAt: new Date().toISOString(),
-        reportable: false,
-        blockable: false,
-      };
-    }));
+      return !shouldDelete;
+    });
+    postsBySymbol.set(symbol, remainingPosts);
   }
 
-  for (const [itemId, likes] of likesByItemId.entries()) {
-    likes.delete(userId);
-    likesByItemId.set(itemId, likes);
+  for (const postId of deletedPostIds) {
+    commentsDeleted += commentsByItemId.get(postId)?.length ?? 0;
+    commentsByItemId.delete(postId);
+    likesByItemId.delete(postId);
   }
 
   for (const [itemId, comments] of commentsByItemId.entries()) {
-    commentsByItemId.set(itemId, comments.map((comment) => {
-      if (comment.author.id !== userId) {
-        return comment;
-      }
-      return {
-        ...comment,
-        author: deletedCommunityAuthor,
-        authorRelationship: getRelationshipSync(null, ''),
-        updatedAt: new Date().toISOString(),
-        reportable: false,
-        blockable: false,
-      };
-    }));
+    const remainingComments = comments.filter((comment) => comment.author.id !== userId);
+    commentsDeleted += comments.length - remainingComments.length;
+    commentsByItemId.set(itemId, remainingComments);
+
+    const post = findCommunityItemById(itemId)?.item;
+    if (post) {
+      post.replyCount = remainingComments.length;
+      post.commentCount = remainingComments.length;
+      post.updatedAt = new Date().toISOString();
+    }
+  }
+
+  for (const [itemId, likes] of likesByItemId.entries()) {
+    if (likes.delete(userId)) {
+      likesRemoved += 1;
+    }
+    likesByItemId.set(itemId, likes);
+
+    const post = findCommunityItemById(itemId)?.item;
+    if (post) {
+      post.likeCount = likes.size;
+      post.updatedAt = new Date().toISOString();
+    }
   }
 
   for (const votes of votesBySymbol.values()) {
-    votes.delete(userId);
+    if (votes.delete(userId)) {
+      votesRemoved += 1;
+    }
   }
   for (const votes of sentimentVotesByScope.values()) {
-    votes.delete(userId);
+    if (votes.delete(userId)) {
+      votesRemoved += 1;
+    }
   }
+
+  return {
+    postsDeleted,
+    commentsDeleted,
+    likesRemoved,
+    votesRemoved,
+  };
 }

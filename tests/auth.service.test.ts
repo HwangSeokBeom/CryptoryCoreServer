@@ -1,7 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Prisma } from '@prisma/client';
 
-const { prismaMock, bcryptMock, txMock, anonymizeCommunityDataForDeletedUserMock, removeUserRelationshipStateMock } = vi.hoisted(() => ({
+const {
+  prismaMock,
+  bcryptMock,
+  txMock,
+  deleteCommunityDataForDeletedUserMock,
+  removeUserRelationshipStateMock,
+  captureAppleRefreshTokenMock,
+  prepareAppleRevocationForUserMock,
+  revokePreparedAppleAuthorizationMock,
+} = vi.hoisted(() => ({
   prismaMock: {
     user: {
       findUnique: vi.fn(),
@@ -64,8 +73,11 @@ const { prismaMock, bcryptMock, txMock, anonymizeCommunityDataForDeletedUserMock
       deleteMany: vi.fn(),
     },
   },
-  anonymizeCommunityDataForDeletedUserMock: vi.fn(),
+  deleteCommunityDataForDeletedUserMock: vi.fn(),
   removeUserRelationshipStateMock: vi.fn(),
+  captureAppleRefreshTokenMock: vi.fn(),
+  prepareAppleRevocationForUserMock: vi.fn(),
+  revokePreparedAppleAuthorizationMock: vi.fn(),
 }));
 
 vi.mock('../src/config/database', () => ({
@@ -77,11 +89,17 @@ vi.mock('bcrypt', () => ({
 }));
 
 vi.mock('../src/domains/coins/coin-community.service', () => ({
-  anonymizeCommunityDataForDeletedUser: anonymizeCommunityDataForDeletedUserMock,
+  deleteCommunityDataForDeletedUser: deleteCommunityDataForDeletedUserMock,
 }));
 
 vi.mock('../src/domains/users/user-relationship.service', () => ({
   removeUserRelationshipState: removeUserRelationshipStateMock,
+}));
+
+vi.mock('../src/modules/auth/apple-oauth.service', () => ({
+  captureAppleRefreshToken: captureAppleRefreshTokenMock,
+  prepareAppleRevocationForUser: prepareAppleRevocationForUserMock,
+  revokePreparedAppleAuthorization: revokePreparedAppleAuthorizationMock,
 }));
 
 import { deleteUserAccount, registerUser } from '../src/modules/auth/auth.service';
@@ -113,6 +131,14 @@ describe('registerUser', () => {
     txMock.order.deleteMany.mockResolvedValue({ count: 1 });
     txMock.holding.deleteMany.mockResolvedValue({ count: 1 });
     txMock.favorite.deleteMany.mockResolvedValue({ count: 1 });
+    deleteCommunityDataForDeletedUserMock.mockReturnValue({
+      postsDeleted: 1,
+      commentsDeleted: 2,
+      likesRemoved: 1,
+      votesRemoved: 1,
+    });
+    prepareAppleRevocationForUserMock.mockResolvedValue({ kind: 'not_applicable' });
+    revokePreparedAppleAuthorizationMock.mockResolvedValue({ appleRevocationStatus: 'not_applicable' });
   });
 
   it('falls back to a legacy insert when auth columns are missing from the database', async () => {
@@ -183,7 +209,8 @@ describe('registerUser', () => {
   it('deletes account-scoped private data, tokens, alerts, relationships, and user row in one transaction', async () => {
     const result = await deleteUserAccount('user-1');
 
-    expect(result).toEqual({ deleted: true });
+    expect(result).toEqual({ deleted: true, appleRevocationStatus: 'not_applicable' });
+    expect(prepareAppleRevocationForUserMock).toHaveBeenCalledWith('user-1');
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
     expect(txMock.authSession.deleteMany).toHaveBeenCalledWith({ where: { userId: 'user-1' } });
     expect(txMock.authIdentity.deleteMany).toHaveBeenCalledWith({ where: { userId: 'user-1' } });
@@ -221,8 +248,9 @@ describe('registerUser', () => {
       },
     });
     expect(txMock.user.deleteMany).toHaveBeenCalledWith({ where: { id: 'user-1' } });
-    expect(anonymizeCommunityDataForDeletedUserMock).toHaveBeenCalledWith('user-1');
+    expect(deleteCommunityDataForDeletedUserMock).toHaveBeenCalledWith('user-1');
     expect(removeUserRelationshipStateMock).toHaveBeenCalledWith('user-1');
+    expect(revokePreparedAppleAuthorizationMock).toHaveBeenCalledWith({ kind: 'not_applicable' });
   });
 
   it('returns USER_NOT_FOUND when an authenticated token no longer maps to a user row', async () => {
@@ -233,6 +261,7 @@ describe('registerUser', () => {
       code: 'USER_NOT_FOUND',
     });
     expect(txMock.authSession.deleteMany).not.toHaveBeenCalled();
-    expect(anonymizeCommunityDataForDeletedUserMock).not.toHaveBeenCalled();
+    expect(deleteCommunityDataForDeletedUserMock).not.toHaveBeenCalled();
+    expect(revokePreparedAppleAuthorizationMock).not.toHaveBeenCalled();
   });
 });
